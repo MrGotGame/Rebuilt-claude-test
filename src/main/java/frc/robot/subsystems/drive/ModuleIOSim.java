@@ -168,7 +168,15 @@ public class ModuleIOSim implements ModuleIO {
    */
   @Override
   public void setBrakeMode(boolean brake) {
-    // TODO: No-op for the DCMotorSim path. If you install maple-sim, forward this to the
-    // SwerveModuleSimulation instead.
+    // IMPLEMENTATION (was TODO: "No-op for the DCMotorSim path. If you install maple-sim, forward
+    // this to the SwerveModuleSimulation instead.")
+    //
+    // Genuinely nothing to do. DCMotorSim integrates an electrical model with no notion of a
+    // neutral mode: with zero applied volts it coasts, and there is no brake behaviour to select.
+    // The method exists so that Drive.setBrakeMode() can be called unconditionally in every runtime
+    // mode rather than being guarded by a check for REAL.
+    //
+    // TODO: if maple-sim is installed, forward this to the SwerveModuleSimulation, which does model
+    // the difference.
   }
 }

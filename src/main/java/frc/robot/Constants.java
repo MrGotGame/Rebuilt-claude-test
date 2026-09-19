@@ -126,7 +126,7 @@ public final class Constants {
     /** The roboRIO bus as a {@link CANBus} object. */
     public static final CANBus kRioCanBus = new CANBus(kRioBus);
 
-    public static final int kPigeonId = 13;
+    public static final int kPigeonId = 1;
     public static final int kIntakePivotId = 20;
     public static final int kIntakeRollerId = 21;
     public static final int kFloorRollerId = 22;

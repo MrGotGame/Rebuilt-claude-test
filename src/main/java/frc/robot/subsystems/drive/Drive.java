@@ -12,11 +12,11 @@ import static edu.wpi.first.units.Units.*;
 import com.pathplanner.lib.config.ModuleConfig;
 import com.pathplanner.lib.config.RobotConfig;
 import com.pathplanner.lib.util.DriveFeedforwards;
+import com.pathplanner.lib.util.swerve.SwerveSetpoint;
+import com.pathplanner.lib.util.swerve.SwerveSetpointGenerator;
 import edu.wpi.first.hal.FRCNetComm.tInstances;
 import edu.wpi.first.hal.FRCNetComm.tResourceType;
 import edu.wpi.first.hal.HAL;
-import edu.wpi.first.math.Matrix;
-import edu.wpi.first.math.estimator.SwerveDrivePoseEstimator;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
@@ -25,17 +25,17 @@ import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.math.kinematics.SwerveModuleState;
-import edu.wpi.first.math.numbers.N1;
-import edu.wpi.first.math.numbers.N3;
 import edu.wpi.first.math.system.plant.DCMotor;
 import edu.wpi.first.wpilibj.Alert;
 import edu.wpi.first.wpilibj.Alert.AlertType;
 import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import edu.wpi.first.wpilibj2.command.sysid.SysIdRoutine;
 import frc.robot.Constants;
 import frc.robot.Constants.Mode;
+import frc.robot.RobotState;
 import frc.robot.generated.TunerConstants;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -58,7 +58,20 @@ public class Drive extends SubsystemBase {
   private static final double ROBOT_MASS_KG = 74.088;
   private static final double ROBOT_MOI = 6.883;
   private static final double WHEEL_COF = 1.2;
-  private static final RobotConfig PP_CONFIG =
+  /**
+   * The one {@link RobotConfig} describing this robot's mass, inertia and module geometry.
+   *
+   * <p>Public and owned by Drive rather than by AutoFactory, despite what the plan's file tree
+   * suggests, for a hard dependency-ordering reason: the swerve setpoint generator below needs this
+   * config in Drive's CONSTRUCTOR, and AutoFactory is not built until after every subsystem exists.
+   * Having AutoFactory own it would mean reading a field that is still null.
+   *
+   * <p>What matters is that exactly one instance exists, which it does -- {@code AutoFactory} must
+   * reference {@code Drive.PP_CONFIG} rather than building a second one. If the setpoint generator
+   * and AutoBuilder ever disagree about mass or wheel friction, the generator silently clips the
+   * speeds PathPlanner asks for and every path quietly undershoots.
+   */
+  public static final RobotConfig PP_CONFIG =
       new RobotConfig(
           ROBOT_MASS_KG,
           ROBOT_MOI,
@@ -89,12 +102,23 @@ public class Drive extends SubsystemBase {
         new SwerveModulePosition(),
         new SwerveModulePosition()
       };
-  // TODO [TIER-3 MIGRATION]: this pose estimator moves out into frc.robot.RobotState. Drive should
-  // FEED RobotState with each odometry sample it drains rather than owning the estimate, so that
-  // vision, the shooting solver and PathPlanner all read one pose. Until that migration is done,
-  // two independent estimates exist and they WILL disagree.
-  private SwerveDrivePoseEstimator poseEstimator =
-      new SwerveDrivePoseEstimator(kinematics, rawGyroRotation, lastModulePositions, Pose2d.kZero);
+  // [TIER-3 MIGRATION DONE] The SwerveDrivePoseEstimator that lived here now lives in
+  // frc.robot.RobotState. Drive FEEDS RobotState one observation per drained odometry sample rather
+  // than owning an estimate of its own, so that vision, the shooting solver and PathPlanner all
+  // read the same pose. Two estimators would have drifted apart from each other silently.
+
+  /**
+   * PathPlanner's slew-limited setpoint generator, and the setpoint it produced last loop.
+   *
+   * <p>The generator enforces module azimuth rate limits and wheel friction limits on every
+   * commanded chassis speed. That removes the wheel slip you otherwise get when the driver slams
+   * the stick over -- and wheel slip corrupts odometry precisely when the robot is being driven
+   * hard and is most likely to be trying to shoot.
+   */
+  private final SwerveSetpointGenerator setpointGenerator;
+
+  private SwerveSetpoint previousSetpoint;
+  private boolean useSetpointGenerator = true;
 
   public Drive(
       GyroIO gyroIO,
@@ -126,6 +150,14 @@ public class Drive extends SubsystemBase {
     //
     // TODO: Drive.PP_CONFIG should also move to AutoFactory.PP_CONFIG, so the setpoint generator
     // and AutoBuilder provably share one RobotConfig instance.
+
+    // Build the setpoint generator and seed it with the robot's current (stationary) state. The
+    // generator is incremental: each call needs the setpoint it produced last time, so it needs a
+    // valid starting point before the first runVelocity call.
+    setpointGenerator =
+        new SwerveSetpointGenerator(PP_CONFIG, Constants.Drivetrain.kMaxModuleAzimuthRadPerSec);
+    previousSetpoint =
+        new SwerveSetpoint(getChassisSpeeds(), getModuleStates(), DriveFeedforwards.zeros(4));
 
     // Configure SysId
     sysId =
@@ -196,14 +228,19 @@ public class Drive extends SubsystemBase {
         rawGyroRotation = rawGyroRotation.plus(new Rotation2d(twist.dtheta));
       }
 
-      // Apply update
-      // TODO [TIER-3 MIGRATION]: replace this line with
-      //   RobotState.getInstance().addOdometryObservation(
-      //       sampleTimestamps[i], rawGyroRotation, modulePositions);
-      // and, after this loop, call RobotState.getInstance().addDriveSpeedsObservation(
-      //     Timer.getFPGATimestamp(), getChassisSpeeds());
-      poseEstimator.updateWithTime(sampleTimestamps[i], rawGyroRotation, modulePositions);
+      // [TIER-3 MIGRATION DONE] Hand the sample to RobotState instead of to a local estimator.
+      // This runs once per DRAINED SAMPLE -- roughly five times per robot loop at 250 Hz odometry,
+      // not once per loop -- which is exactly why RobotState.addOdometryObservation is written to
+      // be cheap.
+      RobotState.getInstance()
+          .addOdometryObservation(sampleTimestamps[i], rawGyroRotation, modulePositions);
     }
+
+    // Publish the measured chassis velocity once per loop (not per odometry sample). RobotState
+    // differentiates this into acceleration, and differentiating a 250 Hz signal would amplify
+    // quantization noise far more than the extra bandwidth is worth.
+    RobotState.getInstance()
+        .addDriveSpeedsObservation(Timer.getFPGATimestamp(), getChassisSpeeds());
 
     // Update gyro alert
     gyroDisconnectedAlert.set(!gyroInputs.connected && Constants.currentMode != Mode.SIM);
@@ -215,14 +252,36 @@ public class Drive extends SubsystemBase {
    * @param speeds Speeds in meters/sec
    */
   public void runVelocity(ChassisSpeeds speeds) {
-    // Calculate module setpoints
-    ChassisSpeeds discreteSpeeds = ChassisSpeeds.discretize(speeds, 0.02);
-    SwerveModuleState[] setpointStates = kinematics.toSwerveModuleStates(discreteSpeeds);
-    SwerveDriveKinematics.desaturateWheelSpeeds(setpointStates, TunerConstants.kSpeedAt12Volts);
+    // [TIER-3 MIGRATION DONE] The template's discretize + toSwerveModuleStates + desaturate path is
+    // kept as the fallback, and PathPlanner's slew-limited generator is layered on top of it.
+    Logger.recordOutput("SwerveChassisSpeeds/Requested", speeds);
 
-    // Log unoptimized setpoints and setpoint speeds
+    SwerveModuleState[] setpointStates;
+    if (useSetpointGenerator) {
+      // The generator is stateful: it takes the setpoint it produced last loop and returns one that
+      // is reachable from it within the module azimuth rate and wheel friction limits. That is what
+      // stops a hard stick reversal from commanding an instantaneous 180-degree azimuth flip, which
+      // the modules cannot do and which makes the wheels scrub.
+      previousSetpoint =
+          setpointGenerator.generateSetpoint(
+              previousSetpoint, speeds, Constants.getLoopPeriodSec());
+      setpointStates = previousSetpoint.moduleStates();
+      Logger.recordOutput("SwerveChassisSpeeds/Setpoints", previousSetpoint.robotRelativeSpeeds());
+    } else {
+      // Bypass path, used by SysId and wheel-radius characterization. Those routines need the
+      // commanded ramp to reach the motors unmodified; slewing it would corrupt the kV/kS fit.
+      ChassisSpeeds discreteSpeeds = ChassisSpeeds.discretize(speeds, Constants.getLoopPeriodSec());
+      setpointStates = kinematics.toSwerveModuleStates(discreteSpeeds);
+      SwerveDriveKinematics.desaturateWheelSpeeds(setpointStates, TunerConstants.kSpeedAt12Volts);
+      Logger.recordOutput("SwerveChassisSpeeds/Setpoints", discreteSpeeds);
+
+      // Keep the generator's memory in step with reality while it is bypassed, so that re-enabling
+      // it mid-match does not slew from a stale setpoint the robot left behind long ago.
+      previousSetpoint = new SwerveSetpoint(speeds, setpointStates, DriveFeedforwards.zeros(4));
+    }
+
     Logger.recordOutput("SwerveStates/Setpoints", setpointStates);
-    Logger.recordOutput("SwerveChassisSpeeds/Setpoints", discreteSpeeds);
+    Logger.recordOutput("Drive/UsingSetpointGenerator", useSetpointGenerator);
 
     // Send setpoints to modules
     for (int i = 0; i < 4; i++) {
@@ -316,27 +375,29 @@ public class Drive extends SubsystemBase {
   /** Returns the current odometry pose. */
   @AutoLogOutput(key = "Odometry/Robot")
   public Pose2d getPose() {
-    return poseEstimator.getEstimatedPosition();
+    // [TIER-3 MIGRATION DONE] Delegates rather than owning an estimate. Kept on Drive (a) because
+    // the @AutoLogOutput key "Odometry/Robot" is what AdvantageScope's field view expects, and
+    // (b) so existing callers keep working. The authoritative copy lives in RobotState.
+    return RobotState.getInstance().getEstimatedPose();
   }
 
   /** Returns the current odometry rotation. */
   public Rotation2d getRotation() {
-    return getPose().getRotation();
+    return RobotState.getInstance().getEstimatedPose().getRotation();
   }
 
   /** Resets the current odometry pose. */
   public void setPose(Pose2d pose) {
-    poseEstimator.resetPosition(rawGyroRotation, getModulePositions(), pose);
+    // [TIER-3 MIGRATION DONE] Forwards to RobotState, which also clears its interpolation buffer
+    // and forces QuestNav to re-seed -- neither of which a local resetPosition() call would do.
+    RobotState.getInstance().resetPose(pose, rawGyroRotation, getModulePositions());
   }
 
-  /** Adds a new timestamped vision measurement. */
-  public void addVisionMeasurement(
-      Pose2d visionRobotPoseMeters,
-      double timestampSeconds,
-      Matrix<N3, N1> visionMeasurementStdDevs) {
-    poseEstimator.addVisionMeasurement(
-        visionRobotPoseMeters, timestampSeconds, visionMeasurementStdDevs);
-  }
+  // [TIER-3 MIGRATION DONE] addVisionMeasurement() was REMOVED from Drive rather than left as a
+  // delegate. Vision now hands observations straight to RobotState.addVisionObservation(), which
+  // applies the rejection rules and per-source covariance that a bare passthrough here would skip.
+  // Deleting it means a stale caller fails to compile and gets pointed at the right entry point,
+  // instead of silently feeding an estimator that no longer drives anything.
 
   /** Returns the maximum linear speed in meters per sec. */
   public double getMaxLinearSpeedMetersPerSec() {
@@ -372,8 +433,26 @@ public class Drive extends SubsystemBase {
    *     <p><b>Outputs:</b> commands all four modules.
    */
   public void runVelocity(ChassisSpeeds speeds, DriveFeedforwards feedforwards) {
-    // TODO: Pass the per-module torque-current feedforwards through to Module.runSetpoint.
-    // TODO: VERIFY the DriveFeedforwards accessor names against PathplannerLib 2026.1.2.
+    // IMPLEMENTATION (was TODO: "Pass the per-module torque-current feedforwards through to
+    // Module.runSetpoint. VERIFY the DriveFeedforwards accessor names against PathplannerLib
+    // 2026.1.2.")
+    //
+    // The speeds are followed through the normal path, and the feedforwards are logged.
+    //
+    // The per-module torque-current feedforward is NOT yet plumbed into the modules, and that is a
+    // deliberate, bounded decision rather than an oversight. TunerConstants currently generates
+    // DriveMotorClosedLoopOutput = Voltage, so the drive Talons run VelocityVoltage requests whose
+    // feedforward term is in VOLTS. PathPlanner supplies AMPS. Feeding amps into a volts field
+    // would be wrong by roughly an order of magnitude and would present as the drivetrain
+    // over-driving every path.
+    //
+    // TODO: to enable it, switch DriveMotorClosedLoopOutput to TorqueCurrentFOC in Tuner X, then
+    // add ModuleIO.setDriveVelocity(double velocityRadPerSec, double feedforwardAmps) as a default
+    // method that ignores the feedforward, override it in ModuleIOTalonFX to populate
+    // velocityTorqueCurrentRequest.withFeedForward(amps), and call it from a new
+    // Module.runSetpoint(state, amps) overload.
+    Logger.recordOutput("Drive/PathPlannerFeedforwardsApplied", false);
+    runVelocity(speeds);
   }
 
   /**
@@ -384,8 +463,15 @@ public class Drive extends SubsystemBase {
    *     Robot.disabledPeriodic} after the coast delay, so the robot can be pushed off the field.
    */
   public void setBrakeMode(boolean brake) {
-    // TODO: Loop the modules calling a new Module.setBrakeMode(boolean), which forwards to
-    // ModuleIO.setBrakeMode.
+    // IMPLEMENTATION (was TODO: "Loop the modules calling a new Module.setBrakeMode(boolean), which
+    // forwards to ModuleIO.setBrakeMode.")
+    //
+    // Unconditional across runtime modes: ModuleIOSim implements setBrakeMode as a documented
+    // no-op, so callers never have to branch on Constants.currentMode.
+    for (var module : modules) {
+      module.setBrakeMode(brake);
+    }
+    Logger.recordOutput("Drive/BrakeMode", brake);
   }
 
   /**
@@ -397,7 +483,12 @@ public class Drive extends SubsystemBase {
    *     ramp and corrupt the fit.
    */
   public void setUseSetpointGenerator(boolean use) {
-    // TODO: Store the flag and honour it in runVelocity.
+    // IMPLEMENTATION (was TODO: "Store the flag and honour it in runVelocity.")
+    //
+    // runVelocity reads this every call. When it is switched back on, runVelocity's bypass branch
+    // has been keeping previousSetpoint in step with the real module states, so the generator
+    // resumes from where the robot actually is rather than slewing from a stale setpoint.
+    this.useSetpointGenerator = use;
   }
 
   /**
@@ -428,8 +519,16 @@ public class Drive extends SubsystemBase {
    */
   @AutoLogOutput(key = "Drive/TotalCurrentAmps")
   public double getTotalCurrentAmps() {
-    // TODO: Sum every module's drive and turn stator current from its logged inputs. You will need
-    // a small accessor on Module, since the inputs struct is private to it.
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "Sum every module's drive and turn stator current from its logged
+    // inputs. You will need a small accessor on Module, since the inputs struct is private to it.")
+    //
+    // Module.getTotalCurrentAmps() is that accessor. Summing stator current across all eight
+    // drivetrain motors gives PowerBudget the number it needs to decide whether the drivetrain is
+    // what is draining the battery, or whether to look at the mechanisms instead.
+    double total = 0.0;
+    for (var module : modules) {
+      total += module.getTotalCurrentAmps();
+    }
+    return total;
   }
 }

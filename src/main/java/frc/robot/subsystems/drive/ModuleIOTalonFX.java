@@ -12,6 +12,8 @@ import static frc.robot.util.PhoenixUtil.*;
 import com.ctre.phoenix6.BaseStatusSignal;
 import com.ctre.phoenix6.StatusSignal;
 import com.ctre.phoenix6.configs.CANcoderConfiguration;
+import com.ctre.phoenix6.configs.CurrentLimitsConfigs;
+import com.ctre.phoenix6.configs.MotorOutputConfigs;
 import com.ctre.phoenix6.configs.TalonFXConfiguration;
 import com.ctre.phoenix6.controls.PositionTorqueCurrentFOC;
 import com.ctre.phoenix6.controls.PositionVoltage;
@@ -35,6 +37,8 @@ import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.units.measure.Current;
 import edu.wpi.first.units.measure.Voltage;
 import frc.robot.generated.TunerConstants;
+import frc.robot.util.LoggedTunableGains;
+import frc.robot.util.PowerBudget;
 import java.util.Queue;
 
 /**
@@ -90,6 +94,41 @@ public class ModuleIOTalonFX implements ModuleIO {
       new Debouncer(0.5, Debouncer.DebounceType.kFalling);
   private final Debouncer turnEncoderConnectedDebounce =
       new Debouncer(0.5, Debouncer.DebounceType.kFalling);
+
+  /**
+   * Live-tunable drive and steer gains, shared by all four modules.
+   *
+   * <p>Deliberately {@code static}: a swerve drivetrain wants one gain set applied to every module,
+   * so four independent copies would be four chances to tune three of them and forget the fourth.
+   * Each module still passes its own {@code hashCode()} as the change-detection id, so each one
+   * independently notices the change and pushes it to its own Talon.
+   *
+   * <p>Defaults are seeded from the CTRE-generated TunerConstants so that, with tuning mode off,
+   * behaviour is byte-identical to the stock template.
+   */
+  private static final LoggedTunableGains driveGains =
+      new LoggedTunableGains(
+          "Drive/DriveMotor",
+          TunerConstants.FrontLeft.DriveMotorGains.kP,
+          TunerConstants.FrontLeft.DriveMotorGains.kI,
+          TunerConstants.FrontLeft.DriveMotorGains.kD,
+          TunerConstants.FrontLeft.DriveMotorGains.kS,
+          TunerConstants.FrontLeft.DriveMotorGains.kV,
+          TunerConstants.FrontLeft.DriveMotorGains.kA);
+
+  /** Live-tunable steer gains, shared by all four modules. See {@link #driveGains}. */
+  private static final LoggedTunableGains turnGains =
+      new LoggedTunableGains(
+          "Drive/SteerMotor",
+          TunerConstants.FrontLeft.SteerMotorGains.kP,
+          TunerConstants.FrontLeft.SteerMotorGains.kI,
+          TunerConstants.FrontLeft.SteerMotorGains.kD,
+          TunerConstants.FrontLeft.SteerMotorGains.kS,
+          TunerConstants.FrontLeft.SteerMotorGains.kV,
+          TunerConstants.FrontLeft.SteerMotorGains.kA);
+
+  /** Last current-limit scalar actually pushed to hardware, for the 5% change guard. */
+  private double lastAppliedCurrentScalar = 1.0;
 
   public ModuleIOTalonFX(
       SwerveModuleConstants<TalonFXConfiguration, TalonFXConfiguration, CANcoderConfiguration>
@@ -227,6 +266,12 @@ public class ModuleIOTalonFX implements ModuleIO {
     timestampQueue.clear();
     drivePositionQueue.clear();
     turnPositionQueue.clear();
+
+    // Tier-3 hooks. Both are no-ops on the overwhelming majority of loops -- they only touch the
+    // CAN bus when a tunable or the power budget has actually moved -- so running them from the
+    // per-loop input path costs effectively nothing.
+    updateTunableGains();
+    updateCurrentLimit();
   }
 
   /**
@@ -297,10 +342,34 @@ public class ModuleIOTalonFX implements ModuleIO {
    */
   @Override
   public void setBrakeMode(boolean brake) {
-    // TODO: Build a MotorOutputConfigs carrying NeutralModeValue.Brake or Coast and apply it to
-    // BOTH driveTalon and turnTalon via PhoenixUtil.tryUntilOk.
-    // Do NOT re-apply the whole TalonFXConfiguration here -- doing so drops the Slot0 gains for a
-    // loop, and the module will visibly lurch every time brake mode is toggled.
+    // IMPLEMENTATION (was TODO: "Build a MotorOutputConfigs with NeutralModeValue.Brake/Coast and
+    // apply it to both driveTalon and turnTalon via tryUntilOk. Do NOT re-apply the whole
+    // TalonFXConfiguration here; that drops the Slot0 gains for a loop.")
+    //
+    // A bare MotorOutputConfigs is applied rather than a full TalonFXConfiguration, exactly as the
+    // TODO warns. Applying a whole configuration object overwrites EVERY config group, including
+    // Slot0 -- so for one loop the module would run with default gains and visibly lurch. Phoenix
+    // merges a partial config group in place, leaving everything else untouched.
+    NeutralModeValue mode = brake ? NeutralModeValue.Brake : NeutralModeValue.Coast;
+
+    // Inversion must be carried along. MotorOutputConfigs is a whole config GROUP, so applying one
+    // that only sets NeutralMode would reset Inverted to its default and flip the module.
+    var driveOut = new MotorOutputConfigs();
+    driveOut.NeutralMode = mode;
+    driveOut.Inverted =
+        constants.DriveMotorInverted
+            ? InvertedValue.Clockwise_Positive
+            : InvertedValue.CounterClockwise_Positive;
+
+    var turnOut = new MotorOutputConfigs();
+    turnOut.NeutralMode = mode;
+    turnOut.Inverted =
+        constants.SteerMotorInverted
+            ? InvertedValue.Clockwise_Positive
+            : InvertedValue.CounterClockwise_Positive;
+
+    tryUntilOk(5, () -> driveTalon.getConfigurator().apply(driveOut, 0.25));
+    tryUntilOk(5, () -> turnTalon.getConfigurator().apply(turnOut, 0.25));
   }
 
   /**
@@ -309,9 +378,16 @@ public class ModuleIOTalonFX implements ModuleIO {
    * <p><b>Outputs:</b> may reconfigure both Talons. Call at the end of {@code updateInputs}.
    */
   private void updateTunableGains() {
-    // TODO: driveGains.ifChanged(hashCode(), cfg -> PhoenixUtil.tryUntilOk(5,
-    //     () -> driveTalon.getConfigurator().apply(cfg, 0.25)));
-    // and the same for the steer gains. You will need to add two LoggedTunableGains fields.
+    // IMPLEMENTATION (was TODO: "driveGains.ifChanged(hashCode(), cfg -> tryUntilOk(5, () ->
+    // driveTalon.getConfigurator().apply(cfg, 0.25))) and the same for steer.")
+    //
+    // hashCode() identifies THIS module to the shared tunable. Because LoggedTunableNumber reports
+    // a change on the first call for a given id, all four modules push their gains once on the
+    // first loop after boot and then stay quiet until someone edits a value.
+    driveGains.ifChanged(
+        hashCode(), cfg -> tryUntilOk(5, () -> driveTalon.getConfigurator().apply(cfg, 0.25)));
+    turnGains.ifChanged(
+        hashCode(), cfg -> tryUntilOk(5, () -> turnTalon.getConfigurator().apply(cfg, 0.25)));
   }
 
   /**
@@ -320,9 +396,27 @@ public class ModuleIOTalonFX implements ModuleIO {
    * <p><b>Outputs:</b> may reconfigure both Talons.
    */
   private void updateCurrentLimit() {
-    // TODO: double scalar = PowerBudget.getInstance().getScalar(Priority.CRITICAL).
-    // Only when it differs from the last applied value by more than about 5%, apply a
-    // CurrentLimitsConfigs with StatorCurrentLimit = constants.SlipCurrent * scalar.
-    // The 5% guard matters: reapplying config every loop floods the CAN bus.
+    // IMPLEMENTATION (was TODO: "double scalar = PowerBudget.getInstance().getScalar(
+    // Priority.CRITICAL). If it differs from the last applied value by >5%, apply a
+    // CurrentLimitsConfigs with StatorCurrentLimit = constants.SlipCurrent * scalar.")
+    //
+    // The drivetrain is CRITICAL priority, so in practice this scalar stays at 1.0 and this method
+    // never touches the bus -- the drivetrain is the last thing to be throttled, because a robot
+    // that cannot drive cannot even leave the field. The plumbing exists so that if the budget ever
+    // does decide to protect the battery, the limit follows.
+    double scalar = PowerBudget.getInstance().getScalar(PowerBudget.Priority.CRITICAL);
+
+    // The 5% deadband is the whole point. Without it this would re-apply a configuration every
+    // single loop at 50 Hz on four modules -- 200 config frames per second -- which measurably
+    // degrades bus utilisation and shows up as erratic odometry.
+    if (Math.abs(scalar - lastAppliedCurrentScalar) < 0.05) {
+      return;
+    }
+    lastAppliedCurrentScalar = scalar;
+
+    var limits = new CurrentLimitsConfigs();
+    limits.StatorCurrentLimit = constants.SlipCurrent * scalar;
+    limits.StatorCurrentLimitEnable = true;
+    tryUntilOk(5, () -> driveTalon.getConfigurator().apply(limits, 0.25));
   }
 }

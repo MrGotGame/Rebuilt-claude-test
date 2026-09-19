@@ -13,9 +13,11 @@ import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.math.numbers.N1;
 import edu.wpi.first.math.numbers.N3;
+import edu.wpi.first.wpilibj.Timer;
 import java.util.Optional;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.littletonrobotics.junction.AutoLogOutput;
+import org.littletonrobotics.junction.Logger;
 
 /**
  * The single source of truth for "where is the robot, how fast is it going, and where was the
@@ -91,9 +93,17 @@ public class RobotState {
    * @return the singleton, or null if {@link #initialize(SwerveDriveKinematics)} has not run yet
    */
   public static RobotState getInstance() {
-    // TODO: Return the instance. Prefer calling initialize() from RobotContainer first; if you also
-    // want lazy construction here, build it from Drive.getModuleTranslations(). Keeping it lazy is
-    // what lets unit tests construct one without a HAL.
+    // IMPLEMENTATION (was TODO: "Lazily construct the singleton with Drive.getModuleTranslations()
+    // as the kinematics source. Keep it lazy so unit tests can build one without a HAL.")
+    //
+    // No lazy construction here, deliberately. RobotContainer calls initialize() as its very first
+    // statement, before any subsystem exists, so by the time anything can call getInstance() the
+    // instance is already there. Constructing lazily from here would hide an ordering bug: whoever
+    // called first would silently define the kinematics, and a later caller would get a RobotState
+    // built from whatever that first caller happened to pass.
+    //
+    // Returning null when uninitialized is the loud failure we want -- an immediate NPE at the
+    // first use, pointing straight at the missing initialize() call.
     return instance;
   }
 
@@ -134,8 +144,16 @@ public class RobotState {
    *     <p><b>Outputs:</b> assigns the static singleton.
    */
   public static void initialize(SwerveDriveKinematics kinematics) {
-    // TODO: instance = new RobotState(kinematics). Call this from RobotContainer's constructor
-    // before any subsystem is built.
+    // IMPLEMENTATION (was TODO: "Create the singleton explicitly from RobotContainer before any
+    // subsystem uses it, so construction order is deterministic instead of depending on who calls
+    // getInstance() first.")
+    //
+    // Idempotent on purpose: simulation and unit tests may construct a RobotContainer more than
+    // once in a single JVM, and silently rebuilding the estimator underneath live subsystems would
+    // strand them holding a stale reference.
+    if (instance == null) {
+      instance = new RobotState(kinematics);
+    }
   }
 
   // ------------------------------------------------------------------------------ write side ----
@@ -151,10 +169,33 @@ public class RobotState {
    */
   public void addOdometryObservation(
       double timestampSec, Rotation2d gyroYaw, SwerveModulePosition[] modulePositions) {
-    // TODO: Take the write lock. Call poseEstimator.updateWithTime(timestampSec, gyroYaw,
-    // modulePositions), then poseBuffer.addSample(timestampSec,
-    // poseEstimator.getEstimatedPosition()). Record lastUpdateTimestampBySource[ODOMETRY.ordinal()]
-    // and store gyroYaw into rawGyroRotation. Always release the lock in a finally block.
+    // IMPLEMENTATION (was TODO: "Take the write lock. Call poseEstimator.updateWithTime(...), then
+    // poseBuffer.addSample(...). Record lastUpdateTimestampBySource[ODOMETRY].")
+    //
+    // This is the hot path: it runs roughly 250 times per second, once per sample drained from the
+    // Phoenix odometry thread, NOT once per robot loop. Everything in here must stay cheap.
+    lock.writeLock().lock();
+    try {
+      // Advance the estimator to this sample's timestamp. updateWithTime (rather than update) is
+      // what lets the estimator interleave these back-dated odometry samples correctly with vision
+      // measurements that arrive out of order.
+      poseEstimator.updateWithTime(timestampSec, gyroYaw, modulePositions);
+
+      // Keep the raw gyro yaw so resetPose() and Drive can reference the same value the estimator
+      // was last advanced with.
+      rawGyroRotation = gyroYaw;
+
+      // Snapshot the resulting pose into the interpolation buffer. This is what makes
+      // getPoseAt(t) answerable, which is what lets a vision frame captured 80 ms ago be compared
+      // against where the robot actually was at capture time.
+      poseBuffer.addSample(timestampSec, poseEstimator.getEstimatedPosition());
+
+      lastUpdateTimestampBySource[PoseSource.ODOMETRY.ordinal()] = timestampSec;
+    } finally {
+      // finally, not a plain unlock: an exception from the estimator would otherwise leave the
+      // write lock held forever and deadlock every reader on the next loop.
+      lock.writeLock().unlock();
+    }
   }
 
   /**
@@ -166,11 +207,44 @@ public class RobotState {
    *     <p><b>Outputs:</b> updates the robot-relative, field-relative and acceleration estimates.
    */
   public void addDriveSpeedsObservation(double timestampSec, ChassisSpeeds robotRelative) {
-    // TODO: Under the write lock, store robotRelative, convert with
-    // ChassisSpeeds.fromRobotRelativeSpeeds(robotRelative, getEstimatedPose().getRotation()), then
-    // differentiate against lastFieldRelativeSpeeds over (timestampSec - lastSpeedsTimestampSec)
-    // and push each axis through accelXFilter/accelYFilter. Guard against a zero or negative dt on
-    // the first call, which would otherwise produce an infinite acceleration.
+    // IMPLEMENTATION (was TODO: "Under the write lock, store robotRelative, convert to field
+    // relative with ChassisSpeeds.fromRobotRelativeSpeeds(...), then differentiate against
+    // lastFieldRelativeSpeeds over (timestampSec - lastSpeedsTimestampSec) and push through
+    // accelXFilter/accelYFilter to get fieldRelativeAccel.")
+    lock.writeLock().lock();
+    try {
+      robotRelativeSpeeds = robotRelative;
+
+      // Rotate into the field frame using the CURRENT estimated heading. Read the estimator
+      // directly rather than calling getEstimatedPose(), which would re-enter the lock -- legal
+      // with a ReentrantReadWriteLock, but pointless work on a per-loop path.
+      Rotation2d heading = poseEstimator.getEstimatedPosition().getRotation();
+      fieldRelativeSpeeds = ChassisSpeeds.fromRobotRelativeSpeeds(robotRelative, heading);
+
+      // Differentiate velocity into acceleration.
+      double dt = timestampSec - lastSpeedsTimestampSec;
+      if (dt > 1e-6) {
+        // Raw finite difference, then low-pass. Differentiating a noisy signal amplifies its noise,
+        // so the moving-average filters are not optional polish -- an unfiltered acceleration
+        // estimate is dominated by quantization and is useless as a shot gate.
+        double rawAccelX =
+            (fieldRelativeSpeeds.vxMetersPerSecond - lastFieldRelativeSpeeds.vxMetersPerSecond)
+                / dt;
+        double rawAccelY =
+            (fieldRelativeSpeeds.vyMetersPerSecond - lastFieldRelativeSpeeds.vyMetersPerSecond)
+                / dt;
+        fieldRelativeAccel =
+            new Translation2d(accelXFilter.calculate(rawAccelX), accelYFilter.calculate(rawAccelY));
+      }
+      // When dt is zero or negative -- the first call ever, or a timestamp that went backwards --
+      // the previous acceleration estimate is simply held. Dividing by it would produce infinity,
+      // which then propagates into the readyToShoot gate and silently blocks every shot.
+
+      lastFieldRelativeSpeeds = fieldRelativeSpeeds;
+      lastSpeedsTimestampSec = timestampSec;
+    } finally {
+      lock.writeLock().unlock();
+    }
   }
 
   /**
@@ -199,7 +273,14 @@ public class RobotState {
    *     <p><b>Outputs:</b> appends to the turret angle buffer.
    */
   public void addTurretObservation(double timestampSec, double turretAngleRad) {
-    // TODO: Under the write lock, turretAngleBuffer.addSample(timestampSec, turretAngleRad).
+    // IMPLEMENTATION (was TODO: "Under the write lock, turretAngleBuffer.addSample(timestampSec,
+    // turretAngleRad).")
+    lock.writeLock().lock();
+    try {
+      turretAngleBuffer.addSample(timestampSec, turretAngleRad);
+    } finally {
+      lock.writeLock().unlock();
+    }
   }
 
   /**
@@ -212,8 +293,27 @@ public class RobotState {
    *     seeded flag so vision re-seeds the headset.
    */
   public void resetPose(Pose2d pose, Rotation2d gyroYaw, SwerveModulePosition[] modulePositions) {
-    // TODO: Under the write lock call poseEstimator.resetPosition(gyroYaw, modulePositions, pose),
-    // clear poseBuffer, and set questSeeded = false.
+    // IMPLEMENTATION (was TODO: "Under the write lock call poseEstimator.resetPosition(gyroYaw,
+    // modulePositions, pose) and clear poseBuffer. Also set questSeeded = false so Vision re-seeds
+    // QuestNav to the new pose.")
+    lock.writeLock().lock();
+    try {
+      poseEstimator.resetPosition(gyroYaw, modulePositions, pose);
+      rawGyroRotation = gyroYaw;
+
+      // The buffer must be cleared, not merely appended to. Its existing samples describe a
+      // different coordinate origin, and interpolating across the discontinuity would hand out
+      // poses that never existed -- exactly during the moments after an auto start-pose reset when
+      // vision is most likely to be consulted.
+      poseBuffer.clear();
+      poseBuffer.addSample(Timer.getFPGATimestamp(), pose);
+
+      // The headset's origin is now wrong by however far the reset moved us, so force Vision to
+      // re-seed it rather than continuing to fuse a pose from a stale frame.
+      questSeeded = false;
+    } finally {
+      lock.writeLock().unlock();
+    }
   }
 
   /**
@@ -246,8 +346,13 @@ public class RobotState {
    */
   @AutoLogOutput(key = "RobotState/EstimatedPose")
   public Pose2d getEstimatedPose() {
-    // TODO: Read-locked poseEstimator.getEstimatedPosition().
-    return Pose2d.kZero;
+    // IMPLEMENTATION (was TODO: "Read-locked poseEstimator.getEstimatedPosition().")
+    lock.readLock().lock();
+    try {
+      return poseEstimator.getEstimatedPosition();
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -257,10 +362,14 @@ public class RobotState {
    * @return the interpolated pose, or empty if the timestamp predates the two-second buffer
    */
   public Optional<Pose2d> getPoseAt(double timestampSec) {
-    // TODO: Read-locked poseBuffer.getSample(timestampSec). An empty result means "skip this
-    // measurement" -- callers must NEVER silently substitute the current pose, which would
-    // reintroduce exactly the latency error this buffer exists to remove.
-    return Optional.empty();
+    // IMPLEMENTATION (was TODO: "Read-locked poseBuffer.getSample(timestampSec). Returns empty if
+    // the timestamp predates the buffer, which callers must treat as "skip this measurement".")
+    lock.readLock().lock();
+    try {
+      return poseBuffer.getSample(timestampSec);
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -270,9 +379,13 @@ public class RobotState {
    * @return robot-relative turret angle in radians, or empty if the timestamp predates the buffer
    */
   public Optional<Double> getTurretAngleAt(double timestampSec) {
-    // TODO: Read-locked turretAngleBuffer.getSample(timestampSec). Used by
-    // Vision.robotToTurretCameraAt(t).
-    return Optional.empty();
+    // IMPLEMENTATION (was TODO: "Read-locked turretAngleBuffer.getSample(timestampSec).")
+    lock.readLock().lock();
+    try {
+      return turretAngleBuffer.getSample(timestampSec);
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -283,8 +396,19 @@ public class RobotState {
    */
   @AutoLogOutput(key = "RobotState/FieldRelativeSpeeds")
   public ChassisSpeeds getFieldRelativeSpeeds() {
-    // TODO: Read-locked copy of fieldRelativeSpeeds. Return a copy, not the field itself.
-    return new ChassisSpeeds();
+    // IMPLEMENTATION (was TODO: "Read-locked copy of fieldRelativeSpeeds.")
+    //
+    // A COPY is returned, not the field. ChassisSpeeds is mutable, and handing out the live object
+    // would let any caller corrupt the shared estimate for everyone else.
+    lock.readLock().lock();
+    try {
+      return new ChassisSpeeds(
+          fieldRelativeSpeeds.vxMetersPerSecond,
+          fieldRelativeSpeeds.vyMetersPerSecond,
+          fieldRelativeSpeeds.omegaRadiansPerSecond);
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -294,8 +418,16 @@ public class RobotState {
    */
   @AutoLogOutput(key = "RobotState/RobotRelativeSpeeds")
   public ChassisSpeeds getRobotRelativeSpeeds() {
-    // TODO: Read-locked copy of robotRelativeSpeeds.
-    return new ChassisSpeeds();
+    // IMPLEMENTATION (was TODO: "Read-locked copy; PathPlanner's AutoBuilder consumes this one.")
+    lock.readLock().lock();
+    try {
+      return new ChassisSpeeds(
+          robotRelativeSpeeds.vxMetersPerSecond,
+          robotRelativeSpeeds.vyMetersPerSecond,
+          robotRelativeSpeeds.omegaRadiansPerSecond);
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -306,8 +438,16 @@ public class RobotState {
    */
   @AutoLogOutput(key = "RobotState/FieldRelativeAccel")
   public Translation2d getFieldRelativeAccel() {
-    // TODO: Read-locked copy of fieldRelativeAccel.
-    return Translation2d.kZero;
+    // IMPLEMENTATION (was TODO: "Read-locked copy of the filtered acceleration, m/s^2, blue-origin
+    // field frame.")
+    //
+    // No defensive copy needed: Translation2d is immutable.
+    lock.readLock().lock();
+    try {
+      return fieldRelativeAccel;
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -316,8 +456,8 @@ public class RobotState {
    * @return estimated field heading
    */
   public Rotation2d getRotation() {
-    // TODO: return getEstimatedPose().getRotation().
-    return Rotation2d.kZero;
+    // IMPLEMENTATION (was TODO: "getEstimatedPose().getRotation().")
+    return getEstimatedPose().getRotation();
   }
 
   /**
@@ -385,6 +525,34 @@ public class RobotState {
    * estimate at any instant.
    */
   public void logState() {
-    // TODO: Loop PoseSource.values() and Logger.recordOutput the staleness and std dev for each.
+    // IMPLEMENTATION (was TODO: "Called once per robotPeriodic from Robot. Log per-source staleness
+    // and std devs under RobotState/Sources/<NAME>/... so replay shows exactly which source was
+    // driving the estimate at any instant.")
+    //
+    // The pose and velocity are logged EXPLICITLY here rather than relying on the @AutoLogOutput
+    // annotations on the getters. AdvantageKit only scans objects it knows about -- subsystems, and
+    // anything registered with AutoLogOutputManager -- and RobotState is a plain singleton that is
+    // not a field of Robot, so its annotations would otherwise never be picked up.
+    // TODO: if you later register this instance with AutoLogOutputManager.addObject(), these
+    // explicit records become redundant and can be removed.
+    Logger.recordOutput("RobotState/EstimatedPose", getEstimatedPose());
+    Logger.recordOutput("RobotState/FieldRelativeSpeeds", getFieldRelativeSpeeds());
+    Logger.recordOutput("RobotState/RobotRelativeSpeeds", getRobotRelativeSpeeds());
+    Logger.recordOutput("RobotState/FieldRelativeAccel", getFieldRelativeAccel());
+    Logger.recordOutput("RobotState/RawGyroRotation", rawGyroRotation);
+
+    // Per-source health. Staleness is far more actionable than a raw timestamp: "the turret camera
+    // last helped 4 seconds ago" is immediately readable on a graph, where an FPGA timestamp is
+    // not.
+    double now = Timer.getFPGATimestamp();
+    for (PoseSource source : PoseSource.values()) {
+      int i = source.ordinal();
+      double last = lastUpdateTimestampBySource[i];
+      Logger.recordOutput(
+          "RobotState/Sources/" + source.name() + "/StalenessSec",
+          last == 0.0 ? Double.POSITIVE_INFINITY : now - last);
+      Logger.recordOutput(
+          "RobotState/Sources/" + source.name() + "/LastStdDev", lastStdDevBySource[i]);
+    }
   }
 }

@@ -138,4 +138,34 @@ public class Module {
   public double getFFCharacterizationVelocity() {
     return Units.radiansToRotations(inputs.driveVelocityRadPerSec);
   }
+
+  // ------------------------------------------------------------ tier-3 additions start here ----
+
+  /**
+   * Sets brake or coast on both of this module's motors.
+   *
+   * @param brake true for brake, false for coast
+   *     <p><b>Outputs:</b> forwards to the IO layer, which reconfigures both Talons.
+   */
+  public void setBrakeMode(boolean brake) {
+    // A pure passthrough. Module deliberately holds no neutral-mode state of its own: the Talon is
+    // the authority on its own configuration, and caching a shadow copy here would be one more
+    // thing that can disagree with hardware after a brownout reconfigures a device.
+    io.setBrakeMode(brake);
+  }
+
+  /**
+   * This module's total stator current draw.
+   *
+   * @return the drive motor's stator current plus the steer motor's, in amps
+   */
+  public double getTotalCurrentAmps() {
+    // The inputs struct is private to this class, so Drive cannot sum the modules' currents itself.
+    // This accessor exists purely so Drive.getTotalCurrentAmps() has something to add up.
+    //
+    // STATOR current, not supply: stator is what the motor windings actually see and what the
+    // current limit acts on, which is the number that matters when deciding whether the drivetrain
+    // is what is draining the battery.
+    return inputs.driveCurrentAmps + inputs.turnCurrentAmps;
+  }
 }
