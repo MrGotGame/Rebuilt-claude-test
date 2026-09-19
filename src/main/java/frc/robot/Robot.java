@@ -10,6 +10,7 @@ package frc.robot;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
+import frc.robot.util.PhoenixUtil;
 import org.littletonrobotics.junction.LogFileUtil;
 import org.littletonrobotics.junction.LoggedRobot;
 import org.littletonrobotics.junction.Logger;
@@ -98,6 +99,12 @@ public class Robot extends LoggedRobot {
     // TODO: Log loop duration under "LoopTimeMs" from Logger.getRealTimestamp() deltas, and
     // Runtime.getRuntime().freeMemory() under "MemoryFreeMB". Loop-overrun evidence is the only way
     // to settle "did we miss that shot because the code stalled".
+    // Refresh every signal registered with the shared batch BEFORE the scheduler runs, so that
+    // subsystem periodics all see measurements from the same instant. Without this call the
+    // signals that IO layers registered -- currently the Pigeon2's pitch, roll and accelerometer --
+    // are never refreshed and read zero forever, which looks exactly like a dead sensor.
+    PhoenixUtil.refreshAll();
+
     CommandScheduler.getInstance().run();
   }
 

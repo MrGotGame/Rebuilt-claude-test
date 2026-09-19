@@ -4,9 +4,12 @@ import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Rotation2d;
 import frc.robot.autos.AutoFactory;
 import frc.robot.autos.AutoRoutines;
 import frc.robot.autos.AutoSelector;
+import frc.robot.commands.DriveCommands;
 import frc.robot.generated.TunerConstants;
 import frc.robot.subsystems.drive.Drive;
 import frc.robot.subsystems.drive.GyroIO;
@@ -178,27 +181,76 @@ public class RobotContainer {
    * <p><b>Outputs:</b> sets the drivetrain default command and registers all button triggers.
    */
   private void configureButtonBindings() {
-    // TODO: drive.setDefaultCommand(DriveCommands.joystickDriveWithOverride(drive,
-    //     () -> -driver.getLeftY(), () -> -driver.getLeftX(), () -> -driver.getRightX(),
-    //     superstructure::getRequestedDriveHeading));
+    // ---------------------------------------------------------------- driver: base driving ----
+
+    // IMPLEMENTATION (was TODO: "drive.setDefaultCommand(DriveCommands.joystickDrive(...)) reading
+    // RobotState for heading.")
     //
-    // Driver:
+    // The default command runs whenever nothing else has claimed the drivetrain, which is what
+    // makes the robot driveable the instant it is enabled in teleop.
+    //
+    // SIGN CONVENTION -- all three axes are negated, and each for its own reason:
+    //   getLeftY()  An Xbox stick reports NEGATIVE when pushed forward, while WPILib field
+    //               coordinates put +X forward. Negating maps "stick forward" to "robot forward".
+    //   getLeftX()  The stick reports positive to the right; WPILib puts +Y to the LEFT.
+    //   getRightX() The stick reports positive to the right, but rotation is
+    //               counter-clockwise-positive, so pushing right must produce negative omega.
+    // Getting any one of these backwards produces a robot that drives mirrored on that axis, which
+    // is obvious on a practice field and very confusing if only one axis is wrong.
+    //
+    // joystickDrive is used rather than joystickDriveWithOverride deliberately: it is the
+    // template's proven implementation, and the override path is inert anyway while
+    // Superstructure.getRequestedDriveHeading() still returns Optional.empty(). Switching to the
+    // override version is a one-line change once the superstructure is implemented:
+    //
+    //   DriveCommands.joystickDriveWithOverride(
+    //       drive, () -> -driver.getLeftY(), () -> -driver.getLeftX(), () -> -driver.getRightX(),
+    //       superstructure::getRequestedDriveHeading)
+    drive.setDefaultCommand(
+        DriveCommands.joystickDrive(
+            drive,
+            () -> -driver.getLeftY(),
+            () -> -driver.getLeftX(),
+            () -> -driver.getRightX()));
+
+    // Reset the field-relative heading to zero. Held on a button rather than automatic because it
+    // redefines which way "forward" means for the driver, and .ignoringDisable(true) lets the team
+    // square the robot up on the field before the match starts.
+    driver
+        .b()
+        .onTrue(
+            Commands.runOnce(
+                    () ->
+                        RobotState.getInstance()
+                            .resetPose(
+                                new Pose2d(
+                                    RobotState.getInstance().getEstimatedPose().getTranslation(),
+                                    Rotation2d.kZero),
+                                drive.getRawGyroRotation(),
+                                drive.getModulePositions()))
+                .ignoringDisable(true));
+
+    // Cross the wheels into an X to resist being pushed. Bound to X for the mnemonic.
+    driver.x().onTrue(Commands.runOnce(drive::stopWithX, drive));
+
+    // ------------------------------------------------------- not yet bound: awaiting mechanisms ----
+    //
+    // The bindings below are intentionally NOT wired yet, because every one of them routes through
+    // Superstructure, whose state machine is still stubbed. Binding them now would give a driver
+    // buttons that silently do nothing.
+    //
     //   rightBumper   whileTrue -> SCORE_ON_MOVE,      onFalse -> DEFAULT
     //   rightTrigger  whileTrue -> INTAKE,             onFalse -> DEFAULT
     //   leftBumper    whileTrue -> SCORE_STATIONARY,   onFalse -> DEFAULT
     //   leftTrigger   whileTrue -> PASS,               onFalse -> DEFAULT
-    //   X             whileTrue -> EJECT
     //   Y             onTrue    -> HOME
-    //   B             onTrue    -> reset pose to the vision estimate, .ignoringDisable(true)
-    //   POV up/down/left/right  -> DriveCommands.snapToHeading(...)
-    //   A             whileTrue -> DriveToPoseCommand to the nearest scoring pose
     //
     // Operator: manual turret nudge on a stick, flywheel RPM trim on the D-pad, and a "force shoot"
     // toggle calling superstructure.setIgnoreShotTolerances(true).
     //
-    // Route EVERY action through superstructure.setWantedStateCommand(...). Binding a subsystem
-    // directly is what lets a button put the robot into a combination the state machine never
-    // intended, and it is exactly what this architecture exists to prevent.
+    // Route EVERY mechanism action through superstructure.setWantedStateCommand(...). Binding a
+    // subsystem directly is what lets a button put the robot into a combination the state machine
+    // never intended, and it is exactly what this architecture exists to prevent.
   }
 
   /**
