@@ -7,6 +7,7 @@ import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.geometry.Translation3d;
 import edu.wpi.first.wpilibj.RobotBase;
 import edu.wpi.first.wpilibj.RobotController;
+import frc.robot.util.AllianceFlipUtil;
 import frc.robot.util.LoggedTunableNumber;
 
 /**
@@ -211,9 +212,12 @@ public final class Constants {
      * @return goal center on the floor plane, in meters, in the current alliance's frame
      */
     public static Translation2d goalTranslation() {
-      // TODO: Build a Translation2d from kGoalXMeters/kGoalYMeters, then pass it through
-      // AllianceFlipUtil.apply(...) so red-alliance matches aim at the mirrored goal.
-      return new Translation2d();
+      // IMPLEMENTATION (was TODO: "Build a Translation2d from kGoalX/kGoalY, then pass it through
+      // AllianceFlipUtil.apply(...) so red-alliance matches aim at the mirrored goal.")
+      //
+      // Flipped on every call rather than cached, because the alliance is not known until the
+      // driver station connects -- which is always after this class has been initialized.
+      return AllianceFlipUtil.apply(new Translation2d(kGoalXMeters.get(), kGoalYMeters.get()));
     }
 
     /**
@@ -222,8 +226,11 @@ public final class Constants {
      * @return goal center in three dimensions, in meters, in the current alliance's frame
      */
     public static Translation3d goalTranslation3d() {
-      // TODO: Same as goalTranslation() but carrying kGoalHeightMeters as Z.
-      return new Translation3d();
+      // IMPLEMENTATION (was TODO: "Same as goalTranslation() but with kGoalHeightMeters as Z.")
+      //
+      // Height is NOT flipped: the goal is the same distance off the carpet on both alliances.
+      Translation2d flipped = goalTranslation();
+      return new Translation3d(flipped.getX(), flipped.getY(), kGoalHeightMeters.get());
     }
   }
 
@@ -668,6 +675,17 @@ public final class Constants {
         new LoggedTunableNumber("Vision/QuestReseedResidual", 0.30);
     public static final LoggedTunableNumber kQuestReseedHoldSec =
         new LoggedTunableNumber("Vision/QuestReseedHold", 0.5);
+
+    /**
+     * How fast the pose-confidence estimate degrades while no camera is contributing, in metres of
+     * effective standard deviation per second of staleness.
+     *
+     * <p>0.5 means that one second after the last accepted vision fix, a 4 cm fix is treated as
+     * being worth about 54 cm -- which will fail the shot gate, as it should. Raise it to become
+     * more conservative about shooting on stale vision.
+     */
+    public static final LoggedTunableNumber kStalenessGrowthMetersPerSec =
+        new LoggedTunableNumber("Vision/StalenessGrowth", 0.5);
   }
 
   // --------------------------------------------------------------------------- power & faults ----

@@ -61,15 +61,24 @@ public class RobotState {
   public record PoseObservation(
       Pose2d pose, double timestampSec, Matrix<N3, N1> stdDevs, PoseSource source) {}
 
+  /**
+   * Depth of both interpolation buffers, in seconds.
+   *
+   * <p>Named rather than repeated, because {@link #addVisionObservation} rejects observations older
+   * than this window and the buffers must agree with that rule -- if they drift apart, observations
+   * get accepted that {@link #getPoseAt} cannot then answer for.
+   */
+  private static final double kBufferSeconds = 2.0;
+
   private static RobotState instance = null;
 
   private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
   private final SwerveDriveKinematics kinematics;
   private final SwerveDrivePoseEstimator poseEstimator;
   private final TimeInterpolatableBuffer<Pose2d> poseBuffer =
-      TimeInterpolatableBuffer.createBuffer(2.0);
+      TimeInterpolatableBuffer.createBuffer(kBufferSeconds);
   private final TimeInterpolatableBuffer<Double> turretAngleBuffer =
-      TimeInterpolatableBuffer.createDoubleBuffer(2.0);
+      TimeInterpolatableBuffer.createDoubleBuffer(kBufferSeconds);
 
   private final LinearFilter accelXFilter = LinearFilter.movingAverage(5);
   private final LinearFilter accelYFilter = LinearFilter.movingAverage(5);
@@ -86,6 +95,16 @@ public class RobotState {
   private final double[] lastStdDevBySource = new double[PoseSource.values().length];
   private boolean questTrusted = false;
   private boolean questSeeded = false;
+
+  /**
+   * Running totals of vision observations accepted and rejected since boot.
+   *
+   * <p>Logged every loop. A pipeline that is silently rejecting everything is indistinguishable
+   * from a pipeline that is not running at all unless both numbers are visible.
+   */
+  private int visionAcceptedCount = 0;
+
+  private int visionRejectedCount = 0;
 
   /**
    * Returns the process-wide robot state.
@@ -255,13 +274,72 @@ public class RobotState {
    *     logs accept and reject counts.
    */
   public void addVisionObservation(PoseObservation observation) {
-    // TODO: Under the write lock, REJECT when: the timestamp is older than the 2 s buffer window;
-    // the translation differs from getEstimatedPose() by more than
-    // Constants.Vision.kMaxAcceptedPoseJumpMeters; or any stdDev is non-finite. Otherwise call
-    // poseEstimator.addVisionMeasurement(pose, timestampSec, stdDevs) and update
-    // lastUpdateTimestampBySource / lastStdDevBySource for the source. Log both counts -- a
-    // silently
-    // rejecting vision pipeline looks exactly like a vision pipeline that is not running.
+    // IMPLEMENTATION (was TODO: "Under the write lock, reject the observation if it is older than
+    // the buffer window, if its translation differs from getEstimatedPose() by more than
+    // Constants.Vision.kMaxAcceptedPoseJumpMeters, or if any stdDev is non-finite. Otherwise call
+    // poseEstimator.addVisionMeasurement(...) and update the per-source bookkeeping arrays. Log
+    // accepted and rejected counts.")
+    lock.writeLock().lock();
+    try {
+      String rejectReason = null;
+
+      // Rule 1: non-finite covariance. A NaN or infinite standard deviation poisons the estimator's
+      // internal matrices permanently -- there is no recovering the estimate afterwards -- so this
+      // is checked before anything else.
+      Matrix<N3, N1> stdDevs = observation.stdDevs();
+      if (stdDevs == null
+          || !Double.isFinite(stdDevs.get(0, 0))
+          || !Double.isFinite(stdDevs.get(1, 0))
+          || !Double.isFinite(stdDevs.get(2, 0))) {
+        rejectReason = "NonFiniteStdDev";
+      }
+
+      // Rule 2: too old to correlate. The pose buffer is 2 s deep; an observation older than that
+      // cannot be checked against where the robot actually was, and the estimator would rewind its
+      // history against a pose nobody can verify.
+      double now = Timer.getFPGATimestamp();
+      if (rejectReason == null && now - observation.timestampSec() > kBufferSeconds) {
+        rejectReason = "StaleTimestamp";
+      }
+
+      // Rule 3: implausible jump. A single bad tag solve can place the robot metres away. Accepting
+      // it teleports the estimate, and every downstream consumer -- turret aim, auto-align, the
+      // shot gate -- acts on that teleport before odometry can pull it back.
+      if (rejectReason == null) {
+        double jump =
+            observation
+                .pose()
+                .getTranslation()
+                .getDistance(poseEstimator.getEstimatedPosition().getTranslation());
+        if (jump > Constants.Vision.kMaxAcceptedPoseJumpMeters.get()) {
+          rejectReason = "PoseJump";
+        }
+      }
+
+      if (rejectReason != null) {
+        visionRejectedCount++;
+        // Logged per source AND per reason. When the robot will not shoot because the pose is
+        // untrusted, this is the log that says why in one glance instead of three matches.
+        Logger.recordOutput(
+            "RobotState/Vision/" + observation.source().name() + "/LastRejectReason", rejectReason);
+        Logger.recordOutput("RobotState/Vision/RejectedCount", visionRejectedCount);
+        return;
+      }
+
+      poseEstimator.addVisionMeasurement(observation.pose(), observation.timestampSec(), stdDevs);
+
+      // Per-source bookkeeping. The XY standard deviation is recorded (both axes share a value by
+      // construction in Vision.computeStdDevs) so getPoseStdDevEstimate can report how much the
+      // most-trusted recent source was actually trusted.
+      int sourceIndex = observation.source().ordinal();
+      lastUpdateTimestampBySource[sourceIndex] = observation.timestampSec();
+      lastStdDevBySource[sourceIndex] = stdDevs.get(0, 0);
+
+      visionAcceptedCount++;
+      Logger.recordOutput("RobotState/Vision/AcceptedCount", visionAcceptedCount);
+    } finally {
+      lock.writeLock().unlock();
+    }
   }
 
   /**
@@ -324,7 +402,17 @@ public class RobotState {
    *     dropped out.
    */
   public void setQuestTrusted(boolean trusted) {
-    // TODO: Write-locked setter; also Logger.recordOutput("RobotState/QuestTrusted", trusted).
+    // IMPLEMENTATION (was TODO: "Write-locked setter used by Vision's health policy; logged so you
+    // can see in replay exactly when QuestNav dropped out.")
+    lock.writeLock().lock();
+    try {
+      questTrusted = trusted;
+    } finally {
+      lock.writeLock().unlock();
+    }
+    // Logged OUTSIDE the lock. Logger.recordOutput is not guaranteed cheap, and holding the write
+    // lock across it would block every reader on the 250 Hz odometry path for no reason.
+    Logger.recordOutput("RobotState/QuestTrusted", trusted);
   }
 
   /**
@@ -334,7 +422,15 @@ public class RobotState {
    *     <p><b>Outputs:</b> sets the flag.
    */
   public void setQuestSeeded(boolean seeded) {
-    // TODO: Write-locked setter. Vision sets this true after a successful seed.
+    // IMPLEMENTATION (was TODO: "Write-locked setter; Vision sets this true after a successful
+    // QuestNav.setPose().")
+    lock.writeLock().lock();
+    try {
+      questSeeded = seeded;
+    } finally {
+      lock.writeLock().unlock();
+    }
+    Logger.recordOutput("RobotState/QuestSeeded", seeded);
   }
 
   // ------------------------------------------------------------------------------- read side ----
@@ -467,8 +563,13 @@ public class RobotState {
    */
   @AutoLogOutput(key = "RobotState/DistanceToGoalMeters")
   public double getDistanceToGoal() {
-    // TODO: getEstimatedPose().getTranslation().getDistance(Constants.Field.goalTranslation()).
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "getEstimatedPose().getTranslation().getDistance(
+    // Constants.Field.goalTranslation()).")
+    //
+    // NOTE: this is only as meaningful as Constants.Field's goal coordinates, which are still 0,0
+    // until someone MEASURES them from the REBUILT field drawings. Until then this reports the
+    // distance to the field origin, which is a real number that means nothing.
+    return getEstimatedPose().getTranslation().getDistance(Constants.Field.goalTranslation());
   }
 
   /**
@@ -478,9 +579,28 @@ public class RobotState {
    */
   @AutoLogOutput(key = "RobotState/VisionStalenessSec")
   public double getVisionStalenessSec() {
-    // TODO: Timer.getFPGATimestamp() minus the later of the two Limelight entries in
-    // lastUpdateTimestampBySource. Used as a readyToShoot gate.
-    return Double.POSITIVE_INFINITY;
+    // IMPLEMENTATION (was TODO: "Timer.getFPGATimestamp() minus the most recent of the two
+    // Limelight entries in lastUpdateTimestampBySource. Used as a readyToShoot gate.")
+    //
+    // Only the two Limelights count. QuestNav is deliberately excluded: it reports a pose
+    // continuously whether or not it still knows where it is, so including it would mask exactly
+    // the drift this gate exists to catch.
+    lock.readLock().lock();
+    try {
+      double mostRecent =
+          Math.max(
+              lastUpdateTimestampBySource[PoseSource.LIMELIGHT_TURRET.ordinal()],
+              lastUpdateTimestampBySource[PoseSource.LIMELIGHT_INTAKE.ordinal()]);
+
+      // 0.0 means "never updated", not "updated at time zero". Returning infinity makes every
+      // downstream comparison fail closed rather than silently passing a freshness check.
+      if (mostRecent == 0.0) {
+        return Double.POSITIVE_INFINITY;
+      }
+      return Timer.getFPGATimestamp() - mostRecent;
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -491,9 +611,42 @@ public class RobotState {
    */
   @AutoLogOutput(key = "RobotState/PoseConfidence")
   public double getPoseStdDevEstimate() {
-    // TODO: Return the smallest recently-applied XY std dev, inflated by getVisionStalenessSec() so
-    // that confidence decays when vision stops arriving rather than staying falsely high.
-    return Double.POSITIVE_INFINITY;
+    // IMPLEMENTATION (was TODO: "Return a scalar confidence proxy: the smallest recently-applied XY
+    // std dev, inflated by getVisionStalenessSec(). Compare against
+    // Constants.Shot.kMaxPoseStdDevMeters.")
+    //
+    // "Smallest" because the best source available is what the estimate is really worth: if the
+    // turret camera has a four-tag fix at 2 m, it does not matter that the intake camera's last
+    // contribution was a poor one.
+    double best;
+    lock.readLock().lock();
+    try {
+      best = Double.POSITIVE_INFINITY;
+      for (PoseSource source : PoseSource.values()) {
+        if (source == PoseSource.ODOMETRY) {
+          continue; // Odometry has no absolute covariance to report.
+        }
+        double stdDev = lastStdDevBySource[source.ordinal()];
+        if (stdDev > 0.0 && stdDev < best) {
+          best = stdDev;
+        }
+      }
+    } finally {
+      lock.readLock().unlock();
+    }
+
+    if (!Double.isFinite(best)) {
+      return Double.POSITIVE_INFINITY;
+    }
+
+    // Inflate with age. A 4 cm fix from three seconds ago does not describe where the robot is now,
+    // and without this term confidence would stay falsely high for as long as the cameras stayed
+    // silent -- which is precisely when it should be falling.
+    double staleness = getVisionStalenessSec();
+    if (!Double.isFinite(staleness)) {
+      return Double.POSITIVE_INFINITY;
+    }
+    return best + staleness * Constants.Vision.kStalenessGrowthMetersPerSec.get();
   }
 
   /**
@@ -502,8 +655,13 @@ public class RobotState {
    * @return true when the headset is healthy and tracking
    */
   public boolean isQuestTrusted() {
-    // TODO: Read-locked getter.
-    return false;
+    // IMPLEMENTATION (was TODO: "Read-locked getter.")
+    lock.readLock().lock();
+    try {
+      return questTrusted;
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -512,8 +670,13 @@ public class RobotState {
    * @return true once a successful seed has happened
    */
   public boolean isQuestSeeded() {
-    // TODO: Read-locked getter.
-    return false;
+    // IMPLEMENTATION (was TODO: "Read-locked getter.")
+    lock.readLock().lock();
+    try {
+      return questSeeded;
+    } finally {
+      lock.readLock().unlock();
+    }
   }
 
   /**
@@ -540,6 +703,11 @@ public class RobotState {
     Logger.recordOutput("RobotState/RobotRelativeSpeeds", getRobotRelativeSpeeds());
     Logger.recordOutput("RobotState/FieldRelativeAccel", getFieldRelativeAccel());
     Logger.recordOutput("RobotState/RawGyroRotation", rawGyroRotation);
+    Logger.recordOutput("RobotState/DistanceToGoalMeters", getDistanceToGoal());
+    Logger.recordOutput("RobotState/VisionStalenessSec", getVisionStalenessSec());
+    Logger.recordOutput("RobotState/PoseConfidence", getPoseStdDevEstimate());
+    Logger.recordOutput("RobotState/Vision/AcceptedCount", visionAcceptedCount);
+    Logger.recordOutput("RobotState/Vision/RejectedCount", visionRejectedCount);
 
     // Per-source health. Staleness is far more actionable than a raw timestamp: "the turret camera
     // last helped 4 seconds ago" is immediately readable on a graph, where an FPGA timestamp is

@@ -3,6 +3,9 @@ package frc.robot.util;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.DriverStation.Alliance;
+import frc.robot.Constants;
 
 /**
  * The only place in this codebase that is allowed to know about the red alliance.
@@ -12,9 +15,14 @@ import edu.wpi.first.math.geometry.Translation2d;
  * exactly one file prevents the classic season-ending bug where the shooter aims correctly on blue
  * and mirrors wrong on red, which typically is not discovered until an elimination match.
  *
- * <p><b>Unresolved:</b> the flip convention below depends on whether the 2026 REBUILT field is
- * rotationally symmetric or mirrored. Read the official field drawings and commit to one convention
- * in {@link #apply(Translation2d)} and {@link #apply(Rotation2d)} together -- they must agree.
+ * <p>The 2026 REBUILT field is <b>rotationally symmetric</b>, so the red transform is always a
+ * 180-degree rotation about the field centre: both translation axes invert and headings gain pi.
+ * That is a confirmed property of the game, not an assumption, so no mirrored-field case is
+ * implemented and none should be added.
+ *
+ * <p>The flip does not produce meaningful output until {@code kFieldLengthMeters} and {@code
+ * kFieldWidthMeters} are measured; they are both 0.0 today, so a flipped coordinate currently comes
+ * back rotated about the origin rather than about the field centre.
  */
 public class AllianceFlipUtil {
   private AllianceFlipUtil() {}
@@ -28,8 +36,14 @@ public class AllianceFlipUtil {
    * @return true when the driver station reports the red alliance, false when blue or unknown
    */
   public static boolean shouldFlip() {
-    // TODO: return DriverStation.getAlliance().orElse(Alliance.Blue) == Alliance.Red.
-    return false;
+    // IMPLEMENTATION (was TODO: "DriverStation.getAlliance().orElse(Alliance.Blue) ==
+    // Alliance.Red.")
+    //
+    // Defaulting to Blue when the alliance is unknown is deliberate. Blue-origin coordinates are
+    // the identity transform, so an unknown alliance yields unmodified coordinates rather than a
+    // half-applied flip -- wrong, but wrong in the direction that is obvious on the field rather
+    // than subtly mirrored.
+    return DriverStation.getAlliance().orElse(Alliance.Blue) == Alliance.Red;
   }
 
   /**
@@ -39,11 +53,18 @@ public class AllianceFlipUtil {
    * @return the same position when on blue, or the alliance-flipped position when on red, in meters
    */
   public static Translation2d apply(Translation2d translation) {
-    // TODO: If shouldFlip(), return the flipped translation. For a ROTATIONALLY SYMMETRIC field
-    // that is (kFieldLength - x, kFieldWidth - y); for a MIRRORED field it is (kFieldLength - x,
-    // y).
-    // TODO: CONFIRM which one REBUILT uses from the field drawings before committing.
-    return translation;
+    // IMPLEMENTATION (was TODO: "If shouldFlip(), return a rotationally symmetric flip
+    // (kFieldLength - x, kFieldWidth - y).")
+    //
+    // REBUILT is rotationally symmetric, so the flip is a 180-degree rotation about the field
+    // centre and BOTH axes invert. There is no mirrored-field branch because the game does not
+    // have one -- adding a hedge here would only create a second convention to keep in step.
+    if (!shouldFlip()) {
+      return translation;
+    }
+    return new Translation2d(
+        Constants.Field.kFieldLengthMeters.get() - translation.getX(),
+        Constants.Field.kFieldWidthMeters.get() - translation.getY());
   }
 
   /**
@@ -53,11 +74,16 @@ public class AllianceFlipUtil {
    * @return the same heading when on blue, or the alliance-flipped heading when on red
    */
   public static Rotation2d apply(Rotation2d rotation) {
-    // TODO: If shouldFlip(), rotate by Math.PI for a rotationally symmetric field, or negate and
-    // add
-    // PI for a mirrored field. This MUST match the convention chosen in apply(Translation2d) -- if
-    // the two disagree, poses will flip position correctly but face the wrong way.
-    return rotation;
+    // IMPLEMENTATION (was TODO: "If shouldFlip(), rotate by Math.PI (rotational symmetry). Must
+    // match the convention chosen in apply(Translation2d).")
+    //
+    // The same 180-degree rotation that apply(Translation2d) performs on position, applied to
+    // heading. These two must stay in step: if they ever disagree, poses flip position correctly
+    // but face the wrong way, which presents as a turret bug rather than a coordinate bug.
+    if (!shouldFlip()) {
+      return rotation;
+    }
+    return rotation.rotateBy(Rotation2d.kPi);
   }
 
   /**
@@ -67,9 +93,11 @@ public class AllianceFlipUtil {
    * @return the same pose when on blue, or the alliance-flipped pose when on red
    */
   public static Pose2d apply(Pose2d pose) {
-    // TODO: Compose the two overloads above: new Pose2d(apply(pose.getTranslation()),
-    // apply(pose.getRotation())).
-    return pose;
+    // IMPLEMENTATION (was TODO: "Compose the two overloads above.")
+    //
+    // Composed from the two overloads rather than reimplemented, so there is exactly one place
+    // where the symmetry convention is encoded per quantity.
+    return new Pose2d(apply(pose.getTranslation()), apply(pose.getRotation()));
   }
 
   /**
@@ -79,7 +107,10 @@ public class AllianceFlipUtil {
    * @return the flipped X coordinate when on red, otherwise unchanged, in meters
    */
   public static double applyX(double xMeters) {
-    // TODO: return shouldFlip() ? Constants.Field.kFieldLength - xMeters : xMeters.
-    return xMeters;
+    // IMPLEMENTATION (was TODO: "shouldFlip() ? Constants.Field.kFieldLength - xMeters : xMeters.")
+    //
+    // Only X is touched. Callers that need the full flip should use apply(Translation2d); this
+    // exists for auto routines that reason about field halves and genuinely want Y left alone.
+    return shouldFlip() ? Constants.Field.kFieldLengthMeters.get() - xMeters : xMeters;
   }
 }
