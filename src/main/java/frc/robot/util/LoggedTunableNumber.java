@@ -40,8 +40,13 @@ public class LoggedTunableNumber implements DoubleSupplier {
    *     {@code "Turret/kP"})
    */
   public LoggedTunableNumber(String dashboardKey) {
-    // TODO: this.key = tableKey + "/" + dashboardKey. Do not touch NetworkTables here -- the
-    // dashboard entry is created lazily in initDefault so that constructing a tunable is free.
+    // IMPLEMENTATION (was TODO: "this.key = tableKey + "/" + dashboardKey. Do not touch
+    // NetworkTables here.")
+    //
+    // Only the key string is built here. Deliberately no NetworkTables work: Constants.java
+    // constructs well over a hundred of these as static final fields, and that happens during class
+    // initialization -- potentially before the HAL exists, and always before we know whether tuning
+    // mode is on. Publishing here would make merely *loading* Constants cost a hundred NT entries.
     this.key = tableKey + "/" + dashboardKey;
   }
 
@@ -53,8 +58,9 @@ public class LoggedTunableNumber implements DoubleSupplier {
    *     starts at inside tuning mode
    */
   public LoggedTunableNumber(String dashboardKey, double defaultValue) {
-    // TODO: Call this(dashboardKey), then initDefault(defaultValue).
+    // IMPLEMENTATION (was TODO: "this(dashboardKey) then initDefault(defaultValue).")
     this(dashboardKey);
+    initDefault(defaultValue);
   }
 
   /**
@@ -66,10 +72,22 @@ public class LoggedTunableNumber implements DoubleSupplier {
    *     dashboardNumber}.
    */
   public void initDefault(double defaultValue) {
-    // TODO: If !hasDefault, latch hasDefault = true and this.defaultValue = defaultValue. Then,
-    // when
-    // Constants.kTuningMode && !Constants.disableHal, construct
-    // dashboardNumber = new LoggedNetworkNumber(key, defaultValue).
+    // IMPLEMENTATION (was TODO: "If !hasDefault, latch the default and, when Constants.kTuningMode
+    // && !Constants.disableHal, construct new LoggedNetworkNumber(key, defaultValue).")
+    //
+    // The hasDefault guard makes this idempotent, which is what lets LoggedTunableGains call
+    // initDefault fluently from withGravity() without clobbering a value already set.
+    if (!hasDefault) {
+      hasDefault = true;
+      this.defaultValue = defaultValue;
+
+      // The dashboard entry is created only in tuning mode. The disableHal check is what lets unit
+      // tests construct Constants without a HAL: LoggedNetworkNumber reaches NetworkTables, which
+      // needs the HAL initialized, and a JUnit run has none.
+      if (Constants.kTuningMode && !Constants.disableHal) {
+        dashboardNumber = new LoggedNetworkNumber(key, defaultValue);
+      }
+    }
   }
 
   /**
@@ -79,9 +97,19 @@ public class LoggedTunableNumber implements DoubleSupplier {
    *     compiled default; 0.0 if no default has been set yet
    */
   public double get() {
-    // TODO: Return 0.0 if !hasDefault. Otherwise return dashboardNumber.get() when
-    // Constants.kTuningMode && !Constants.disableHal, else return defaultValue.
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "Return 0.0 if no default. Otherwise return dashboardNumber.get()
+    // in tuning mode with HAL available, else defaultValue.")
+    //
+    // The null check on dashboardNumber is belt-and-braces: kTuningMode is final so it cannot flip
+    // at runtime, but disableHal is not, and a test that toggles it after construction would
+    // otherwise dereference null here.
+    if (!hasDefault) {
+      return 0.0;
+    }
+    if (Constants.kTuningMode && !Constants.disableHal && dashboardNumber != null) {
+      return dashboardNumber.get();
+    }
+    return defaultValue;
   }
 
   /**
@@ -95,8 +123,19 @@ public class LoggedTunableNumber implements DoubleSupplier {
    *     on the very first call for a given id
    */
   public boolean hasChanged(int id) {
-    // TODO: Compare get() against lastHasChangedValues.get(id). If absent or different, put the new
-    // value and return true; otherwise return false.
+    // IMPLEMENTATION (was TODO: "Compare get() against lastHasChangedValues.get(id); store and
+    // return true on change.")
+    //
+    // Returning true on the FIRST call for an id is intentional and load-bearing: it makes a
+    // subsystem push its compiled-in gains to the motor controller on the very first loop, so there
+    // is exactly one code path for "apply gains" rather than a separate startup path that can drift
+    // out of sync with the retune path.
+    double current = get();
+    Double last = lastHasChangedValues.get(id);
+    if (last == null || last != current) {
+      lastHasChangedValues.put(id, current);
+      return true;
+    }
     return false;
   }
 
@@ -107,8 +146,8 @@ public class LoggedTunableNumber implements DoubleSupplier {
    */
   @Override
   public double getAsDouble() {
-    // TODO: return get().
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "return get().")
+    return get();
   }
 
   /**
@@ -123,9 +162,25 @@ public class LoggedTunableNumber implements DoubleSupplier {
    */
   public static void ifChanged(
       int id, Consumer<double[]> action, LoggedTunableNumber... tunableNumbers) {
-    // TODO: If any tunable hasChanged(id) -- evaluate them ALL, do not short-circuit, or the
-    // unevaluated ones will fire on the next loop -- call action.accept() with the current values
-    // mapped into a double[].
+    // IMPLEMENTATION (was TODO: "If any tunable hasChanged(id), call action with the current values
+    // as a double[].")
+    //
+    // Note the loop does NOT short-circuit. hasChanged has a side effect -- it records the value it
+    // saw -- so bailing out early would leave the remaining tunables still holding their old
+    // recorded value, and they would each fire a spurious change on some later loop. Every tunable
+    // must be polled every call, and only then is the result acted on.
+    boolean anyChanged = false;
+    for (LoggedTunableNumber tunable : tunableNumbers) {
+      anyChanged |= tunable.hasChanged(id);
+    }
+
+    if (anyChanged) {
+      double[] values = new double[tunableNumbers.length];
+      for (int i = 0; i < tunableNumbers.length; i++) {
+        values[i] = tunableNumbers[i].get();
+      }
+      action.accept(values);
+    }
   }
 
   /**
@@ -138,7 +193,7 @@ public class LoggedTunableNumber implements DoubleSupplier {
    *     <p><b>Outputs:</b> invokes {@code action} at most once per call.
    */
   public static void ifChanged(int id, Runnable action, LoggedTunableNumber... tunableNumbers) {
-    // TODO: Delegate to the Consumer overload, discarding the values: ifChanged(id, values ->
-    // action.run(), tunableNumbers).
+    // IMPLEMENTATION (was TODO: "Delegate to the Consumer overload, ignoring the values.")
+    ifChanged(id, values -> action.run(), tunableNumbers);
   }
 }

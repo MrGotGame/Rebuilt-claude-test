@@ -50,7 +50,11 @@ public record ShotParameters(
    * @return true only when the solve converged, the distance is in range, and the RPM is finite
    */
   public boolean isUsable() {
-    // TODO: return converged && inRange && Double.isFinite(flywheelRpm).
-    return false;
+    // IMPLEMENTATION (was TODO: "converged && inRange && Double.isFinite(flywheelRpm).")
+    //
+    // All three terms are required. converged alone is not enough -- the iteration can converge on
+    // a target outside the usable range -- and the isFinite check catches the case where a
+    // time-of-flight table entry is still 0.0 and the launch-speed division produced infinity.
+    return converged && inRange && Double.isFinite(flywheelRpm);
   }
 }

@@ -4,6 +4,9 @@ import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.interpolation.InterpolatingDoubleTreeMap;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import frc.robot.Constants;
+import frc.robot.util.GeomUtil;
+import org.littletonrobotics.junction.Logger;
 
 /**
  * The heart of shooting on the move.
@@ -37,12 +40,26 @@ public class ShootingSolver {
   private int lastIterationCount = 0;
   private double lastResidualSec = 0.0;
 
+  /**
+   * Whether this solver's tables come from {@code Constants.Shot}.
+   *
+   * <p>False for the test-only constructor. {@link #reloadTables()} checks this so that a solver
+   * built from explicit arrays is never silently overwritten with the (all-zero) Constants tables
+   * when the superstructure calls reload on entering a scoring state.
+   */
+  private final boolean usesConstantsTables;
+
   /** Builds a solver whose tables come from {@code Constants.Shot}. */
   public ShootingSolver() {
-    // TODO: Populate both InterpolatingDoubleTreeMaps by zipping
-    // Constants.Shot.kDistanceBreakpointsMeters with kTimeOfFlightSec and kLaunchSpeedMetersPerSec.
-    // ASSERT the three arrays are the same length and throw if they are not -- a mismatched table
-    // is otherwise a completely silent aiming bug that only shows up as "we miss at long range".
+    // IMPLEMENTATION (was TODO: "Populate both InterpolatingDoubleTreeMaps by zipping
+    // Constants.Shot.kDistanceBreakpointsMeters with kTimeOfFlightSec and
+    // kLaunchSpeedMetersPerSec. Assert the three arrays are the same length and throw if not - a
+    // mismatched table is a silent aiming bug otherwise.")
+    usesConstantsTables = true;
+    populate(
+        Constants.Shot.kDistanceBreakpointsMeters,
+        Constants.Shot.kTimeOfFlightSec,
+        Constants.Shot.kLaunchSpeedMetersPerSec);
   }
 
   /**
@@ -54,7 +71,10 @@ public class ShootingSolver {
    * @param launchSpeeds required ground-frame launch speed at each breakpoint, in meters per second
    */
   public ShootingSolver(double[] distances, double[] timesOfFlight, double[] launchSpeeds) {
-    // TODO: Same population as above, from the arguments instead of Constants.
+    // IMPLEMENTATION (was TODO: "Test-only constructor that takes explicit tables so unit tests do
+    // not depend on Constants or NetworkTables.")
+    usesConstantsTables = false;
+    populate(distances, timesOfFlight, launchSpeeds);
   }
 
   /**
@@ -65,7 +85,21 @@ public class ShootingSolver {
    * redeploy.
    */
   public void reloadTables() {
-    // TODO: Clear both maps and repopulate from Constants.Shot.
+    // IMPLEMENTATION (was TODO: "Clear and repopulate both maps from Constants.Shot. Called from
+    // Superstructure's onEnter for scoring states so a mid-match table edit takes effect without a
+    // redeploy.")
+    //
+    // A solver built from explicit test arrays is left alone. Without this guard, a test that
+    // happened to call reloadTables would have its carefully-chosen table silently replaced by the
+    // all-zero Constants one, and would then fail for a reason that has nothing to do with the
+    // behaviour under test.
+    if (!usesConstantsTables) {
+      return;
+    }
+    populate(
+        Constants.Shot.kDistanceBreakpointsMeters,
+        Constants.Shot.kTimeOfFlightSec,
+        Constants.Shot.kLaunchSpeedMetersPerSec);
   }
 
   /**
@@ -83,25 +117,89 @@ public class ShootingSolver {
       ChassisSpeeds fieldRelativeSpeeds,
       Translation2d fieldRelativeAccel,
       Translation2d goal) {
-    // TODO: Implement the fixed-point iteration in the class docs, weighting the acceleration term
-    // by Constants.Shot.kAccelCompensationScalar (start it at 0 and only raise it once plain
-    // velocity compensation is working). Track lastIterationCount and lastResidualSec.
-    // After convergence:
-    //   Translation2d los = virtualGoal.minus(robotPose.getTranslation());
-    //   double d          = los.getNorm();
-    //   double tof        = timeOfFlightTable.get(d);
-    //   Translation2d vg  = new Translation2d(d / tof, los.getAngle());
-    //   Translation2d vm  = vg.minus(GeomUtil.toTranslation(fieldRelativeSpeeds));
-    //   Rotation2d aim    = vm.getAngle();
-    //   double rpm        = Constants.Shot.kRpmPerMeterPerSec.get() * vm.getNorm()
-    //                       + Constants.Shot.kRpmIntercept.get();
-    //   double omega      = GeomUtil.tangentialComponent(
-    //                           GeomUtil.toTranslation(fieldRelativeSpeeds).unaryMinus(),
-    //                           los.getAngle()) / d;
-    // Set inRange = d is between kMinDistanceMeters and kMaxDistanceMeters.
-    // GUARD against tof == 0, which happens whenever the TOF table is still all zeros, and would
-    // otherwise divide by zero and produce an infinite launch speed.
-    return ShotParameters.invalid();
+    // IMPLEMENTATION (was TODO: "Implement the fixed-point iteration described above ... After
+    // convergence compute los/d/tof/vg/vm/aim/rpm/omega and return a ShotParameters, with inRange =
+    // d between kMinDistanceMeters and kMaxDistanceMeters.")
+
+    Translation2d robot = robotPose.getTranslation();
+    Translation2d velocity = GeomUtil.toTranslation(fieldRelativeSpeeds);
+    double accelScalar = Constants.Shot.kAccelCompensationScalar.get();
+
+    // Seed with the stationary answer: how long the shot would take if the robot were not moving.
+    double tof = timeOfFlightTable.get(goal.getDistance(robot));
+    double residual = Double.POSITIVE_INFINITY;
+    int iterations = 0;
+    Translation2d virtualGoal = goal;
+
+    // Fixed-point iteration. Each pass displaces the aim point backwards along the robot's own
+    // motion by however far the robot will travel during the shot's flight, then re-reads the
+    // flight time for the new (shorter or longer) range. It converges quickly because time of
+    // flight is a slowly-varying function of distance.
+    for (int i = 0; i < Constants.Shot.kMaxSolverIterations; i++) {
+      iterations = i + 1;
+
+      // "Shoot behind the motion": aim where the goal effectively is, from the perspective of a
+      // piece that will be in the air for tof seconds while the robot keeps moving.
+      virtualGoal =
+          goal.minus(velocity.times(tof))
+              .minus(fieldRelativeAccel.times(0.5 * accelScalar * tof * tof));
+
+      double newTof = timeOfFlightTable.get(virtualGoal.getDistance(robot));
+      residual = Math.abs(newTof - tof);
+      tof = newTof;
+
+      if (residual < Constants.Shot.kSolverToleranceSec.get()) {
+        break;
+      }
+    }
+    lastIterationCount = iterations;
+    lastResidualSec = residual;
+
+    boolean converged = residual < Constants.Shot.kSolverToleranceSec.get();
+
+    Translation2d lineOfSight = virtualGoal.minus(robot);
+    double distance = lineOfSight.getNorm();
+
+    // Guards before any division. tof is zero whenever the time-of-flight table is still all zeros,
+    // which is its shipped state until someone measures it; distance is zero if the robot is
+    // exactly on the goal. Either would produce an infinite launch speed that the robot would
+    // cheerfully try to fire.
+    if (tof <= 0.0 || distance <= 0.0) {
+      return ShotParameters.invalid();
+    }
+
+    // Ground-frame velocity the game piece must leave with to cover `distance` in `tof`.
+    Translation2d requiredGroundVelocity =
+        new Translation2d(distance / tof, lineOfSight.getAngle());
+
+    // The robot already supplies its own velocity to the piece, so the shooter only has to make up
+    // the difference. THIS subtraction is what shooting on the move actually is -- everything above
+    // is just working out where to point.
+    Translation2d muzzleVelocity = requiredGroundVelocity.minus(velocity);
+
+    double rpm =
+        Constants.Shot.kRpmPerMeterPerSec.get() * muzzleVelocity.getNorm()
+            + Constants.Shot.kRpmIntercept.get();
+
+    // Angular rate the turret must match to hold the aim point while the robot translates. The
+    // robot's velocity is negated because the TARGET's apparent motion is the opposite of the
+    // robot's own.
+    double turretOmega =
+        GeomUtil.tangentialComponent(velocity.unaryMinus(), lineOfSight.getAngle()) / distance;
+
+    boolean inRange =
+        distance >= Constants.Shot.kMinDistanceMeters.get()
+            && distance <= Constants.Shot.kMaxDistanceMeters.get();
+
+    return new ShotParameters(
+        muzzleVelocity.getAngle(),
+        turretOmega,
+        rpm,
+        distance,
+        tof,
+        virtualGoal,
+        converged,
+        inRange);
   }
 
   /**
@@ -112,10 +210,14 @@ public class ShootingSolver {
    * @return the solved shot, or {@link ShotParameters#invalid()} if no usable solution exists
    */
   public ShotParameters solveStationary(Pose2d robotPose, Translation2d goal) {
-    // TODO: Call solve(...) with zeroed speeds and acceleration. This equivalence is a REQUIRED
-    // unit test: solve() with zero velocity must equal solveStationary() exactly, which is what
-    // catches a sign error in the velocity compensation.
-    return ShotParameters.invalid();
+    // IMPLEMENTATION (was TODO: "Convenience wrapper calling solve(...) with zeroed speeds and
+    // acceleration. Used by the SCORING_STATIONARY state and as the baseline in unit tests: solve()
+    // with zero velocity MUST equal solveStationary() exactly.")
+    //
+    // Delegating rather than duplicating the maths is what MAKES that equivalence true by
+    // construction, which is why the corresponding unit test is meaningful as a regression guard on
+    // the velocity-compensation terms rather than a tautology about this method.
+    return solve(robotPose, new ChassisSpeeds(), Translation2d.kZero, goal);
   }
 
   /**
@@ -125,8 +227,8 @@ public class ShootingSolver {
    * @return interpolated time of flight, in seconds
    */
   public double getTimeOfFlight(double distanceMeters) {
-    // TODO: return timeOfFlightTable.get(distanceMeters).
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "timeOfFlightTable.get(distanceMeters).")
+    return timeOfFlightTable.get(distanceMeters);
   }
 
   /**
@@ -136,8 +238,8 @@ public class ShootingSolver {
    * @return interpolated ground-frame launch speed, in meters per second
    */
   public double getLaunchSpeed(double distanceMeters) {
-    // TODO: return launchSpeedTable.get(distanceMeters).
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "launchSpeedTable.get(distanceMeters).")
+    return launchSpeedTable.get(distanceMeters);
   }
 
   /**
@@ -146,8 +248,9 @@ public class ShootingSolver {
    * @return iteration count; log this so a replay shows whether the solver ever hits the cap
    */
   public int getLastIterationCount() {
-    // TODO: return lastIterationCount.
-    return 0;
+    // IMPLEMENTATION (was TODO: "Getter; log it so you can see in replay whether the solver ever
+    // hits the iteration cap.")
+    return lastIterationCount;
   }
 
   /**
@@ -157,8 +260,9 @@ public class ShootingSolver {
    *     table is too coarse or non-monotonic
    */
   public double getLastResidualSec() {
-    // TODO: return lastResidualSec.
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "Getter; a residual that stays large means your TOF table is too
+    // coarse or non-monotonic.")
+    return lastResidualSec;
   }
 
   /**
@@ -169,10 +273,56 @@ public class ShootingSolver {
    *     <p><b>Outputs:</b> logs the virtual goal, iteration count, residual, distance and RPM.
    */
   public void logDebug(String prefix, ShotParameters result) {
-    // TODO: Logger.recordOutput(prefix + "/VirtualGoal",
-    //     new Pose2d(result.virtualGoal(), result.turretFieldAngle()))
-    // plus the iteration count, residual, distance and RPM. Publishing the virtual goal AS A POSE
-    // makes the aim offset visible on AdvantageScope's 2D field view, which is by far the fastest
-    // way to see whether the solver is behaving sensibly.
+    // IMPLEMENTATION (was TODO: "Logger.recordOutput(prefix + "/VirtualGoal", new Pose2d(
+    // result.virtualGoal(), result.turretFieldAngle())) plus iteration count, residual, distance
+    // and RPM.")
+    //
+    // The virtual goal is published AS A POSE rather than as a bare translation, specifically so it
+    // renders as a robot-like marker on AdvantageScope's 2D field. Seeing the aim point slide off
+    // the real goal as the robot accelerates is by far the fastest way to tell whether the
+    // velocity compensation has the right sign.
+    Logger.recordOutput(
+        prefix + "/VirtualGoal", new Pose2d(result.virtualGoal(), result.turretFieldAngle()));
+    Logger.recordOutput(prefix + "/Iterations", lastIterationCount);
+    Logger.recordOutput(prefix + "/ResidualSec", lastResidualSec);
+    Logger.recordOutput(prefix + "/DistanceMeters", result.effectiveDistanceMeters());
+    Logger.recordOutput(prefix + "/FlywheelRpm", result.flywheelRpm());
+    Logger.recordOutput(prefix + "/TimeOfFlightSec", result.timeOfFlightSec());
+    Logger.recordOutput(prefix + "/Usable", result.isUsable());
+  }
+
+  /**
+   * Fills both interpolation tables from three parallel arrays.
+   *
+   * @param distances ascending distance breakpoints, in meters
+   * @param timesOfFlight time of flight at each breakpoint, in seconds
+   * @param launchSpeeds required ground-frame launch speed at each breakpoint, in meters per second
+   *     <p><b>Outputs:</b> clears and repopulates {@code timeOfFlightTable} and {@code
+   *     launchSpeedTable}.
+   * @throws IllegalArgumentException if the three arrays are not the same non-zero length
+   */
+  private void populate(double[] distances, double[] timesOfFlight, double[] launchSpeeds) {
+    // Throwing on a mismatch is deliberate and is worth the crash. A table whose arrays have
+    // drifted out of step produces plausible-looking but wrong aim at every distance, with no
+    // symptom other than missing -- which costs days to trace. Failing loudly at construction turns
+    // that into a stack trace on the first boot after the edit.
+    if (distances.length == 0
+        || distances.length != timesOfFlight.length
+        || distances.length != launchSpeeds.length) {
+      throw new IllegalArgumentException(
+          "Shot table arrays must be non-empty and the same length; got distances="
+              + distances.length
+              + " timesOfFlight="
+              + timesOfFlight.length
+              + " launchSpeeds="
+              + launchSpeeds.length);
+    }
+
+    timeOfFlightTable.clear();
+    launchSpeedTable.clear();
+    for (int i = 0; i < distances.length; i++) {
+      timeOfFlightTable.put(distances[i], timesOfFlight[i]);
+      launchSpeedTable.put(distances[i], launchSpeeds[i]);
+    }
   }
 }
