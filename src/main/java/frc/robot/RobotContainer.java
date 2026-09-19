@@ -1,11 +1,11 @@
 package frc.robot;
 
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
-import edu.wpi.first.math.geometry.Pose2d;
-import edu.wpi.first.math.geometry.Rotation2d;
 import frc.robot.autos.AutoFactory;
 import frc.robot.autos.AutoRoutines;
 import frc.robot.autos.AutoSelector;
@@ -208,10 +208,7 @@ public class RobotContainer {
     //       superstructure::getRequestedDriveHeading)
     drive.setDefaultCommand(
         DriveCommands.joystickDrive(
-            drive,
-            () -> -driver.getLeftY(),
-            () -> -driver.getLeftX(),
-            () -> -driver.getRightX()));
+            drive, () -> -driver.getLeftY(), () -> -driver.getLeftX(), () -> -driver.getRightX()));
 
     // Reset the field-relative heading to zero. Held on a button rather than automatic because it
     // redefines which way "forward" means for the driver, and .ignoringDisable(true) lets the team
@@ -233,7 +230,8 @@ public class RobotContainer {
     // Cross the wheels into an X to resist being pushed. Bound to X for the mnemonic.
     driver.x().onTrue(Commands.runOnce(drive::stopWithX, drive));
 
-    // ------------------------------------------------------- not yet bound: awaiting mechanisms ----
+    // ------------------------------------------------------- not yet bound: awaiting mechanisms
+    // ----
     //
     // The bindings below are intentionally NOT wired yet, because every one of them routes through
     // Superstructure, whose state machine is still stubbed. Binding them now would give a driver
