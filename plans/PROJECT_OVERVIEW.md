@@ -76,7 +76,8 @@ AdvantageKitRebuilt/
 ├── claude-test-branch/                   branch: claude-test   integration line
 ├── feature-drive/                        branch: feature-drive
 ├── feature-robot-state/                  branch: feature-robot-state
-└── feature-shooting-parameters/          branch: feature-shooting-parameters
+├── feature-shooting-parameters/          branch: feature-shooting-parameters
+└── feature-flywheel/                     branch: feature-flywheel
 ```
 
 Separate directories rather than one repo with branch switching, so that a known-good checkout is
@@ -132,7 +133,10 @@ was copied verbatim from `feature-drive` into `feature-shooting-parameters` for 
 
 A sensible merge order for the current branches is `feature-drive` → `claude-test` first, then
 `feature-robot-state` (which fast-forwards cleanly, being stacked on drive), then
-`feature-shooting-parameters` (independent, with `LoggedTunableNumber` identical on both sides).
+`feature-shooting-parameters` (independent, with `LoggedTunableNumber` identical on both sides), and
+`feature-flywheel` last. Flywheel goes last because it carries copies of four util classes taken
+byte-identical from `feature-drive` — `PhoenixUtil`, `PowerBudget`, `LoggedTunableNumber` and
+`LoggedTunableGains` — so once drive is in, those four resolve to no change at all.
 
 ## Milestone status
 
@@ -143,12 +147,38 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M1 | Regenerate drivetrain, field-relative driving | `feature-drive` | Code complete, builds; on-robot checkpoint outstanding |
 | M2 | `RobotState` owns the pose | `feature-robot-state` | Code complete, builds; **hardware checkpoint outstanding** |
 | M3 | `ShotParameters`, `ShootingSolver`, `TurretUnwrapper` + tests | `feature-shooting-parameters` | Complete — 24 tests pass, mutation score 13/13 |
-| M4+ | Mechanisms, vision, superstructure, autos | not started | — |
+| M4 | Flywheel: `ShooterIO`, `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` | `feature-flywheel` | Code complete, builds; **simulation checkpoint verified**; hardware checkpoint outstanding |
+| M5+ | Remaining four mechanisms, vision, superstructure, autos | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
 `getPoseAt(Timer.getFPGATimestamp() - 0.1)` returns a pose roughly 0.1 s behind the current one. The
 entire vision and shooting stack rests on that last one.
+
+M4's simulation checkpoint **has** been performed, and deliberately included negative cases, because
+this repository treats a passing observation as weak evidence until it has been seen to fail. What
+was confirmed in simulation:
+
+- `Shooter/SystemState` walks `IDLE → SPINNING_UP → AT_SPEED` on command.
+- `Shooter/WillBeAtSpeed` goes true *before* `Shooter/AtSpeed`. The gap between those two series is
+  the shot cadence that predictive readiness buys; no gap would mean the filtered acceleration
+  estimate is not working.
+- With the gains zeroed the flywheel never reaches speed, and the machine goes
+  `SPINNING_UP → FAULTED` after `kSpinUpTimeoutSec` with the alert raised. This is what proves
+  `atSpeed()` is not trivially true and that the timeout is live code rather than an unreachable
+  branch.
+- A goal of zero resolves to `IDLE` rather than faulting. That guard is not in the plan's
+  specification; it was added because `Superstructure` calls `setGoal(0.0)` whenever the shooting
+  solver returns an unusable solution, which — with the shot tables still all zeros — is its shipped
+  behaviour today.
+
+Two things M4 has **not** established. The flywheel has never run on hardware, so
+"holds a commanded RPM within `kToleranceRpm`" is untested, and `kFollowerOpposesLeader` is still a
+guess that must be checked against the gearbox before the first spin-up. And the checkpoint's third
+clause — that editing `Shooter/Kp` changes the response with no redeploy — is only partly shown: the
+zeroed-gains test moved `kS` and `kV` as well, and `ShooterIOSim` reads those two straight from
+`Constants` inside `setVelocity` while only `kP` travels through `io.setGains`. Changing `kP` alone
+would isolate the `LoggedTunableNumber.ifChanged → setGains` path, which nothing has exercised yet.
 
 ## Conventions
 
