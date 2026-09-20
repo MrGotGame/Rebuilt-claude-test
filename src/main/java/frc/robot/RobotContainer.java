@@ -170,6 +170,7 @@ public class RobotContainer {
 
     configureButtonBindings();
     configureCharacterizationBindings();
+    configureShooterTuningBindings();
   }
 
   /**
@@ -210,6 +211,51 @@ public class RobotContainer {
     // TODO: if (!Constants.kTuningMode) return; then add every routine from
     // CharacterizationCommands to autoSelector as a named option, exactly as the stock template
     // does for the drivetrain. Guarding on kTuningMode is what keeps them off the field.
+  }
+
+  /**
+   * Binds the operator controls that make the M4 flywheel checkpoint demonstrable, while tuning
+   * only.
+   *
+   * <p>This is a bench harness, not competition control. Every mechanism action in a match routes
+   * through {@link Superstructure#setWantedStateCommand}, which is what makes an illegal mechanism
+   * combination unrepresentable from a button -- but the superstructure's state machine is a
+   * skeleton until M10, so there is currently no route through it that can spin the flywheel. These
+   * three buttons fill that gap so the milestone can be verified when it is built rather than
+   * months later.
+   *
+   * <p>Binding a subsystem directly is safe here for exactly one reason: the flywheel has no
+   * mechanical interlock with anything. It cannot collide with the intake or the turret and it has
+   * no travel limits to crash into, which is why the plan picked it as the first mechanism. Do not
+   * copy this pattern for the turret or the intake.
+   *
+   * <p>The whole method is behind {@link Constants#kTuningMode}, so nothing below exists at an
+   * event.
+   *
+   * <p><b>Outputs:</b> registers three operator button triggers when tuning mode is on.
+   */
+  private void configureShooterTuningBindings() {
+    if (!Constants.kTuningMode) {
+      return;
+    }
+
+    // Y: spin to the bench speed. Deliberately a fresh setGoal() on every press rather than a
+    // latched command, so that editing Shooter/BenchTestRpm under /Tuning and pressing Y again is
+    // the whole retune loop -- no redeploy, which is half of what the M4 checkpoint is asking you
+    // to demonstrate.
+    operator
+        .y()
+        .onTrue(
+            Commands.runOnce(
+                () -> shooter.setGoal(Constants.Shooter.kBenchTestRpm.get()), shooter));
+
+    // A: back to the idle hold. This is the interesting one to watch, because IDLE is a closed-loop
+    // hold at kIdleRpm rather than a stop, and the difference between recovering from idle and
+    // recovering from zero is what the idle state exists to buy.
+    operator.a().onTrue(shooter.setWantedStateCommand(Shooter.WantedState.IDLE));
+
+    // B: coast down to a stop. The one way to actually stop the wheel from a button, for the pit.
+    operator.b().onTrue(shooter.setWantedStateCommand(Shooter.WantedState.COAST));
   }
 
   /**

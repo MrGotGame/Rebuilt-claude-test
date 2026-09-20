@@ -505,6 +505,21 @@ public final class Constants {
     public static final double kStatorLimitAmps = 80.0;
     public static final double kSupplyLimitAmps = 60.0;
 
+    /**
+     * Sustained supply limit, applied after {@link #kSupplyLowerTimeSec} of drawing {@link
+     * #kSupplyLimitAmps}.
+     *
+     * <p>Phoenix 6 supply limiting is two-stage, and a flywheel is the mechanism that most wants
+     * that shape: spin-up is a brief large draw, cruising is a small one. A single flat limit would
+     * have to be set high enough for spin-up and would then protect nothing for the rest of the
+     * match. TODO: MEASURE from a spin-up log once the flywheel exists -- the right value is the
+     * steady-state draw at kMaxRpm plus headroom.
+     */
+    public static final double kSupplyLowerLimitAmps = 40.0;
+
+    /** How long {@link #kSupplyLimitAmps} may be drawn before the lower limit takes over. */
+    public static final double kSupplyLowerTimeSec = 1.0;
+
     public static final LoggedTunableNumber kKp = new LoggedTunableNumber("Shooter/Kp", 0.2);
     public static final LoggedTunableNumber kKi = new LoggedTunableNumber("Shooter/Ki", 0.0);
     public static final LoggedTunableNumber kKd = new LoggedTunableNumber("Shooter/Kd", 0.0);
@@ -520,6 +535,17 @@ public final class Constants {
         new LoggedTunableNumber("Shooter/MaxRpm", 6000.0);
     public static final LoggedTunableNumber kSpinUpTimeoutSec =
         new LoggedTunableNumber("Shooter/SpinUpTimeout", 3.0);
+
+    /**
+     * Speed commanded by the tuning-mode bench binding in {@code RobotContainer}.
+     *
+     * <p>This exists so the M4 checkpoint can be run end to end from AdvantageScope with no code
+     * change: spin the wheel from a button, then edit {@code Shooter/Kp} and this value under
+     * {@code /Tuning} and watch the response change. It is reachable only while {@link
+     * Constants#kTuningMode} is true, so it cannot be triggered at an event.
+     */
+    public static final LoggedTunableNumber kBenchTestRpm =
+        new LoggedTunableNumber("Shooter/BenchTestRpm", 3000.0);
 
     /** FlywheelSim moment of inertia, kg*m^2, wheels plus shafts. TODO: from CAD. */
     public static final double kMoiKgM2 = 0.004;
