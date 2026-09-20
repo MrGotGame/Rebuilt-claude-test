@@ -88,16 +88,34 @@ These cost real time to rediscover.
 
 - `~` in an agent shell resolves to the sandbox, so `git config --global` from the agent writes to
   the wrong file. Global config changes must be made by the user.
-- `/home/joshua/.gradle` is **unreadable** to the agent. Gradle cannot run from the agent at all,
-  and the vendor jars (Phoenix 6, AdvantageKit, PathplannerLib, questnavlib) live only there.
-- `/home/joshua/.ssh` is likewise unreadable, so the agent cannot push even with SSH configured.
+- The snap `home` interface grants **non-hidden** paths in `/home/joshua` and excludes dotfiles.
+  That is the whole rule, and it explains everything below: `~/Documents` and `~/wpilib` are
+  readable *and writable*, while `~/.gradle`, `~/.config` and `~/.ssh` are not. It is not a
+  file-mode problem and `chmod` will not fix it; relocating out of the dotfile will.
+- `/home/joshua/.ssh` is unreadable, so the agent cannot push. **The user pushes.**
 
-**The user runs builds and pushes. The agent writes code and commits.** That split works; do not
-expect to change it without granting the snap home access.
+**THE AGENT CAN RUN GRADLE.** This section previously said it could not, and that was true until
+the Gradle cache was copied out of the dotfile:
+
+```bash
+cp -a /home/joshua/.gradle /home/joshua/gradle-home
+rm -rf /home/joshua/gradle-home/daemon
+```
+
+Always invoke it as:
+
+```bash
+export JAVA_HOME=/home/joshua/wpilib/2026/jdk
+./gradlew -g /home/joshua/gradle-home --offline <task>
+```
+
+`build`, `test` and `spotlessApply` all work, in a few seconds once the daemon is warm. The copy
+leaves `~/.gradle` untouched, so the user's own VS Code builds are unaffected, and backing it out is
+`rm -rf /home/joshua/gradle-home`. **Do not claim code is unverified for want of a build — run it.**
 
 **The WPILib JDK is at `/home/joshua/wpilib/2026/jdk`** and *is* readable. Setting
-`JAVA_HOME=/home/joshua/wpilib/2026/jdk` lets the agent run `javac` directly, which is how partial
-verification is done in the absence of Gradle.
+`JAVA_HOME` to it lets the agent run `javac` directly. That was the only verification available
+before the Gradle cache was relocated; it is now a fallback, and a weak one — see section 4.
 
 **WPILib's own jars are readable** at `/home/joshua/wpilib/2026/maven`, including JUnit 5.10.1. That
 is enough to compile and run pure-logic unit tests outside Gradle. It is *not* enough to run
@@ -148,9 +166,20 @@ This project treats verification claims as falsifiable, not rhetorical.
   time and each was confirmed to break a test. The first pass caught only 9 of 13; the four
   survivors were test gaps (not implementation bugs) and four tests were added to close them.
   Final score 13/13. Apply the same standard to future test suites.
+- **Run the tests.** `PROJECT_OVERVIEW.md`'s "Testing standard" section is the authority: every
+  mechanism gets an FSM suite over its `XxxIOSim`, and a suite counts as proof only once it has
+  been shown capable of failing, by mutation testing and by permanent deliberate-failure cases.
+  That section also lists the vacuous-pass shapes already found in this codebase; read it before
+  writing a test, because four of the five were live in committed code.
 - A known trap in this codebase's tooling: a `javac` run without the vendor jars produces hundreds
   of `cannot find symbol` errors, and filtering all of them hides *genuine* missing symbols in our
-  own code. Filter by symbol name against known vendor types instead.
+  own code. Filter by symbol name against known vendor types instead. This is how two undeclared
+  `Constants.FloorRoller` members reached a commit.
+- **`javac` parse-checking cannot see collisions with an unresolvable supertype.** With the vendor
+  jars missing, `SubsystemBase` does not resolve, so javac never learns what it declares: a
+  `private void idle()` clashing with WPILib 2026's `Subsystem.idle()` parsed cleanly and failed
+  the real build. Overridden signatures, narrowed access and clashing generics are all invisible
+  that way. Now that Gradle runs, this matters only if someone falls back to javac.
 - Another trap, hit three times: scripted `str.replace()` edits **silently do nothing** when the
   anchor text does not match. Always verify an edit landed rather than trusting the script's exit.
 
@@ -158,7 +187,9 @@ This project treats verification claims as falsifiable, not rhetorical.
 
 ## 5. Where things stand
 
-Branch heads and status at the time of writing. Nothing below has been verified on hardware.
+Branch heads and status at the time of writing. **Everything below builds and its tests pass** —
+verified by actually running `./gradlew build` on each. Nothing below has been verified on
+hardware.
 
 | Branch | Milestone | State |
 |---|---|---|
@@ -167,7 +198,11 @@ Branch heads and status at the time of writing. Nothing below has been verified 
 | `feature-drive` | M1 | Drivetrain, `RobotState` odometry path, tunables, `PhoenixUtil`, `DriveCommands`. Builds. Teleop default command bound (left stick translate, right stick rotate). |
 | `feature-robot-state` | M2 | Branched off `feature-drive`. Vision ingestion with rejection rules, staleness, pose confidence, QuestNav trust, `AllianceFlipUtil`. Builds. |
 | `feature-shooting-parameters` | M3 | Branched off `claude-test`, independent. `ShotParameters`, `ShootingSolver`, `TurretUnwrapper`, `GeomUtil`. 24 tests pass, mutation score 13/13. |
-| `feature-flywheel` | M4 | Branched off `claude-test`, independent. `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` FSM, plus a NetworkTables bench harness. Builds. **Simulation checkpoint complete, negative cases included**; hardware outstanding. Carries `PhoenixUtil`, `PowerBudget`, `LoggedTunableNumber` and `LoggedTunableGains` byte-identical from `feature-drive`. |
+| `feature-flywheel` | M4 | Branched off `claude-test`, independent. `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` FSM, plus a NetworkTables bench harness. Builds. **Simulation checkpoint complete, negative cases included**; hardware outstanding. 7 FSM tests, mutation score 4/4. Carries `PhoenixUtil`, `PowerBudget`, `LoggedTunableNumber` and `LoggedTunableGains` byte-identical from `feature-drive`. |
+| `feature-floor-roller` | M5 | Branched off `claude-test`. Simplest mechanism; FSM has no guards and no `FAULTED` state deliberately, because it has no limits, no homing and no goal it can fail to reach. 5 tests, mutation 3/3. |
+| `feature-indexer` | M5 | Branched off `claude-test`. Piece detection, shot counting, and `IndexerIOSim.setSimulatedPiecePresent` so those paths are reachable with no hardware. 6 tests, mutation 3/3. |
+| `feature-intake` | M5 | Branched off `claude-test`. Pivot plus roller, homing, and the deploy guard. 8 tests; the suite found three real bugs, all fixed. |
+| `feature-turret` | M5 | Branched off **`feature-drive`**, because `Turret.periodic()` needs `RobotState`. Carries `TurretUnwrapper` byte-identical from `feature-shooting-parameters` — do not edit it there. 4 FSM tests plus the 12 inherited unwrapper cases; found and fixed the dead-motor homing bug. |
 
 **M4's simulation checkpoint is complete**, including deliberate failures: zeroed gains drive the
 machine to `FAULTED` after `kSpinUpTimeoutSec`, a zero goal resolves to `IDLE` instead of faulting,
@@ -198,18 +233,27 @@ whole vision and shooting stack rests on that last one.
 
 ## 6. Suggested next steps
 
-1. **Push the outstanding branches.** `main`, `claude-test`, and the four feature branches all have
-   unpushed commits.
+1. **Push the outstanding branches.** `main`, `claude-test` and all seven feature branches have
+   unpushed commits. Pushing is the user's job; the agent cannot reach `~/.ssh`.
 2. **Commit the regenerated `TunerConstants.java`** on `claude-test`.
-3. **Review and accept M4.** The plan calls the flywheel the template for the other four mechanisms,
-   so lane B should not start them in parallel until its IO layer, FSM shape and logging have been
-   read and agreed. Everything from `handleStateTransition` down is meant to be copied.
-4. **Perform M2's hardware checkpoint** before building anything that consumes pose, and M4's
-   hardware checkpoint when a flywheel exists.
-5. **M5 — the remaining four mechanisms** (lane B), once M4 is accepted.
+3. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
+   layer, FSM shape and logging should be read and agreed before anything is built on top.
+4. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done:
+   - M2's pose gate — drive a 3 m square, confirm `getPoseAt(now - 0.1)` lags correctly. **Blocks
+     M7, M8, M10 and M12.**
+   - Per mechanism: closed-loop motion on the robot, and every device raising an alert when
+     unplugged.
+   - **Sign conventions that only hardware can settle:** `kPivotKg` and the homing direction on the
+     intake, the velocity-feedforward sign on the turret, beam-break polarity on the indexer, and
+     `kFollowerOpposesLeader` on the flywheel — that last one is still a guess, and wrong means the
+     pair fights itself at 80 A per motor.
+5. **M6 characterization.** Several placeholder gains are visibly wrong in simulation: the intake
+   pivot rings for about eight seconds before settling because `kPivotKg` and `kPivotKd` are both
+   0.0, and the flywheel's `kV` under-predicts so `kP` is compensating for a feedforward error
+   rather than doing its own job. Measure before tuning either.
 6. **The constants rename** (section 2), ideally as its own mechanical branch.
-7. **Integration branches**, merging in the order `feature-drive` → `claude-test`, then
-   `feature-robot-state` (fast-forwards, being stacked on drive), then `feature-shooting-parameters`
-   (independent; `LoggedTunableNumber.java` is byte-identical on both sides, so it merges cleanly),
-   then `feature-flywheel` last, whose four copied util files collapse to no change once drive is
-   in.
+7. **Integration branches**, merging `feature-drive` → `claude-test` first, then
+   `feature-robot-state` (fast-forwards, being stacked on drive), then
+   `feature-shooting-parameters`, then the M5 mechanisms, with `feature-flywheel` and
+   `feature-turret` last — they carry the most byte-identical copied files, which collapse to no
+   change once their sources are in.
