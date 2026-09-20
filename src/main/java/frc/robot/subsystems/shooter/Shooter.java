@@ -57,9 +57,9 @@ public class Shooter extends SubsystemBase {
    * <p>These are plain WPILib {@link Alert}s rather than {@code FaultReporter} registrations,
    * following the precedent already set in {@code PhoenixUtil.tryUntilOk}: {@code FaultReporter} is
    * still a skeleton whose {@code getInstance()} returns null, so registering with it here would
-   * throw in the {@code Shooter} constructor. Swap both of these for
-   * {@code FaultReporter.getInstance().registerDeviceDisconnect(...)} once that class is
-   * implemented; the alert text is already written to match what it would produce.
+   * throw in the {@code Shooter} constructor. Swap both of these for {@code
+   * FaultReporter.getInstance().registerDeviceDisconnect(...)} once that class is implemented; the
+   * alert text is already written to match what it would produce.
    *
    * <p>They are separate on purpose, for the reason {@link ShooterIO} logs both motors separately:
    * a lost follower and a lost leader are different failures. A dead leader stops the robot
@@ -291,9 +291,9 @@ public class Shooter extends SubsystemBase {
       case SPINNING_UP, AT_SPEED -> io.setVelocity(goalRpm);
       case CHARACTERIZING -> io.setOpenLoop(characterizationVolts);
 
-      // FAULTED stops rather than idling. If the wheel could not reach its goal, the reason may
-      // well be mechanical, and holding a jammed flywheel against a stator limit for the rest of
-      // the match is how a motor is destroyed.
+        // FAULTED stops rather than idling. If the wheel could not reach its goal, the reason may
+        // well be mechanical, and holding a jammed flywheel against a stator limit for the rest of
+        // the match is how a motor is destroyed.
       case FAULTED -> io.stop();
     }
   }
@@ -423,9 +423,9 @@ public class Shooter extends SubsystemBase {
   /**
    * The current state of the flywheel machine.
    *
-   * <p>Added beyond the plan's method list so that the M4 simulation checkpoint -- watching
-   * {@code Shooter/SystemState} walk IDLE, SPINNING_UP, AT_SPEED -- can also be asserted from a
-   * test rather than only read off a graph.
+   * <p>Added beyond the plan's method list so that the M4 simulation checkpoint -- watching {@code
+   * Shooter/SystemState} walk IDLE, SPINNING_UP, AT_SPEED -- can also be asserted from a test
+   * rather than only read off a graph.
    *
    * @return the state the machine is running this loop
    */

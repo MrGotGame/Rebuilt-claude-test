@@ -14,6 +14,7 @@ import com.ctre.phoenix6.controls.VelocityVoltage;
 import com.ctre.phoenix6.controls.VoltageOut;
 import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.signals.InvertedValue;
+import com.ctre.phoenix6.signals.MotorAlignmentValue;
 import com.ctre.phoenix6.signals.NeutralModeValue;
 import edu.wpi.first.math.filter.Debouncer;
 import edu.wpi.first.units.measure.AngularVelocity;
@@ -39,7 +40,16 @@ public class ShooterIOTalonFX implements ShooterIO {
    * draws double current to make up the difference.
    */
   private final Follower followerRequest =
-      new Follower(Constants.Can.kFlywheelLeaderId, Constants.Shooter.kFollowerOpposesLeader);
+      new Follower(
+          Constants.Can.kFlywheelLeaderId,
+          // Phoenix 6 v26 retyped this parameter: it was a boolean opposeMasterDirection through
+          // v25 and is now a MotorAlignmentValue. The meaning is unchanged -- Opposed means the
+          // follower runs against the leader's configured Invert -- so kFollowerOpposesLeader stays
+          // the single place the mechanical fact is written down, and this is the only translation
+          // of it in the project.
+          Constants.Shooter.kFollowerOpposesLeader
+              ? MotorAlignmentValue.Opposed
+              : MotorAlignmentValue.Aligned);
 
   private final StatusSignal<AngularVelocity> velocity;
   private final StatusSignal<Voltage> leaderVolts;
@@ -122,7 +132,13 @@ public class ShooterIOTalonFX implements ShooterIO {
     // 4 Hz: a motor takes tens of seconds to heat up, and nine devices share the roboRIO bus, so
     // paying 100 Hz for it would spend bus budget the drivetrain handoff needs.
     BaseStatusSignal.setUpdateFrequencyForAll(
-        100.0, velocity, leaderVolts, followerVolts, leaderStator, followerStator, leaderSupply,
+        100.0,
+        velocity,
+        leaderVolts,
+        followerVolts,
+        leaderStator,
+        followerStator,
+        leaderSupply,
         followerSupply);
     BaseStatusSignal.setUpdateFrequencyForAll(4.0, leaderTemp, followerTemp);
 
