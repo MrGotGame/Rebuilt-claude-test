@@ -24,8 +24,24 @@ import org.junit.jupiter.api.Test;
 public class IndexerFsmTest {
   private static final double LOOP_SEC = 0.02;
 
-  /** Long enough to outrun the piece-detection debouncer in either direction. */
-  private static final int DEBOUNCE_LOOPS = 25;
+  /**
+   * Loops needed for a piece to be detected, derived from the constants rather than guessed.
+   *
+   * <p>Detection has to clear two gates in series: the settling window that skips the spin-up
+   * transient, and then the debouncer. A fixed guess sat right on that boundary and made this suite
+   * fail intermittently, which is the worst possible failure mode for a test -- it reads as
+   * flakiness and gets ignored. Deriving it means retuning either constant cannot silently
+   * re-introduce that.
+   *
+   * @return loops to step before asserting on piece detection
+   */
+  private static int detectionLoops() {
+    return (int)
+            ((Constants.Indexer.kDetectionSettleSec.get()
+                    + Constants.Indexer.kHasPieceDebounceSec.get())
+                / LOOP_SEC)
+        + 15;
+  }
 
   private IndexerIOSim sim;
   private Indexer indexer;
@@ -67,7 +83,7 @@ public class IndexerFsmTest {
   /** Nothing is held at boot, and an empty indexer does not invent a piece. */
   @Test
   void startsIdleAndEmpty() {
-    step(DEBOUNCE_LOOPS);
+    step(detectionLoops());
     assertEquals(Indexer.SystemState.IDLE, indexer.getSystemState());
     assertFalse(indexer.hasPiece(), "an empty indexer must not report a piece");
     assertEquals(0, indexer.getShotCount());
@@ -82,7 +98,7 @@ public class IndexerFsmTest {
 
     // HOLDING is only reachable with a piece aboard, which is what the sim hook is for.
     sim.setSimulatedPiecePresent(true);
-    step(DEBOUNCE_LOOPS);
+    step(detectionLoops());
     assertEquals(
         Indexer.SystemState.HOLDING,
         indexer.getSystemState(),
@@ -116,14 +132,14 @@ public class IndexerFsmTest {
   void shotCountIncrementsExactlyOncePerPiece() {
     sim.setSimulatedPiecePresent(true);
     indexer.setWantedState(Indexer.WantedState.INDEX);
-    step(DEBOUNCE_LOOPS);
+    step(detectionLoops());
     assertTrue(indexer.hasPiece(), "the injected piece was never detected");
 
     indexer.setWantedState(Indexer.WantedState.FEED);
     step(5);
 
     sim.setSimulatedPiecePresent(false);
-    step(DEBOUNCE_LOOPS);
+    step(detectionLoops());
     assertEquals(1, indexer.getShotCount(), "feeding one piece out must count exactly one shot");
 
     step(100);
@@ -143,7 +159,7 @@ public class IndexerFsmTest {
   void aHeldPieceIsNotLostWhileHolding() {
     sim.setSimulatedPiecePresent(true);
     indexer.setWantedState(Indexer.WantedState.INDEX);
-    step(DEBOUNCE_LOOPS);
+    step(detectionLoops());
 
     indexer.setWantedState(Indexer.WantedState.HOLD);
     step(150);
@@ -162,7 +178,7 @@ public class IndexerFsmTest {
     indexer = new Indexer(new IndexerIO() {});
 
     indexer.setWantedState(Indexer.WantedState.INDEX);
-    step(DEBOUNCE_LOOPS);
+    step(detectionLoops());
 
     assertEquals(
         Indexer.SystemState.INDEXING,

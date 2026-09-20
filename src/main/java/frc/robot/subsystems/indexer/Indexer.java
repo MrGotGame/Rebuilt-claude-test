@@ -122,6 +122,12 @@ public class Indexer extends SubsystemBase {
    */
   private boolean lastLoadedSample = false;
 
+  /** Time since the commanded speed last changed, used to skip the spin-up transient. */
+  private final Timer goalChangeTimer = new Timer();
+
+  /** The goal the settling window is being measured against, so a change restarts it. */
+  private double lastGoalRpmForDetection = 0.0;
+
   /**
    * True once an EJECT request has run for its full duration, latching the machine in IDLE until
    * the request changes.
@@ -335,9 +341,30 @@ public class Indexer extends SubsystemBase {
       // out by hand while the indexer sits stopped cannot be noticed, and hasPiece stays true until
       // something drives the motor again. Every driven state -- INDEXING, FEEDING, EJECTING --
       // re-measures, so the stale answer cannot survive an attempt to use the piece.
+      // The unloaded baseline must be established before load can be inferred from a shortfall
+      // against it. The comment below correctly identifies the spin-up transient but relies on
+      // kHasPieceDebounceSec to outlast it, and it does not: an empty indexer asked to FEED from
+      // rest reported a piece, dropped it on reaching speed, and the shot counter recorded a shot
+      // that never happened -- in roughly two runs out of three, which reads as flakiness rather
+      // than as the deterministic bug it is. Waiting for the wheel to reach its goal once,
+      // unloaded,
+      // removes the failure by construction instead of by timing margin.
+      if (goalRpm != lastGoalRpmForDetection) {
+        lastGoalRpmForDetection = goalRpm;
+        goalChangeTimer.restart();
+      }
+
+      // A settling WINDOW rather than a "has reached goal unloaded" baseline. The baseline version
+      // was tried first and is wrong: a wheel that is already carrying a piece when it spins up
+      // never reaches its unloaded speed, so it would never establish a baseline and would never
+      // detect the piece it is holding. Elapsed time is agnostic about what the wheel is doing.
+      boolean settled = goalChangeTimer.hasElapsed(Constants.Indexer.kDetectionSettleSec.get());
+
       boolean loaded;
-      if (goalRpm == 0.0) {
-        pieceDetectionSource = "Latched";
+      if (goalRpm == 0.0 || !settled) {
+        // Stopped, or still spinning up. The predicate cannot say anything either way, so the last
+        // sample taken while it could is replayed rather than an answer being invented.
+        pieceDetectionSource = goalRpm == 0.0 ? "Latched" : "SpinUp";
         loaded = lastLoadedSample;
       } else {
         // BOTH halves are required, which is not belt-and-braces: a current spike alone fires on

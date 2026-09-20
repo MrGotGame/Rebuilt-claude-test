@@ -408,6 +408,22 @@ public final class Constants {
 
     public static final LoggedTunableNumber kHasPieceVelocityDropRpm =
         new LoggedTunableNumber("Indexer/HasPieceVelDrop", 400.0);
+
+    /**
+     * How long after a speed change the load predicate is ignored.
+     *
+     * <p>Spin-up from rest satisfies both halves of the load test at once -- high current AND a
+     * large shortfall against the goal -- so an empty indexer told to FEED reported a phantom piece
+     * and then "lost" it on reaching speed, which the shot counter recorded as a shot. Debouncing
+     * was relied on to outlast that transient and did not. Ignoring the predicate until the wheel
+     * has had time to settle removes the failure by construction rather than by timing margin.
+     *
+     * <p>TODO: MEASURE -- read the spin-up duration from Indexer/Inputs and set this comfortably
+     * above it.
+     */
+    public static final LoggedTunableNumber kDetectionSettleSec =
+        new LoggedTunableNumber("Indexer/DetectionSettleSec", 0.4);
+
     public static final LoggedTunableNumber kHasPieceDebounceSec =
         new LoggedTunableNumber("Indexer/HasPieceDebounce", 0.06);
     public static final LoggedTunableNumber kShotDetectDebounceSec =
