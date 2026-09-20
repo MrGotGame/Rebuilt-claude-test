@@ -133,6 +133,36 @@ assuming a fixed path, but `--dump` prints every named connector it found so the
 visible in one look rather than guessed at. If the names are there but the transforms are not,
 `--dump` is the right thing to paste into a conversation.
 
+## The STEP route, and what it established
+
+`tools/step_inspect.py` reads a STEP export instead of the live document. It cannot replace the
+mate-connector route — a STEP file carries no datum saying "this is the robot origin" and no
+annotation saying "the lens is here, pointing that way" — but it is very good at confirming the
+things that are easy to get wrong and expensive to find late.
+
+Run against `Robot.step` it established, by three independent routes, that **the assembly origin
+already is the FRC robot origin**:
+
+- the frame bounding box is centred on it in XY (0.703 × 0.656 m, centre within 1 mm of zero);
+- the four swerve modules are symmetric about it, at roughly ±0.26 m — which agrees with
+  `TunerConstants`' ±10 inches, so that value is confirmed rather than a Tuner X placeholder;
+- the module hardware bottoms out at exactly Z = 0.0000, so Z = 0 is the floor.
+
+That is the single hardest fact to establish and the one a mis-placed `MC_RobotOrigin` would get
+wrong, so it is worth having independently.
+
+Two traps were hit writing that tool, both of which produce plausible-looking wrong answers:
+
+1. **The transform direction is not fixed by the standard.** A
+   `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION` names two representations and which is the
+   parent varies by exporter. In this Onshape export `rep_1` is the *child*, the opposite of the
+   usual assumption, and composing it the other way silently produces a wrong assembly. The
+   giveaway was two flywheels on one shooter coming out 90° apart with Y and Z swapped. The tool
+   now decides per relationship instead of assuming.
+2. **B-rep geometry contains points that are not on the part.** Unbounded surface and curve
+   definitions carry control points far outside the solid; one bracket measured 501 m across on a
+   first pass. Bounds are percentile-based for that reason.
+
 ## Testing
 
 `--self-test` checks the geometry against hand-computed answers with no credentials and no network:
