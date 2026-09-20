@@ -185,3 +185,9 @@ compile_commands.json
 
 # Version file
 src/main/java/frc/robot/BuildConstants.java
+
+# Onshape / vendor API credentials. The extractor refuses to read a key file from inside
+# the working tree at all; this is the second line of defence, not the first.
+*onshape*key*
+*-keys.env
+*.secret
