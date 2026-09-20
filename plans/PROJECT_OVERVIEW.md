@@ -148,7 +148,11 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M2 | `RobotState` owns the pose | `feature-robot-state` | Code complete, builds; **hardware checkpoint outstanding** |
 | M3 | `ShotParameters`, `ShootingSolver`, `TurretUnwrapper` + tests | `feature-shooting-parameters` | Complete — 24 tests pass, mutation score 13/13 |
 | M4 | Flywheel: `ShooterIO`, `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` | `feature-flywheel` | Code complete, builds; **simulation checkpoint complete**; hardware checkpoint outstanding |
-| M5+ | Remaining four mechanisms, vision, superstructure, autos | not started | — |
+| M5 | Intake, floor roller, indexer, turret | `feature-intake`, `feature-floor-roller`, `feature-indexer`, `feature-turret` | Code complete, builds; FSM suites pass; hardware checkpoints outstanding |
+| M6 | Characterize everything | — | not started; needs hardware |
+| M7 | Intake Limelight, rejection ladder, covariance model | `feature-limelight` | Complete in simulation — rejection ladder 5/5 under mutation; hardware checkpoint outstanding |
+| M8 | Turret camera: `robotToTurretCameraNow/At`, slew-rate rejection | `feature-limelight-complete` | **Simulation checkpoint complete** — 12 + 5 tests, mutation score 7/7; hardware checkpoint outstanding |
+| M9+ | QuestNav, superstructure, autos | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
@@ -192,6 +196,53 @@ its own job. Do not tune around it — M6's `shooterStaircase` measures `kS` and
 state, and the gains should be revisited only after that, on hardware, where the numbers that
 actually matter live.
 
+### M8, and what "the highest-value single test in the project" cost to make real
+
+M8's checkpoint — slew the turret through 180° with the robot stationary and confirm
+`RobotState/EstimatedPose` does not move — now runs as a JUnit case on every push. Getting there
+took four separate fixes, and every one of them was a way the test could have passed while proving
+nothing. They are worth recording, because the same shapes will recur:
+
+- **The thing under test was a stub.** `GeomUtil.rotateAboutZ` returned its argument. The checkpoint
+  names that method as the first suspect when the pose swings, so it could not be deferred.
+- **The clamping bug again.** `RobotState.getTurretAngleAt` delegated straight to
+  `TimeInterpolatableBuffer.getSample`, which clamps out-of-range queries to its nearest endpoint
+  instead of returning empty — the identical defect M7 found in `getPoseAt`. Rule 7 of the rejection
+  ladder fires on that method returning empty, so the rule was unreachable code. **When a method's
+  contract says "or empty if out of range", check that WPILib agrees.**
+- **The simulator could not be wrong.** `VisionIOSim` reported ground truth directly, so no transform
+  error could exist in simulation at all. It now solves the way a Limelight does — it fixes its lens
+  in the field using the *true* mounting, then subtracts the mounting the robot code *pushed* — so a
+  wrong transform produces a wrong pose. A permanent test asserts the sim can still be fooled,
+  because the day that stops holding, every other case in the file passes for free.
+- **The constants made the geometry degenerate.** `kRobotToTurretAxis` and `kTurretToCamera` are both
+  still identity pending CAD, and a lens on the rotation axis does not move when the axis turns —
+  so every composition order passes. `Vision` now takes the mounting as constructor arguments,
+  defaulting to the constants, and the tests supply a real 0.23 m lever arm.
+
+The expected geometry in those tests is computed with sine and cosine, never with the composition
+under test. Deriving it from `rotateAboutZ` would let a backwards composition cancel against itself
+— and the correct and backwards orders agree **exactly** at a turret angle of zero, which is why a
+bench check with the turret parked certifies a transform that is wrong the moment it moves.
+
+**Mutation testing earned its place here.** The first version of the suite scored 4/7, and the three
+survivors were worth more than the four kills. Deleting the capture-time correction entirely, and
+un-composing with the newest pushed transform rather than the one in effect at capture, both left
+the checkpoint green: its 2 cm tolerance is sized for a backwards composition worth tens of
+centimetres, and those defects cost about one. The lesson generalises — **a checkpoint tolerance
+calibrated for the loudest failure will not notice the quiet ones, so each mechanism also needs a
+test asserting the property it actually promises.** The third survivor was the current-angle
+fallback the plan forbids by name; it hid because the rejection it should have caused reappeared
+under the same counter from the other half of the same check. Splitting `NO_TURRET_ANGLE` from
+`NO_PUSHED_TRANSFORM` fixed both the test and the pit diagnostics. Second run: 7/7.
+
+What M8 has **not** established is anything about hardware. The turret camera has never seen a tag,
+and because the mounting constants are still identity, every turret-camera pose on a real robot is
+biased by the true camera offset — with the bias rotating as the turret tracks, which reads as a
+pose that wanders exactly when the shooter is aiming. The observations are still fused rather than
+suppressed, because a silently inert camera is the harder failure to notice, but
+`turretTransformUnmeasuredAlert` fires continuously until someone measures it.
+
 ## Conventions
 
 These are followed throughout and should be maintained.
@@ -223,6 +274,12 @@ These affect everything downstream and are not bugs in any one branch:
   an infinite flywheel command, but cannot aim until the tables are measured on a real field.
 - **PathPlanner is unconfigured.** `AutoFactory.configureAutoBuilder()` is unimplemented, so every
   autonomous routine resolves to `Commands.none()` — silently.
+- **Every camera mounting transform is still identity.** `kRobotToTurretAxis`, `kTurretToCamera`,
+  `kRobotToIntakeCamera` and `kRobotToQuest` are all `TODO: MEASURE from CAD`. The transform *maths*
+  is now implemented and tested, but until the numbers exist each camera's poses are biased by its
+  true offset from the robot origin — and for the turret camera that bias rotates with the turret.
+  `Vision` raises a warning alert while the turret mounting is unmeasured, and the measurement is a
+  prerequisite for M8's on-robot checkpoint rather than a tuning step after it.
 - **No hardware verification has been performed** on any milestone.
 
 ## Testing standard
