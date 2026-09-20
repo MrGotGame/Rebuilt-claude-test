@@ -264,7 +264,13 @@ A suite whose author also wrote the code proves nothing until it has been broken
 ways, and both are expected:
 
 **Mutation testing.** Inject a defect, confirm a test goes red, revert. M3 set the bar at 13/13;
-M5's floor roller and indexer ran 3/3 each. **The harness must assert that the substitution actually
+M5's floor roller and indexer ran 3/3 each, M7's vision ladder 5/5.
+
+> **Commit before you mutate.** A mutation harness reverts with `git checkout --`, which does not
+> distinguish your mutation from work you have not committed yet. Doing this to uncommitted M7 code
+> destroyed an afternoon of it, and the only reason the loss was recoverable was that the edits
+> happened to still be in the session. Commit first, mutate second — the revert can then only
+> restore something git already has. **The harness must assert that the substitution actually
 changed the file** — a mutation whose anchor silently fails to match reports a perfect score for
 doing nothing, which is worse than no mutation testing because it is actively reassuring. That
 happened once here and was caught only because the assertion existed.
