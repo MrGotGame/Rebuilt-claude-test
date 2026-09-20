@@ -1,6 +1,7 @@
 package frc.robot.util;
 
 import com.ctre.phoenix6.configs.Slot0Configs;
+import com.ctre.phoenix6.signals.GravityTypeValue;
 import java.util.function.Consumer;
 
 /**
@@ -20,7 +21,25 @@ public class LoggedTunableGains {
   private final LoggedTunableNumber kS;
   private final LoggedTunableNumber kV;
   private final LoggedTunableNumber kA;
-  private final LoggedTunableNumber kG;
+  /**
+   * Gravity feedforward. Not final, unlike the other six, because {@link #withGravity(double)}
+   * replaces it to set a non-zero compiled default -- {@code initDefault} is idempotent and so
+   * cannot raise a default that the constructor already latched at zero.
+   */
+  private LoggedTunableNumber kG;
+
+  /**
+   * How Phoenix should interpret the kG term.
+   *
+   * <p>Defaults to {@link GravityTypeValue#Elevator_Static}, which is a constant offset and is the
+   * correct no-op behaviour when kG is left at zero. {@link #withGravity(double)} switches it to
+   * {@link GravityTypeValue#Arm_Cosine} for rotating mechanisms, where the gravity term must scale
+   * with the cosine of the arm angle.
+   */
+  private GravityTypeValue gravityType = GravityTypeValue.Elevator_Static;
+
+  /** Dashboard prefix, retained so {@link #withGravity(double)} can rebuild the kG entry. */
+  private final String prefix;
 
   /**
    * Creates the seven backing tunables under a shared dashboard prefix, with gravity feedforward
@@ -37,8 +56,13 @@ public class LoggedTunableGains {
    */
   public LoggedTunableGains(
       String prefix, double p, double i, double d, double s, double v, double a) {
-    // TODO: Create one LoggedTunableNumber per gain, keyed "<prefix>/kP", "<prefix>/kI" and so on.
-    // Default kG to 0.0 so mechanisms that do not fight gravity need not think about it.
+    // IMPLEMENTATION (was TODO: "Create one LoggedTunableNumber per gain under "<prefix>/kP" etc.,
+    // with kG defaulted to 0.")
+    //
+    // kG defaults to 0 so that a mechanism which does not fight gravity -- a flywheel, a roller, a
+    // swerve azimuth -- gets a gravity term that is exactly inert, and its owner never has to think
+    // about it. Only withGravity() opts in.
+    this.prefix = prefix;
     this.kP = new LoggedTunableNumber(prefix + "/kP", p);
     this.kI = new LoggedTunableNumber(prefix + "/kI", i);
     this.kD = new LoggedTunableNumber(prefix + "/kD", d);
@@ -55,8 +79,19 @@ public class LoggedTunableGains {
    * @return this instance, so the call can be chained onto the constructor
    */
   public LoggedTunableGains withGravity(double g) {
-    // TODO: kG.initDefault(g) and return this. initDefault is a no-op if a default was already
-    // latched, which is what makes this safe to call fluently.
+    // IMPLEMENTATION (was TODO: "initDefault kG and return this, so arm/pivot mechanisms can opt in
+    // fluently.")
+    //
+    // kG is REPLACED rather than re-defaulted. LoggedTunableNumber.initDefault is deliberately
+    // idempotent, so calling it on the kG the constructor already latched at 0.0 would silently do
+    // nothing -- a method named withGravity(g) that quietly ignores g is exactly the kind of trap
+    // this codebase tries not to set.
+    //
+    // The gravity TYPE is switched at the same time: a rotating mechanism needs Arm_Cosine, where
+    // the term scales with the cosine of the arm angle, not the constant offset that
+    // Elevator_Static applies.
+    this.kG = new LoggedTunableNumber(prefix + "/kG", g);
+    this.gravityType = GravityTypeValue.Arm_Cosine;
     return this;
   }
 
@@ -66,10 +101,22 @@ public class LoggedTunableGains {
    * @return a fresh {@link Slot0Configs} carrying the current values of all seven gains
    */
   public Slot0Configs toSlot0Configs() {
-    // TODO: Build a Slot0Configs using withKP/withKI/withKD/withKS/withKV/withKA/withKG from the
-    // current tunable values. Verify the kG setter and the GravityType enum against the Phoenix6
-    // 26.1.2 docs -- an arm needs GravityType.Arm_Cosine, an elevator needs Elevator_Static.
-    return new Slot0Configs();
+    // IMPLEMENTATION (was TODO: "Build a Slot0Configs with withKP/withKI/withKD/withKS/withKV/
+    // withKA/withKG from the current tunable values. Verify the kG and GravityType setters against
+    // Phoenix6 26.1.2 docs.")
+    //
+    // A FRESH Slot0Configs is returned every call rather than a cached mutable one. Phoenix's
+    // configurator reads the object asynchronously, so handing out a shared instance that a later
+    // call mutates is a genuine race.
+    return new Slot0Configs()
+        .withKP(kP.get())
+        .withKI(kI.get())
+        .withKD(kD.get())
+        .withKS(kS.get())
+        .withKV(kV.get())
+        .withKA(kA.get())
+        .withKG(kG.get())
+        .withGravityType(gravityType);
   }
 
   /**
@@ -80,11 +127,14 @@ public class LoggedTunableGains {
    *     <p><b>Outputs:</b> invokes {@code action} at most once per call.
    */
   public void ifChanged(int id, Consumer<Slot0Configs> action) {
-    // TODO: LoggedTunableNumber.ifChanged(id, () -> action.accept(toSlot0Configs()), kP, kI, kD,
-    // kS,
-    // kV, kA, kG). The action passed in should call PhoenixUtil.tryUntilOk(5, () ->
-    // talon.getConfigurator().apply(configs, 0.25)) so a dropped CAN frame does not silently lose
-    // the new gains.
+    // IMPLEMENTATION (was TODO: "LoggedTunableNumber.ifChanged(id, () -> action.accept(
+    // toSlot0Configs()), kP, kI, kD, kS, kV, kA, kG). The action should call tryUntilOk(...)")
+    //
+    // toSlot0Configs() is evaluated lazily INSIDE the runnable, so the (comparatively expensive)
+    // config object is only built on the loops where something actually moved -- which, after the
+    // first loop, is almost never.
+    LoggedTunableNumber.ifChanged(
+        id, () -> action.accept(toSlot0Configs()), kP, kI, kD, kS, kV, kA, kG);
   }
 
   /**
@@ -94,8 +144,9 @@ public class LoggedTunableGains {
    * @return current kV, in volts per unit of velocity
    */
   public double kv() {
-    // TODO: return kV.get().
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "return kV.get(); needed for open-loop velocity feedforward outside
+    // Phoenix.")
+    return kV.get();
   }
 
   /**
@@ -105,7 +156,7 @@ public class LoggedTunableGains {
    * @return current kS, in volts
    */
   public double ks() {
-    // TODO: return kS.get().
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "return kS.get().")
+    return kS.get();
   }
 }

@@ -41,9 +41,18 @@ public class PowerBudget {
    * @return the singleton instance
    */
   public static PowerBudget getInstance() {
-    // TODO: Lazy singleton. Construct the PowerDistribution(Constants.Can.kPdhId,
-    // PowerDistribution.ModuleType.kRev) ONLY when Constants.currentMode == Mode.REAL, so that
-    // simulation and log replay never touch the HAL.
+    // IMPLEMENTATION (was TODO: "Lazy singleton; construct PowerDistribution(Constants.Can.kPdhId,
+    // ModuleType.kRev) only when Constants.currentMode == REAL so sim and replay do not touch the
+    // HAL.")
+    //
+    // Only the lazy-singleton half is implemented here, because the drivetrain needs a non-null
+    // instance to ask for its current-limit scalar. periodic() is still a stub, so getScalar()
+    // returns a constant 1.0 and no throttling actually happens yet -- which is the correct, safe
+    // default. The PowerDistribution object is deliberately NOT constructed until periodic() is
+    // written, so nothing touches the HAL in simulation or replay.
+    if (instance == null) {
+      instance = new PowerBudget();
+    }
     return instance;
   }
 

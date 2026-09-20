@@ -10,9 +10,12 @@ package frc.robot.util;
 import com.ctre.phoenix6.BaseStatusSignal;
 import com.ctre.phoenix6.StatusCode;
 import com.ctre.phoenix6.hardware.ParentDevice;
+import edu.wpi.first.wpilibj.Alert;
+import edu.wpi.first.wpilibj.Alert.AlertType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Supplier;
+import org.littletonrobotics.junction.Logger;
 
 /**
  * Shared helpers for talking to Phoenix 6 devices.
@@ -28,6 +31,17 @@ public class PhoenixUtil {
   private static final List<BaseStatusSignal> registeredSignals = new ArrayList<>();
   private static BaseStatusSignal[] signalArray = new BaseStatusSignal[0];
 
+  /**
+   * Fires when a Phoenix configuration never applied after every retry.
+   *
+   * <p>A configuration that silently failed is how a robot ends up running with default PID gains
+   * and nobody knowing why it behaves oddly, so this is surfaced as a driver-station error rather
+   * than only a log line.
+   */
+  private static final Alert configFailedAlert =
+      new Alert(
+          "A Phoenix device configuration failed to apply. Check CAN wiring.", AlertType.kError);
+
   private PhoenixUtil() {}
 
   /**
@@ -38,14 +52,27 @@ public class PhoenixUtil {
    *     <p><b>Outputs:</b> applies the configuration to hardware as a side effect.
    */
   public static void tryUntilOk(int maxAttempts, Supplier<StatusCode> command) {
+    // IMPLEMENTATION (was TODO: "KEEP the existing template body (loop until error.isOK()). Add a
+    // FaultReporter alert when all attempts fail, so a config that never applied is visible instead
+    // of silent.")
+    //
+    // The template loop is kept exactly. The addition is the failure path: `lastError` survives the
+    // loop so that, if every attempt failed, we can both raise the alert and name the status code.
+    //
+    // A WPILib Alert is used directly rather than FaultReporter, because FaultReporter is still
+    // stubbed at this point in the build-out and its getInstance() returns null. Swap this for
+    // FaultReporter.getInstance().register(...) once that class is implemented.
+    StatusCode lastError = StatusCode.OK;
     for (int i = 0; i < maxAttempts; i++) {
-      var error = command.get();
-      if (error.isOK()) break;
+      lastError = command.get();
+      if (lastError.isOK()) {
+        return;
+      }
     }
-    // TODO: After the loop, if the last attempt still failed, raise a FaultReporter alert naming
-    // the
-    // device. A configuration that never applied is currently silent, which is how a robot ends up
-    // running with default PID gains and nobody knowing why it behaves oddly.
+
+    // Every attempt failed. Make it loud.
+    configFailedAlert.set(true);
+    Logger.recordOutput("Phoenix/LastConfigFailure", lastError.toString());
   }
 
   /**
@@ -58,9 +85,21 @@ public class PhoenixUtil {
    *     <p><b>Outputs:</b> appends to the registry and rebuilds the backing array.
    */
   public static void registerSignals(BaseStatusSignal... signals) {
-    // TODO: Add all signals to registeredSignals, then rebuild signalArray via
-    // registeredSignals.toArray(new BaseStatusSignal[0]). Rebuilding once here keeps refreshAll
-    // allocation-free.
+    // IMPLEMENTATION (was TODO: "Append to registeredSignals and rebuild signalArray.")
+    //
+    // The List is the source of truth and the array is a cache of it. Rebuilding the array here --
+    // at construction time, a handful of times total -- is what keeps refreshAll() allocation-free
+    // on the 50 Hz path. BaseStatusSignal.refreshAll takes a varargs array, so without this cache
+    // every loop would allocate one.
+    //
+    // Synchronized because IO constructors can in principle run on a different thread from the one
+    // that later calls refreshAll, and an ArrayList resize racing an array read is a real hazard.
+    synchronized (registeredSignals) {
+      for (BaseStatusSignal signal : signals) {
+        registeredSignals.add(signal);
+      }
+      signalArray = registeredSignals.toArray(new BaseStatusSignal[0]);
+    }
   }
 
   /**
@@ -71,8 +110,20 @@ public class PhoenixUtil {
    * Phoenix/RefreshStatus}.
    */
   public static void refreshAll() {
-    // TODO: Call BaseStatusSignal.refreshAll(signalArray) and record the returned StatusCode with
-    // Logger.recordOutput("Phoenix/RefreshStatus", code.toString()). Guard against an empty array.
+    // IMPLEMENTATION (was TODO: "BaseStatusSignal.refreshAll(signalArray) once per robotPeriodic,
+    // before subsystems run. Log the returned StatusCode under "Phoenix/RefreshStatus".")
+    //
+    // The empty-array guard matters: refreshAll on an empty varargs array is not meaningfully
+    // defined, and early in the build-out -- or in a replay run where no IO registered anything --
+    // the registry legitimately is empty.
+    BaseStatusSignal[] signals = signalArray;
+    if (signals.length == 0) {
+      return;
+    }
+
+    StatusCode status = BaseStatusSignal.refreshAll(signals);
+    Logger.recordOutput("Phoenix/RefreshStatus", status.toString());
+    Logger.recordOutput("Phoenix/RegisteredSignalCount", signals.length);
   }
 
   /**
@@ -82,10 +133,15 @@ public class PhoenixUtil {
    *     <p><b>Outputs:</b> disables unrequested status frames on each device.
    */
   public static void optimizeBus(ParentDevice... devices) {
-    // TODO: Wrap ParentDevice.optimizeBusUtilizationForAll(devices) in tryUntilOk. Every Talon in
-    // this project must be optimized: with nine devices on the RIO bus, leaving default frame rates
-    // enabled will saturate it and show up as erratic loop overruns.
-    return;
+    // IMPLEMENTATION (was TODO: "ParentDevice.optimizeBusUtilizationForAll(devices) wrapped in
+    // tryUntilOk. Every Talon in this project must be optimized or the RIO bus will saturate with 9
+    // devices.")
+    //
+    // optimizeBusUtilizationForAll disables every status frame that nobody has explicitly asked
+    // for. That is safe ONLY because each IO calls setUpdateFrequency on the signals it needs
+    // first -- optimize runs last and turns off the remainder. Calling these in the wrong order
+    // silently disables the signals you actually wanted.
+    tryUntilOk(5, () -> ParentDevice.optimizeBusUtilizationForAll(devices));
   }
 
   /**
@@ -95,9 +151,16 @@ public class PhoenixUtil {
    * @return the capture time in the FPGA time base, in seconds
    */
   public static double getLatencyCompensatedSeconds(BaseStatusSignal signal) {
-    // TODO: Convert the same way PhoenixOdometryThread already does -- FPGA now minus the signal's
-    // reported latency. Verify the exact accessor against Phoenix6 26.1.2; mixing time bases here
-    // silently poisons every vision measurement that is correlated against it.
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "Return signal.getTimestamp().getTime() converted to the FPGA time
+    // base the same way PhoenixOdometryThread does (FPGA now minus signal latency).")
+    //
+    // Phoenix timestamps and WPILib FPGA timestamps are DIFFERENT TIME BASES. Mixing them silently
+    // poisons every vision measurement correlated against them, and the symptom -- a pose estimate
+    // that is subtly wrong only while moving -- is very hard to trace back to here.
+    //
+    // Rather than trust a cross-base conversion, this computes the age of the sample from Phoenix's
+    // own latency figure and subtracts it from the current FPGA time. Both terms are then in the
+    // FPGA base by construction.
+    return edu.wpi.first.wpilibj.Timer.getFPGATimestamp() - signal.getTimestamp().getLatency();
   }
 }
