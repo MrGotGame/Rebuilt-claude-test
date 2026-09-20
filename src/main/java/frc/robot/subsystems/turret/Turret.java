@@ -734,9 +734,14 @@ public class Turret extends SubsystemBase {
     // turret is stationary, so "velocity below threshold" is trivially true and the routine would
     // seed the current position as the hard stop -- succeeding instantly and being wrong every
     // time. The mechanism has to be given time to actually start moving first.
+    // The current term is not decoration. Velocity alone cannot distinguish the hard stop from a
+    // motor that is not turning because it is dead: both read zero. Accepting the second seeds a
+    // zero at an imaginary position, isHomed() goes true, and the next closed-loop command drives
+    // the turret at full authority from a reference that does not exist.
     if (stateTimer.hasElapsed(Constants.Turret.kHomingMinMotionSec.get())
         && Math.abs(inputs.velocityRadPerSec)
-            < Constants.Turret.kHomingVelocityThresholdRadPerSec.get()) {
+            < Constants.Turret.kHomingVelocityThresholdRadPerSec.get()
+        && inputs.statorCurrentAmps >= Constants.Turret.kHomingCurrentAmps.get()) {
       homingSeedRad = Constants.Turret.kMinAngleRad.get();
       homingComplete = true;
       commandNeutral();

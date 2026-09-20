@@ -526,6 +526,17 @@ public final class Constants {
         new LoggedTunableNumber("Turret/HomingVelThreshold", 0.15);
 
     /**
+     * Stator current the turret must be drawing for a stall to count as the hard stop.
+     *
+     * <p>Stall detection on velocity alone cannot tell a hard stop from a dead motor: both report
+     * zero. A stop pulls current, a disconnected motor pulls none, so this is what stops an
+     * unpowered turret from seeding a confidently wrong zero and then driving at full authority
+     * from it. TODO: MEASURE -- drive into the stop at kHomingVolts and read the steady draw.
+     */
+    public static final LoggedTunableNumber kHomingCurrentAmps =
+        new LoggedTunableNumber("Turret/HomingCurrent", 10.0);
+
+    /**
      * How long stall-homing drives before it is allowed to believe a low velocity, seconds.
      *
      * <p>Without this grace period the turret is stationary on the very first homing loop, so the
