@@ -1,18 +1,48 @@
-name: Build
+name: CI
 
 on:
   push:
   pull_request:
 
 jobs:
-  build:
-    name: Build
+  build-and-test:
+    name: Build and test
     runs-on: ubuntu-latest
-    container: wpilib/roborio-cross-ubuntu:2024-22.04
+
+    # Matches the toolchain in build.gradle. This was pinned at 2024 while the project moved to
+    # WPILib 2026; a cross image a year behind the vendordeps is a compile failure waiting to be
+    # blamed on the code.
+    container: wpilib/roborio-cross-ubuntu:2026-22.04-py313
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Grant execute permission
         run: chmod +x gradlew
-      - name: Build robot code
-        run: ./gradlew build
+
+      # Compilation and Spotless only. `build` would run the tests too, but keeping them in a
+      # separate step means a red check says WHICH of "it does not compile" and "it does not work"
+      # happened, without anyone opening the log to find out.
+      - name: Compile
+        run: ./gradlew build -x test
+
+      - name: Run unit tests
+        run: ./gradlew test
+
+      # `always()` so results are published even when the previous step failed -- which is exactly
+      # when they are worth reading.
+      - name: Summarise test results
+        if: always()
+        run: python3 .github/scripts/test_summary.py
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.job }}
+          path: |
+            build/test-results/test/*.xml
+            build/reports/tests/test/**
+          if-no-files-found: warn
+          retention-days: 14
