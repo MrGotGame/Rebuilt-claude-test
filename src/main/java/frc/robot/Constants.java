@@ -294,6 +294,15 @@ public final class Constants {
     /** Motor rotations per gearbox-output rotation. TODO: MEASURE by counting gear teeth. */
     public static final double kPivotGearRatio = 1.0;
 
+    /**
+     * Motor rotations per intake-roller rotation. TODO: MEASURE by counting gear teeth.
+     *
+     * <p>Added for M5. The roller needs its own ratio so that {@code SensorToMechanismRatio} can be
+     * configured on the roller Talon as well as the pivot one, which is what lets {@link
+     * #kIntakeRollerRpm} mean RPM at the roller shaft rather than at the rotor.
+     */
+    public static final double kRollerGearRatio = 1.0;
+
     public static final boolean kPivotInverted = false;
     public static final boolean kRollerInverted = false;
 
@@ -323,6 +332,32 @@ public final class Constants {
         new LoggedTunableNumber("Intake/PivotKs", 0.0);
     public static final LoggedTunableNumber kPivotKv =
         new LoggedTunableNumber("Intake/PivotKv", 0.0);
+    /**
+     * Gravity feedforward for the pivot, in volts, applied as {@code kPivotKg * cos(angle)}.
+     *
+     * <p>THE SIGN CONVENTION, written down once, because getting it wrong makes the pivot slam into
+     * a hard stop at full output. The convention every other Intake angle constant is measured in:
+     *
+     * <ul>
+     *   <li>The angle is at the gearbox output, measured from HORIZONTAL, so {@code cos} is 1 where
+     *       gravity's torque about the pivot is largest and 0 where the arm points straight up or
+     *       straight down. A datum measured from anywhere else makes the cosine term peak in the
+     *       wrong place, which reads as "the feedforward helps at one end of travel and fights at
+     *       the other".
+     *   <li>Positive angle RAISES the arm, matching {@code SingleJointedArmSim}'s convention so the
+     *       simulation and the robot agree.
+     *   <li>Positive motor output must therefore also raise the arm. That is what {@link
+     *       #kPivotInverted} is for; set it so this holds before tuning anything else.
+     *   <li>With all of the above true, kPivotKg is POSITIVE: holding the arm level against gravity
+     *       takes positive volts.
+     * </ul>
+     *
+     * <p>TODO: MEASURE. Put the pivot at horizontal, in brake, and jog open-loop voltage until the
+     * arm just holds itself; paste that voltage, with its sign. If the value that holds it is
+     * negative, positive output is lowering the arm and {@link #kPivotInverted} is wrong -- fix
+     * that rather than storing a negative kG, or the closed loop will be fighting its own
+     * feedforward everywhere except horizontal.
+     */
     public static final LoggedTunableNumber kPivotKg =
         new LoggedTunableNumber("Intake/PivotKg", 0.0);
     public static final LoggedTunableNumber kPivotCruiseRadPerSec =
@@ -335,6 +370,35 @@ public final class Constants {
     public static final LoggedTunableNumber kEjectRollerRpm =
         new LoggedTunableNumber("Intake/EjectRollerRpm", -3000.0);
 
+    /**
+     * Intake-roller velocity gains. Added for M5: the skeleton gave the pivot a full gain set but
+     * left the roller with none, and {@link #kIntakeRollerRpm} is a closed-loop goal.
+     *
+     * <p>kP plus a kS/kV feedforward, with no integrator and no derivative, for the reason every
+     * roller in this project runs that way: an integrator winds up while a game piece stalls the
+     * roller and then dumps that output the instant the piece clears, which throws the piece.
+     */
+    public static final LoggedTunableNumber kRollerKp =
+        new LoggedTunableNumber("Intake/RollerKp", 0.1);
+
+    public static final LoggedTunableNumber kRollerKs =
+        new LoggedTunableNumber("Intake/RollerKs", 0.0);
+    public static final LoggedTunableNumber kRollerKv =
+        new LoggedTunableNumber("Intake/RollerKv", 0.12);
+
+    /**
+     * Open-loop duty cycle used to drive the pivot into a hard stop while homing.
+     *
+     * <p>The SIGN chooses which hard stop is searched for, and it must point at whichever stop
+     * {@link #kStowedAngleRad} names -- because {@code Intake.onExit(HOMING)} seeds the pivot to
+     * that angle on arrival. Negative, as shipped, means the stow stop is assumed to be the one
+     * reached by LOWERING the arm (see the angle convention on {@link #kPivotKg}). TODO: MEASURE --
+     * if this intake stows upward, flip this sign, or homing will seed the stow angle at the deploy
+     * stop and every commanded position will be wrong by the full travel of the mechanism.
+     *
+     * <p>The MAGNITUDE wants to be just enough to reach the stop and stall there. Too much and the
+     * pivot arrives hard enough to bounce, which reads as velocity and restarts the settle timer.
+     */
     public static final LoggedTunableNumber kHomingDutyCycle =
         new LoggedTunableNumber("Intake/HomingDutyCycle", -0.15);
     public static final LoggedTunableNumber kHomingVelocityThresholdRadPerSec =
@@ -344,14 +408,71 @@ public final class Constants {
     public static final LoggedTunableNumber kHomingTimeoutSec =
         new LoggedTunableNumber("Intake/HomingTimeout", 3.0);
 
+    /**
+     * Pivot stator current above which the mechanism counts as pressed against its hard stop.
+     *
+     * <p>Added for M5. Velocity alone cannot tell "stalled against the stop" apart from "not moving
+     * because nothing is driving it", and the second case happens for real: a software limit, a
+     * disabled robot, or a snapped belt all read as zero velocity while the homing routine happily
+     * declares success and seeds a position that is wrong by the whole travel of the mechanism.
+     * Requiring current as well as stillness makes the stall the thing being detected.
+     *
+     * <p>TODO: MEASURE. Drive the pivot into its stop at {@link #kHomingDutyCycle} and read
+     * Intake/Inputs/pivotStatorCurrentAmps; take roughly half of what you see, and keep it well
+     * under {@link #kPivotStatorLimitAmps}. The default of 0.0 deliberately disables this half of
+     * the check, leaving the plan's velocity-only detection, so an unmeasured robot behaves exactly
+     * as specified rather than failing to home for a reason nobody has written down yet.
+     */
+    public static final LoggedTunableNumber kHomingCurrentAmps =
+        new LoggedTunableNumber("Intake/HomingCurrent", 0.0);
+
     public static final double kPivotStatorLimitAmps = 60.0;
     public static final double kRollerStatorLimitAmps = 80.0;
+
+    /**
+     * How far beyond the outermost commanded angle the Talon's soft limits sit, in radians.
+     *
+     * <p>Added for M5. The soft limits exist to stop a runaway closed loop, not to define travel --
+     * the hard stops do that. Setting them exactly at the stow and deploy angles would make homing
+     * impossible, because homing works by driving INTO a hard stop and the soft limit would cut
+     * the output just short of it every time.
+     *
+     * <p>Roughly 6 degrees. Widen it if homing stalls short of the stop; narrow it if a runaway
+     * gets far enough to do damage before the limit catches it.
+     */
+    public static final double kPivotSoftLimitMarginRad = 0.10;
+
+    /**
+     * What {@code Intake} assumes about the turret interlock when no deploy guard has been
+     * installed. Added for M5.
+     *
+     * <p>{@code Superstructure} injects the real guard (see plan section 4.11), and {@code
+     * Superstructure} is a skeleton until M10. Until then this is the answer the intake gets, and
+     * it is FALSE: with nothing tracking where the turret is, the honest answer to "is it safe to
+     * swing the intake out" is "unknown", and unknown must not mean yes for the one interaction the
+     * plan calls the most likely way to destroy this robot.
+     *
+     * <p>The visible consequence in the interim is that DEPLOY_AND_INTAKE, DEPLOY_ONLY and EJECT
+     * all resolve to STOWING, which {@code Intake/DeployAllowed} and the "no deploy guard
+     * installed" alert both make obvious rather than mysterious. Flip this to true ONLY to bench
+     * test the pivot with the turret physically removed or known parked, and flip it back.
+     */
+    public static final boolean kDeployAllowedWithoutGuard = false;
 
     /** Pivot moment of inertia for SingleJointedArmSim, kg*m^2. TODO: pull from CAD. */
     public static final double kPivotMoiKgM2 = 0.05;
 
     /** Pivot arm length for SingleJointedArmSim, meters. TODO: pull from CAD. */
     public static final double kPivotLengthMeters = 0.35;
+
+    /**
+     * Intake-roller moment of inertia for DCMotorSim, kg*m^2. TODO: pull from CAD.
+     *
+     * <p>The value the IntakeIOSim skeleton hard-coded, moved here so that every guessed-but-
+     * tunable number in the project lives in one file, which is where anyone sweeping for guesses
+     * before a competition will look.
+     */
+    public static final double kRollerMoiKgM2 = 0.001;
   }
 
   /** The floor roller that moves game pieces from the intake toward the indexer. */

@@ -88,6 +88,23 @@ public interface IntakeIO {
   public default void setPivotBrakeMode(boolean brake) {}
 
   /**
+   * Enables or disables the pivot's software travel limits.
+   *
+   * <p>Added beyond the plan's method list, and the reason is homing. The software limits are
+   * configured from the stow and deploy angles, so they are only meaningful once the pivot's
+   * position is known -- and homing exists precisely for the case where it is not, because the
+   * absolute encoder is dead. Leaving them enabled through a homing sweep means the Talon cuts
+   * output at a limit computed from a position that is wrong, the pivot stops short of its hard
+   * stop, and the mechanism seeds a zero that is off by however far the seed had drifted. Turning
+   * them off for the duration of homing and back on once position is trustworthy is what makes the
+   * fallback actually a fallback.
+   *
+   * @param enabled true to enforce the configured forward and reverse soft limits
+   *     <p><b>Outputs:</b> reconfigures the pivot Talon's software limit switches.
+   */
+  public default void setPivotSoftLimitsEnabled(boolean enabled) {}
+
+  /**
    * Pushes new closed-loop gains to the pivot motor.
    *
    * @param gains the gain set to apply
