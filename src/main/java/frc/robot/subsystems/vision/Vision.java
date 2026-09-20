@@ -4,7 +4,9 @@ import edu.wpi.first.math.Matrix;
 import edu.wpi.first.math.VecBuilder;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Pose3d;
+import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Transform3d;
+import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.numbers.N1;
 import edu.wpi.first.math.numbers.N3;
 import edu.wpi.first.wpilibj.Alert;
@@ -83,10 +85,55 @@ public class Vision extends SubsystemBase {
   /** How much push history to keep, matched to {@code RobotState}'s buffer depth, in seconds. */
   private static final double kPushHistorySec = 2.0;
 
+  /**
+   * Robot origin to the Quest headset.
+   *
+   * <p>A field for the same reason the camera mountings are: the shipped constant is still the
+   * identity transform, and a headset sitting exactly on the robot origin makes the composition
+   * direction in {@link #processQuestNav()} untestable -- applying the mounting forwards and
+   * backwards give the same answer when the mounting is nothing. Tests supply a real offset.
+   *
+   * <p>Section 7.6 calls this "the single largest error source in this subsystem", and the reason
+   * is worth keeping next to the field: QuestNav carries the tightest covariance of any source, so
+   * a two-centimetre error in this measurement is a two-centimetre bias that <i>wins</i> the fusion
+   * against every camera that disagrees with it.
+   */
+  private final Transform3d robotToQuest;
+
+  /**
+   * How long the Quest-to-estimate residual has been over threshold, continuously.
+   *
+   * <p>A hold timer rather than an instantaneous comparison, because the residual spikes whenever a
+   * camera corrects the estimate -- that is the estimate moving, not the headset drifting. Only a
+   * residual that persists says the headset's frame has actually slipped.
+   */
   private final Timer questResidualTimer = new Timer();
+
   private int acceptedCount = 0;
   private int rejectedCount = 0;
   private boolean questTrusted = false;
+
+  /** Last tracking-lost counter seen, to detect a loss that happened between two loops. */
+  private int lastTrackingLostCounter = -1;
+
+  /** How many times the headset has been seeded, so re-seeds per match can be read off. */
+  private int questSeedCount = 0;
+
+  /** Distance between the Quest-derived robot pose and the fused estimate, in metres. */
+  private double questResidualMeters = 0.0;
+
+  /**
+   * How many headset frames have been handed to the estimator.
+   *
+   * <p>Counted separately from the camera total because section 7.7's central rule is that an
+   * untrusted source contributes <i>nothing</i> rather than contributing weakly, and only a
+   * per-source count can tell those apart. A merged total falling is equally consistent with
+   * QuestNav being dropped and with a camera losing sight of a tag.
+   */
+  private int questObservationsFused = 0;
+
+  /** Why QuestNav is not trusted right now, or "Trusted". */
+  private String questTrustReason = "NeverEvaluated";
 
   /**
    * Why an observation was thrown away.
@@ -176,6 +223,43 @@ public class Vision extends SubsystemBase {
           AlertType.kWarning);
 
   /**
+   * Fires while QuestNav is connected but not contributing.
+   *
+   * <p>A warning, not an error, and the distinction is the plan's: the robot localises perfectly
+   * well on MegaTag2 and odometry, and the headset only shortens the gap the robot can tolerate
+   * between tag sightings. Badging a working robot red is how a drive team learns to ignore red.
+   *
+   * <p>The text is deliberately incomplete on its own -- the specific failing clause is in {@code
+   * Vision/QuestTrustReason}, because there are six ways to lose trust and "QuestNav is not
+   * trusted" is not actionable at 11pm before a competition.
+   */
+  private final Alert questNotTrustedAlert =
+      new Alert("QuestNav is not being trusted; see Vision/QuestTrustReason.", AlertType.kWarning);
+
+  /**
+   * Fires when the headset battery is low enough to stop trusting it soon.
+   *
+   * <p>Section 7.7 is blunt that this is "a <i>last</i> warning, not the primary defense" -- the
+   * headset should be on a powered feed from the robot, and seeing this alert at an event means
+   * that feed is not working, not that someone forgot to charge it.
+   */
+  private final Alert questBatteryLowAlert =
+      new Alert("QuestNav battery is low; check the powered USB-C feed.", AlertType.kWarning);
+
+  /**
+   * Fires while the headset mounting is still unmeasured.
+   *
+   * <p>The most consequential of the three unmeasured-transform alerts, because QuestNav carries
+   * the tightest covariance of any source: a bias here is not averaged away by the cameras, it
+   * overrides them.
+   */
+  private final Alert questTransformUnmeasuredAlert =
+      new Alert(
+          "kRobotToQuest is unmeasured (identity), so every QuestNav pose carries the headset's"
+              + " mounting offset as bias -- and its tight covariance makes that bias win.",
+          AlertType.kWarning);
+
+  /**
    * Builds the vision subsystem.
    *
    * <p>The turret angle arrives as suppliers rather than a {@code Turret} reference, deliberately:
@@ -200,18 +284,20 @@ public class Vision extends SubsystemBase {
         turretAngleSupplier,
         turretVelocitySupplier,
         Constants.Vision.kRobotToTurretAxis,
-        Constants.Vision.kTurretToCamera);
+        Constants.Vision.kTurretToCamera,
+        Constants.Vision.kRobotToQuest);
   }
 
   /**
-   * Builds the vision subsystem with an explicit turret camera mounting.
+   * Builds the vision subsystem with explicit sensor mountings.
    *
-   * <p>The robot uses the five-argument constructor, which supplies the mounting from {@link
-   * Constants}. This one exists because those constants are both still the identity transform
-   * awaiting a CAD measurement, and a turret-transform test run against identity proves nothing:
-   * with the lens on the rotation axis, every composition order -- correct and backwards alike --
-   * leaves the camera in the same place when the turret turns. A test needs a real lever arm to
-   * have anything to measure.
+   * <p>The robot uses the five-argument constructor, which supplies the mountings from {@link
+   * Constants}. This one exists because those constants are all still the identity transform
+   * awaiting a CAD measurement, and a transform test run against identity proves nothing: with the
+   * lens on the turret's rotation axis, every composition order -- correct and backwards alike --
+   * leaves the camera in the same place when the turret turns, and with the headset on the robot
+   * origin, composing its mounting forwards and backwards give the same answer. A test needs a real
+   * lever arm to have anything to measure.
    *
    * @param turretCameraIO the turret-mounted Limelight
    * @param intakeCameraIO the intake-mounted Limelight
@@ -220,6 +306,7 @@ public class Vision extends SubsystemBase {
    * @param turretVelocitySupplier live turret angular velocity, in radians per second
    * @param robotToTurretAxis robot origin to the turret's rotation axis
    * @param turretToCamera the turret frame at 0 rad to the camera lens
+   * @param robotToQuest robot origin to the Quest headset
    */
   public Vision(
       VisionIO turretCameraIO,
@@ -228,7 +315,8 @@ public class Vision extends SubsystemBase {
       DoubleSupplier turretAngleSupplier,
       DoubleSupplier turretVelocitySupplier,
       Transform3d robotToTurretAxis,
-      Transform3d turretToCamera) {
+      Transform3d turretToCamera,
+      Transform3d robotToQuest) {
     this.turretCameraIO = turretCameraIO;
     this.intakeCameraIO = intakeCameraIO;
     this.questNavIO = questNavIO;
@@ -236,17 +324,22 @@ public class Vision extends SubsystemBase {
     this.turretVelocitySupplier = turretVelocitySupplier;
     this.robotToTurretAxis = robotToTurretAxis;
     this.turretToCamera = turretToCamera;
+    this.robotToQuest = robotToQuest;
     // IMPLEMENTATION (was TODO: "Register FaultReporter checks ... QuestNav ones as WARNINGS.")
     //
-    // The camera checks are Alerts driven from periodic(), for the reason recorded in
+    // The checks are Alerts driven from periodic(), for the reason recorded in
     // PhoenixUtil.tryUntilOk and Shooter: FaultReporter is a skeleton whose getInstance() returns
     // null and would throw here.
     //
-    // The turret camera's alert is registered as of M8, now that its observations are fused. It
-    // was deliberately absent through M7, when nothing read the camera: an alert for a device the
-    // code never consults sits permanently red on a healthy robot, which teaches everyone to
-    // ignore the alerts widget -- the one place M14 needs them to look. The QuestNav checks stay
-    // absent for exactly that reason until M9 reads the headset.
+    // All five are now registered. Each was deliberately withheld until the milestone that
+    // actually reads its device -- the turret camera at M8, the headset at M9 -- because an alert
+    // for hardware the code never consults sits permanently red on a healthy robot, which teaches
+    // everyone to ignore the alerts widget, the one place M14 needs them to look.
+    //
+    // The QuestNav pair are WARNINGS while the Limelight pair are ERRORS, and the plan is explicit
+    // about why: the robot shoots without the headset. MegaTag2 plus odometry is a complete
+    // localisation solution; QuestNav only shortens the tolerable gap between tag sightings. An
+    // error badge for a degraded-but-working robot is how a drive team learns to ignore red.
     for (RobotState.PoseSource source :
         new RobotState.PoseSource[] {
           RobotState.PoseSource.LIMELIGHT_TURRET, RobotState.PoseSource.LIMELIGHT_INTAKE
@@ -270,9 +363,14 @@ public class Vision extends SubsystemBase {
   public void periodic() {
     // IMPLEMENTATION (was TODO: the eight-step order, steps 2 and 3 before step 4.)
     //
-    // M8 completes both Limelights. Step 7 (QuestNav) remains absent because it is M9; the
-    // headset's IO is not even sampled, so nothing reads a value nobody has verified.
+    // M9 completes the sequence: all eight steps, in the plan's order.
     //
+    // Step 1 is first for a reason that is not obvious from its name. commandPeriodic() is what
+    // delivers a queued setPose to the headset and what fires questnavlib's event callbacks;
+    // running it after the frames are drained would delay every seed by a full loop, and a seed
+    // that lands one loop late is a seed against a pose the robot has already left.
+    questNavIO.commandPeriodic();
+
     // Steps 2 and 3 run before step 4 and that is the whole ordering rule: a Limelight solves the
     // frame it is about to publish using the orientation and the camera transform it has ALREADY
     // been sent. Reading botpose before writing them gets a pose solved against last loop's
@@ -287,11 +385,21 @@ public class Vision extends SubsystemBase {
     turretCameraIO.updateInputs(turretInputs);
     Logger.processInputs("Vision/" + Constants.Vision.kTurretCameraName, turretInputs);
 
+    questNavIO.updateInputs(questInputs);
+    Logger.processInputs("Vision/QuestNav", questInputs);
+
     // Turret camera first, matching the plan's step order. Order between the two cameras does not
     // change the fused result -- the estimator sorts by timestamp internally -- but keeping it
     // fixed keeps the log deterministic when the same match is replayed.
     processCamera(turretInputs, RobotState.PoseSource.LIMELIGHT_TURRET, true);
     processCamera(intakeInputs, RobotState.PoseSource.LIMELIGHT_INTAKE, false);
+
+    // Step 7, and the cameras genuinely must come first. The trust gate and the re-seed rule both
+    // compare the headset against the fused estimate, and seeding writes that estimate into the
+    // headset's frame -- so running QuestNav first would judge and seed it against an estimate
+    // that is one loop stale, at exactly the moments the cameras have just corrected it.
+    updateQuestNavTrust();
+    processQuestNav();
 
     Logger.recordOutput("Vision/AcceptedObservations", acceptedCount);
     logRejections(RobotState.PoseSource.LIMELIGHT_TURRET, Constants.Vision.kTurretCameraName);
@@ -301,6 +409,17 @@ public class Vision extends SubsystemBase {
     turretCameraDisconnectedAlert.set(!turretInputs.connected);
     fieldBoundsUnmeasuredAlert.set(!fieldBoundsAreMeasured());
     turretTransformUnmeasuredAlert.set(!turretMountingIsMeasured());
+
+    // Only while the headset is actually present. A team that does not run QuestNav, or runs it on
+    // a robot where it is unplugged, must not be shown a permanent warning about a device they are
+    // not using -- that is the same "teaches everyone to ignore alerts" failure the camera alerts
+    // were withheld to avoid.
+    questNotTrustedAlert.set(questInputs.connected && !questTrusted);
+    questBatteryLowAlert.set(
+        questInputs.connected
+            && questInputs.batteryPercent >= 0
+            && questInputs.batteryPercent <= Constants.Vision.kQuestMinBatteryPercent.get());
+    questTransformUnmeasuredAlert.set(questInputs.connected && !questMountingIsMeasured());
   }
 
   /**
@@ -763,15 +882,58 @@ public class Vision extends SubsystemBase {
    * the specific reason whenever trust is withdrawn.
    */
   private void updateQuestNavTrust() {
-    // TODO: questTrusted = questInputs.connected
-    //     && questInputs.tracking
-    //     && questInputs.batteryPercent > kQuestMinBatteryPercent.get()
-    //     && trackingLostCounter has NOT increased this loop
-    //     && RobotState.getInstance().isQuestSeeded()
-    //     && the residual between the Quest-derived robot pose and RobotState's estimate has stayed
-    //        below kQuestReseedResidualMeters.
-    // Push the result into RobotState.setQuestTrusted, and log WHICH clause failed. "QuestNav is
-    // not trusted" with no reason attached is not actionable at 11pm before a competition.
+    // IMPLEMENTATION (was TODO: the six clauses, pushed into RobotState, logging WHICH one failed.)
+    //
+    // Written as a cascade of named reasons rather than one boolean conjunction. A single `&&`
+    // chain computes the same answer and throws away the only thing anyone needs at an event: not
+    // THAT the headset is distrusted, but WHICH of six independent things is wrong. Those six have
+    // six different fixes -- a cable, a battery, a mount, a tag, a re-seed, a replacement headset
+    // -- and guessing between them in a six-minute queue is how a match is lost.
+    //
+    // Trust is BINARY, never a reduced weight, and section 7.7 is emphatic about it: "a degraded
+    // source is dropped, never blended in weakly". A source that is wrong in an unknown way has no
+    // correct covariance, so there is no honest number to down-weight it to.
+    String reason = null;
+
+    if (!questInputs.connected) {
+      reason = "Disconnected";
+    } else if (!questInputs.tracking) {
+      reason = "NotTracking";
+    } else if (questInputs.batteryPercent <= Constants.Vision.kQuestMinBatteryPercent.get()) {
+      // Also catches the -1 the IO reports for a headset that will not say. An unknown battery is
+      // not a healthy one.
+      reason = "BatteryLow:" + questInputs.batteryPercent;
+    } else if (lastTrackingLostCounter >= 0
+        && questInputs.trackingLostCounter > lastTrackingLostCounter) {
+      // The counter, not the flag, and this clause is the reason the counter exists. A headset
+      // jarred by a defender can lose and regain tracking entirely between two robot loops, so
+      // isTracking() reads true at both samples and the flag shows nothing. What the headset
+      // reports after such an event is a pose whose frame may have shifted -- so the recovery is
+      // not "resume", it is "re-seed", and this clause is what forces that.
+      reason = "TrackingLostThisLoop";
+    } else if (!RobotState.getInstance().isQuestSeeded()) {
+      // An unseeded headset reports in its own arbitrary frame, whose origin is wherever it
+      // happened to be when tracking started. Those poses are not wrong so much as meaningless.
+      reason = "NotSeeded";
+    } else if (questResidualTimer.isRunning()
+        && questResidualTimer.get() > Constants.Vision.kQuestReseedHoldSec.get()) {
+      // Sustained disagreement with the cameras. Not an instantaneous comparison: the residual
+      // spikes every time a camera corrects the estimate, and that is the ESTIMATE moving, not the
+      // headset drifting. Only a residual that persists past the hold means the headset's frame
+      // has actually slipped.
+      reason = "ResidualSustained:" + String.format("%.2f", questResidualMeters);
+    }
+
+    questTrusted = reason == null;
+    questTrustReason = questTrusted ? "Trusted" : reason;
+    lastTrackingLostCounter = questInputs.trackingLostCounter;
+
+    RobotState.getInstance().setQuestTrusted(questTrusted);
+    Logger.recordOutput("Vision/QuestTrusted", questTrusted);
+    Logger.recordOutput("Vision/QuestTrustReason", questTrustReason);
+    Logger.recordOutput("Vision/QuestResidualMeters", questResidualMeters);
+    Logger.recordOutput("Vision/QuestSeedCount", questSeedCount);
+    Logger.recordOutput("Vision/QuestObservationsFused", questObservationsFused);
   }
 
   /**
@@ -781,14 +943,137 @@ public class Vision extends SubsystemBase {
    * #seedQuestNav()}.
    */
   private void processQuestNav() {
-    // TODO: For each drained frame, convert the headset Pose3d into a robot Pose2d by applying
-    // Constants.Vision.kRobotToQuest.inverse(). If questTrusted, call
-    // RobotState.getInstance().addVisionObservation(...) with
-    // VecBuilder.fill(kQuestXyStdDev.get(), kQuestXyStdDev.get(), kQuestThetaStdDev.get()).
-    // Call seedQuestNav() when either: the headset is not yet seeded; or the residual has exceeded
-    // kQuestReseedResidualMeters continuously for kQuestReseedHoldSec WHILE the robot is nearly
-    // stationary AND at least two tags are visible. All three conditions matter -- re-seeding from
-    // a moving robot or a single-tag fix writes your drift into the headset permanently.
+    // IMPLEMENTATION (was TODO: convert each frame through kRobotToQuest.inverse(), fuse when
+    // trusted, and seed or re-seed on the three conditions.)
+    if (questInputs.questPoses.length == 0) {
+      // No frames is not an error -- it is what a headset that is not tracking looks like, and the
+      // residual timer is deliberately left alone so a drift that was already being timed is not
+      // forgiven by a momentary gap in the stream.
+      return;
+    }
+
+    // The residual is measured on the NEWEST frame only. Every frame in this loop's batch says
+    // nearly the same thing about a 20 ms window, so averaging them would just be a slower way of
+    // reading the last one.
+    Pose3d newestHeadsetPose = questInputs.questPoses[questInputs.questPoses.length - 1];
+    Pose2d newestRobotPose = questPoseToRobotPose(newestHeadsetPose);
+    questResidualMeters =
+        newestRobotPose
+            .getTranslation()
+            .getDistance(RobotState.getInstance().getEstimatedPose().getTranslation());
+
+    // The hold timer. Started on the first loop over threshold, stopped and reset the moment the
+    // residual recovers, so it measures CONTINUOUS disagreement rather than cumulative.
+    if (questResidualMeters > Constants.Vision.kQuestReseedResidualMeters.get()) {
+      if (!questResidualTimer.isRunning()) {
+        questResidualTimer.restart();
+      }
+    } else {
+      questResidualTimer.stop();
+      questResidualTimer.reset();
+    }
+
+    // Fusing comes before seeding, so a frame is never fused on the same loop it was seeded from.
+    // It would be circular if it were: the seed writes the current estimate into the headset, and
+    // the headset would then report that estimate straight back as an independent measurement at
+    // the tightest covariance in the system -- the estimator would be told its own belief and
+    // become more confident in it for no reason.
+    if (questTrusted) {
+      for (int i = 0; i < questInputs.questPoses.length; i++) {
+        RobotState.getInstance()
+            .addVisionObservation(
+                new RobotState.PoseObservation(
+                    questPoseToRobotPose(questInputs.questPoses[i]),
+                    questInputs.questPoseTimestamps[i],
+                    VecBuilder.fill(
+                        Constants.Vision.kQuestXyStdDev.get(),
+                        Constants.Vision.kQuestXyStdDev.get(),
+                        Constants.Vision.kQuestThetaStdDev.get()),
+                    RobotState.PoseSource.QUESTNAV));
+        acceptedCount++;
+        questObservationsFused++;
+      }
+    }
+
+    // ---- Seeding and re-seeding.
+    if (!RobotState.getInstance().isQuestSeeded()) {
+      // The first seed. Gated on a multi-tag fix exactly like a re-seed, because a seed taken from
+      // a poor estimate is not a neutral starting point -- it writes that error into the headset's
+      // frame and it stays there until the next seed. There is no hurry: an unseeded headset costs
+      // nothing, since it is simply not fused.
+      if (multipleTagsVisible()) {
+        seedQuestNav();
+      }
+      return;
+    }
+
+    // A re-seed needs all three conditions, and each one is load-bearing:
+    //
+    //   sustained residual -- an instantaneous one is usually the cameras correcting the estimate;
+    //   nearly stationary  -- a moving robot's estimate is its worst, and any timestamp mismatch
+    //                         between the headset and the estimator turns into position error;
+    //   two or more tags   -- a single-tag fix is the least trustworthy thing the cameras produce.
+    //
+    // Drop any one and the re-seed can write MORE error into the headset than the drift it was
+    // correcting, permanently and invisibly, because the headset then reports that error as
+    // confident truth. This is the one place in the vision stack where acting is worse than
+    // waiting: drift is bounded and self-announcing, a bad seed is neither.
+    if (questResidualTimer.isRunning()
+        && questResidualTimer.get() > Constants.Vision.kQuestReseedHoldSec.get()
+        && robotIsNearlyStationary()
+        && multipleTagsVisible()) {
+      seedQuestNav();
+    }
+  }
+
+  /**
+   * Converts a headset pose into the robot pose it implies.
+   *
+   * @param fieldToQuest the headset's reported field pose
+   * @return the corresponding robot field pose
+   */
+  private Pose2d questPoseToRobotPose(Pose3d fieldToQuest) {
+    // INVERSE, because the stored transform runs robot-to-quest and this is going the other way.
+    // Composing it forwards instead is a silent error worth naming: it produces a pose displaced
+    // by twice the mounting offset, in a direction that rotates with the robot's heading, which
+    // reads as a pose that is fine going one way down the field and wrong coming back.
+    return fieldToQuest.transformBy(robotToQuest.inverse()).toPose2d();
+  }
+
+  /**
+   * Whether the robot is moving slowly enough for a re-seed to be safe.
+   *
+   * @return true when both translational and angular speed are near zero
+   */
+  private boolean robotIsNearlyStationary() {
+    var speeds = RobotState.getInstance().getFieldRelativeSpeeds();
+    return Math.hypot(speeds.vxMetersPerSecond, speeds.vyMetersPerSecond)
+            < Constants.Vision.kQuestReseedMaxSpeedMetersPerSec.get()
+        && Math.abs(speeds.omegaRadiansPerSecond)
+            < Constants.Vision.kQuestReseedMaxOmegaRadPerSec.get();
+  }
+
+  /**
+   * Whether either camera currently has a multi-tag fix.
+   *
+   * @return true when at least one camera reports an observation with two or more tags
+   */
+  private boolean multipleTagsVisible() {
+    // Either camera, because the question is "is the estimate trustworthy right now", and a
+    // multi-tag fix from the intake camera answers it just as well as one from the turret. The
+    // observations are read directly rather than through the rejection ladder because this is a
+    // question about what is VISIBLE, not about what survived fusion.
+    for (VisionIO.PoseObservation observation : turretInputs.poseObservations) {
+      if (observation.tagCount() >= 2) {
+        return true;
+      }
+    }
+    for (VisionIO.PoseObservation observation : intakeInputs.poseObservations) {
+      if (observation.tagCount() >= 2) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -798,11 +1083,43 @@ public class Vision extends SubsystemBase {
    * and logs the seed event with the pose so re-seeds per match can be counted.
    */
   public void seedQuestNav() {
-    // TODO: Pose2d p = RobotState.getInstance().getEstimatedPose();
-    // questNavIO.setPose(new Pose3d(p).transformBy(Constants.Vision.kRobotToQuest));
-    // RobotState.getInstance().setQuestSeeded(true);
-    // Then log the event and the pose. A match with many re-seeds means the headset mount is loose
-    // or kRobotToQuest is wrong.
+    // IMPLEMENTATION (was TODO: "getEstimatedPose, transformBy kRobotToQuest, setPose,
+    // setQuestSeeded(true), and log the event with its pose.")
+    //
+    // The transform is composed HERE and not in the IO, because setPose commands the HEADSET's
+    // pose, not the robot's. Handing it a robot pose seeds the headset to where the robot's origin
+    // is, and every subsequent QuestNav measurement then arrives offset by the mounting -- a
+    // constant bias at the tightest covariance in the system, which is the hardest kind to spot
+    // because it never moves and never spikes.
+    Pose2d robotPose = RobotState.getInstance().getEstimatedPose();
+    Pose3d headsetPose = new Pose3d(robotPose).transformBy(robotToQuest);
+
+    questNavIO.setPose(headsetPose);
+    RobotState.getInstance().setQuestSeeded(true);
+
+    // The residual timer is cleared as part of the seed. Leaving it running would let the hold
+    // that triggered this re-seed immediately trigger the next one, before any new frame has had a
+    // chance to show whether the seed worked -- a re-seed every loop, each writing the estimate
+    // into the headset, which would look like the headset tracking the estimate perfectly.
+    questResidualTimer.stop();
+    questResidualTimer.reset();
+    questResidualMeters = 0.0;
+
+    questSeedCount++;
+    Logger.recordOutput("Vision/QuestSeedCount", questSeedCount);
+    Logger.recordOutput("Vision/QuestSeedPose", robotPose);
+    Logger.recordOutput("QuestNav/Event", "Seeded");
+    // A rising seed count across matches is a physical diagnosis, not a software one: the headset
+    // mount is loose, or kRobotToQuest is wrong. Counting them is the only way anyone notices.
+  }
+
+  /**
+   * Whether the headset mounting has been measured yet.
+   *
+   * @return false while {@code kRobotToQuest} is still the identity transform
+   */
+  private boolean questMountingIsMeasured() {
+    return !robotToQuest.equals(new Transform3d());
   }
 
   /**
@@ -834,14 +1151,83 @@ public class Vision extends SubsystemBase {
    * @return the estimated field pose of the game piece, or empty when none is visible
    */
   public Optional<Pose2d> getGamePieceFieldPose() {
-    // TODO: Convert the best target's tx/ty into a field position with the planar-ground
-    // assumption:
-    //   range   = (kRobotToIntakeCamera.getZ() - kGamePieceDiameterMeters.get() / 2.0)
-    //             / Math.tan(cameraPitch + ty)
-    //   bearing = -tx
-    // then transform by the robot pose AT THE OBSERVATION TIMESTAMP, not the current pose.
-    // TODO: kGamePieceDiameterMeters must be MEASURED before this returns anything meaningful.
-    return Optional.empty();
+    // IMPLEMENTATION (was TODO: the planar-ground projection, transformed by the robot pose AT THE
+    // OBSERVATION TIMESTAMP.)
+    Optional<VisionIO.TargetObservation> target = getBestGamePieceTarget();
+    if (target.isEmpty()) {
+      return Optional.empty();
+    }
+
+    // The camera's own geometry. The pitch is the camera's, extracted from the mounting rather
+    // than stored separately, so a re-measured mounting cannot leave a stale pitch behind.
+    double cameraHeightMeters = Constants.Vision.kRobotToIntakeCamera.getZ();
+    double cameraPitchRad = Constants.Vision.kRobotToIntakeCamera.getRotation().getY();
+
+    // Until the mounting and the game piece are measured this is arithmetic on zeros, and the
+    // guard below is what stops it being CONFIDENT arithmetic on zeros. With everything at 0.0 the
+    // elevation angle is exactly 0 and the range is 0/0 -- NaN, which would propagate into a drive
+    // command. Refusing to answer is the honest response to "we have not measured the robot yet".
+    if (cameraHeightMeters <= 0.0 || Constants.Field.kGamePieceDiameterMeters.get() <= 0.0) {
+      return Optional.empty();
+    }
+
+    // The planar-ground assumption: the piece sits on the carpet, so its centre is one radius up,
+    // and the vertical angle to it fixes the range. A NEGATIVE elevation is the camera looking
+    // down at the floor, which is the only case with a solution -- looking level or up at a piece
+    // on the ground means the ray never reaches the carpet, and the tangent would hand back a
+    // negative or enormous range rather than failing.
+    double elevationRad = cameraPitchRad + target.get().ty().getRadians();
+    if (elevationRad >= -1e-6) {
+      return Optional.empty();
+    }
+    double heightDifferenceMeters =
+        cameraHeightMeters - Constants.Field.kGamePieceDiameterMeters.get() / 2.0;
+    double rangeMeters = heightDifferenceMeters / -Math.tan(elevationRad);
+    if (!Double.isFinite(rangeMeters) || rangeMeters <= 0.0) {
+      return Optional.empty();
+    }
+
+    // Bearing is NEGATED: a Limelight reports tx positive to the right of its crosshair, while
+    // WPILib yaw is positive counter-clockwise, which is to the left.
+    Rotation2d bearing = target.get().tx().unaryMinus();
+
+    // AT THE OBSERVATION TIMESTAMP, not now. The detection is one camera latency old, and a robot
+    // driving at 4 m/s covers 32 cm in 80 ms -- comfortably more than the piece is wide, so the
+    // current pose would place it somewhere the intake will not find it. Falling back to the
+    // current pose when the buffer cannot answer would hide exactly that error, so the observation
+    // is dropped instead, the same rule the turret camera follows.
+    Optional<Pose2d> robotPoseAtCapture =
+        RobotState.getInstance().getPoseAt(target.get().timestampSec());
+    if (robotPoseAtCapture.isEmpty()) {
+      return Optional.empty();
+    }
+
+    // The piece's position in the CAMERA's horizontal frame, then out to the field through the
+    // camera mounting and the robot pose.
+    Translation2d pieceInCameraFrame =
+        new Translation2d(rangeMeters * bearing.getCos(), rangeMeters * bearing.getSin());
+    Translation2d cameraInRobotFrame =
+        new Translation2d(
+            Constants.Vision.kRobotToIntakeCamera.getX(),
+            Constants.Vision.kRobotToIntakeCamera.getY());
+    Rotation2d cameraYaw =
+        Rotation2d.fromRadians(Constants.Vision.kRobotToIntakeCamera.getRotation().getZ());
+    Translation2d pieceInRobotFrame =
+        cameraInRobotFrame.plus(pieceInCameraFrame.rotateBy(cameraYaw));
+
+    Pose2d robotPose = robotPoseAtCapture.get();
+    Translation2d pieceInField =
+        robotPose.getTranslation().plus(pieceInRobotFrame.rotateBy(robotPose.getRotation()));
+
+    // The heading is the bearing FROM the robot TO the piece. A game piece has no orientation of
+    // its own worth reporting, and this is the heading a pickup approach wants.
+    Rotation2d approachHeading = pieceInField.minus(robotPose.getTranslation()).getAngle();
+    Pose2d piecePose = new Pose2d(pieceInField, approachHeading);
+    Logger.recordOutput("Vision/GamePieceFieldPose", piecePose);
+    return Optional.of(piecePose);
+    // TODO: MEASURE kGamePieceDiameterMeters and kRobotToIntakeCamera. Until both exist this
+    // method returns empty by the guard above, which is deliberate -- an unmeasured robot should
+    // decline to aim rather than aim at the origin.
   }
 
   /**
@@ -863,8 +1249,49 @@ public class Vision extends SubsystemBase {
    */
   @AutoLogOutput(key = "Vision/QuestTrusted")
   public boolean isQuestTrusted() {
-    // TODO: return questTrusted.
-    return false;
+    // IMPLEMENTATION (was TODO: "return questTrusted.")
+    return questTrusted;
+  }
+
+  /**
+   * Why QuestNav is not currently trusted.
+   *
+   * @return the specific failing clause, or {@code "Trusted"} when the headset is healthy
+   */
+  public String getQuestTrustReason() {
+    // Exposed rather than left to the log alone so the degradation rules can be asserted by
+    // reason, not merely by outcome. Six different faults all produce questTrusted == false, and a
+    // test that checks only the boolean cannot tell whether the right one fired -- which is how a
+    // gate ends up passing for a reason nobody intended.
+    return questTrustReason;
+  }
+
+  /**
+   * How many times the headset has been seeded since boot.
+   *
+   * @return the seed count, including the first seed
+   */
+  @AutoLogOutput(key = "Vision/QuestSeedCount")
+  public int getQuestSeedCount() {
+    return questSeedCount;
+  }
+
+  /**
+   * How far the headset currently disagrees with the fused estimate.
+   *
+   * @return the residual in meters, or 0.0 when no headset frame has been processed
+   */
+  public double getQuestResidualMeters() {
+    return questResidualMeters;
+  }
+
+  /**
+   * How many headset frames have been handed to the estimator since boot.
+   *
+   * @return the fused QuestNav observation count
+   */
+  public int getQuestObservationsFused() {
+    return questObservationsFused;
   }
 
   /**

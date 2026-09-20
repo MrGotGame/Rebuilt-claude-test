@@ -924,6 +924,30 @@ public final class Constants {
         new LoggedTunableNumber("Vision/QuestReseedHold", 0.5);
 
     /**
+     * How slowly the robot must be translating for a QuestNav re-seed to be permitted, in m/s.
+     *
+     * <p>Section 7.6 requires the robot to be "nearly stationary" before a re-seed without putting
+     * a number on it, so this is a judgement rather than a quotation. 0.05 m/s is a robot that has
+     * stopped and is settling on its wheels, not one creeping into position: a re-seed writes the
+     * current estimate permanently into the headset's frame, and a moving robot's estimate is its
+     * worst, because any timestamp mismatch between the headset and the estimator turns into
+     * position error in proportion to speed.
+     */
+    public static final LoggedTunableNumber kQuestReseedMaxSpeedMetersPerSec =
+        new LoggedTunableNumber("Vision/QuestReseedMaxSpeed", 0.05);
+
+    /**
+     * How slowly the robot must be rotating for a QuestNav re-seed to be permitted, in rad/s.
+     *
+     * <p>Called out separately from translation because a robot spinning in place has zero
+     * translational speed while being the worst possible moment to seed: the headset sits well off
+     * the rotation centre, so it is moving quickly even though the chassis is going nowhere. A
+     * translation-only check would wave that case straight through.
+     */
+    public static final LoggedTunableNumber kQuestReseedMaxOmegaRadPerSec =
+        new LoggedTunableNumber("Vision/QuestReseedMaxOmega", 0.1);
+
+    /**
      * How fast the pose-confidence estimate degrades while no camera is contributing, in metres of
      * effective standard deviation per second of staleness.
      *

@@ -87,6 +87,17 @@ public class TurretCameraTransformTest {
   /** The checkpoint's own tolerance: "does not move by more than a couple of centimetres". */
   private static final double CHECKPOINT_TOLERANCE_METERS = 0.02;
 
+  /**
+   * Headset mounting for a suite that has no headset.
+   *
+   * <p>Identity is meaningless here rather than dangerous: every case in this file builds {@code
+   * Vision} over an empty {@code QuestNavIO}, which reports no frames, so nothing ever composes
+   * this transform. It is passed explicitly because the constructor takes all three mountings
+   * together -- and taking them together is deliberate, since the whole lesson of M8 is that a
+   * mounting left at identity silently removes the geometry a test was meant to exercise.
+   */
+  private static final Transform3d NO_HEADSET_MOUNTING = new Transform3d();
+
   private VisionIOSim turretSim;
   private Vision vision;
 
@@ -147,7 +158,8 @@ public class TurretCameraTransformTest {
             () -> turretAngleRad,
             () -> turretVelocityRadPerSec,
             ROBOT_TO_TURRET_AXIS,
-            TURRET_TO_CAMERA);
+            TURRET_TO_CAMERA,
+            NO_HEADSET_MOUNTING);
 
     seedOdometryAndTurret();
   }
@@ -564,7 +576,8 @@ public class TurretCameraTransformTest {
             () -> turretAngleRad,
             () -> turretVelocityRadPerSec,
             ROBOT_TO_TURRET_AXIS,
-            TURRET_TO_CAMERA);
+            TURRET_TO_CAMERA,
+            NO_HEADSET_MOUNTING);
 
     // A slew far past the blur threshold, which must have no bearing on a frame-fixed camera.
     for (int i = 0; i < 20; i++) {
