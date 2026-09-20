@@ -9,14 +9,29 @@ jobs:
     name: Build and test
     runs-on: ubuntu-latest
 
-    # Matches the toolchain in build.gradle. This was pinned at 2024 while the project moved to
-    # WPILib 2026; a cross image a year behind the vendordeps is a compile failure waiting to be
-    # blamed on the code.
-    container: wpilib/roborio-cross-ubuntu:2026-22.04-py313
+    # No container. This project is Java-only -- build.gradle applies the `java` plugin and not
+    # `cpp`, and the roboRIO JNI artifacts are DOWNLOADED dependencies rather than anything that is
+    # cross-compiled here -- so `build` and `test` need nothing but a JDK 17.
+    #
+    # It previously ran in wpilib/roborio-cross-ubuntu. Moving that image from the 2024 tag to 2026
+    # broke every check: the 2026 image ships neither a JDK on PATH nor python3, so Compile failed
+    # with "JAVA_HOME is not set" and the summary step with "python3: not found". Rather than hunt
+    # for an image whose contents happen to match, the dependency is removed. setup-java provides a
+    # pinned JDK, and GitHub's ubuntu-latest runner has python3 preinstalled.
+    #
+    # The cross image becomes necessary again only if this project ever adds C++ or builds roboRIO
+    # native artifacts in CI. Deploying to a robot does not happen here.
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
 
       - name: Grant execute permission
         run: chmod +x gradlew
@@ -31,7 +46,8 @@ jobs:
         run: ./gradlew test
 
       # `always()` so results are published even when the previous step failed -- which is exactly
-      # when they are worth reading.
+      # when they are worth reading. If Compile failed, no XML exists and this reports that plainly
+      # rather than erroring.
       - name: Summarise test results
         if: always()
         run: python3 .github/scripts/test_summary.py
@@ -40,7 +56,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ github.job }}
+          name: test-results
           path: |
             build/test-results/test/*.xml
             build/reports/tests/test/**
