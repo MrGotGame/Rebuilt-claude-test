@@ -235,10 +235,10 @@ public class RobotContainer {
    *
    * <p>The trigger is a NetworkTables boolean rather than a controller button, so the checkpoint
    * needs no joystick on either the simulator or the robot. That is not just convenience: polling a
-   * controller button on an unpopulated Driver Station port makes WPILib log a
-   * "Joystick Button 4 on port 1 not available" warning on every loop, which buries the log you are
-   * trying to read. It also means the entire checkpoint -- trigger, target speed, and gains -- is
-   * driven from one AdvantageScope pane with nothing plugged in.
+   * controller button on an unpopulated Driver Station port makes WPILib log a "Joystick Button 4
+   * on port 1 not available" warning on every loop, which buries the log you are trying to read. It
+   * also means the entire checkpoint -- trigger, target speed, and gains -- is driven from one
+   * AdvantageScope pane with nothing plugged in.
    *
    * <p>Driving a subsystem directly is acceptable here for exactly one reason: the flywheel has no
    * mechanical interlock with anything. It cannot collide with the intake or the turret and it has
@@ -265,8 +265,7 @@ public class RobotContainer {
         // what the M4 checkpoint asks you to demonstrate; the other half is editing Shooter/Kp in
         // the same pane and watching the response change.
         .onTrue(
-            Commands.runOnce(
-                () -> shooter.setGoal(Constants.Shooter.kBenchTestRpm.get()), shooter))
+            Commands.runOnce(() -> shooter.setGoal(Constants.Shooter.kBenchTestRpm.get()), shooter))
         // Falling edge: back to the idle hold rather than a stop, because IDLE is what the
         // superstructure will actually command between shots and it is the state the checkpoint
         // walks out of. To stop the wheel completely, disable the robot. COAST is deliberately not
