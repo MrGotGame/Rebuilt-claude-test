@@ -373,6 +373,20 @@ public final class Constants {
     public static final LoggedTunableNumber kKp = new LoggedTunableNumber("FloorRoller/Kp", 0.1);
     public static final LoggedTunableNumber kKv = new LoggedTunableNumber("FloorRoller/Kv", 0.12);
     public static final LoggedTunableNumber kKs = new LoggedTunableNumber("FloorRoller/Ks", 0.0);
+
+    /**
+     * Speed band inside which {@code FloorRoller.atSpeed()} reports the roller as up to speed.
+     *
+     * <p>Wider than the flywheel's 75 RPM on purpose. Nothing downstream gates a shot on this
+     * roller, so the only cost of a loose band is an optimistic log line, whereas a tight band on a
+     * roller that is pushing a game piece around would read as "never at speed" for the whole
+     * intake cycle. TODO: tune once the roller has run with a piece in it.
+     */
+    public static final LoggedTunableNumber kToleranceRpm =
+        new LoggedTunableNumber("FloorRoller/ToleranceRpm", 200.0);
+
+    /** DCMotorSim moment of inertia, kg*m^2, roller plus shaft. TODO: from CAD. */
+    public static final double kMoiKgM2 = 0.001;
   }
 
   /** The indexer that holds a piece and feeds it into the flywheel on command. */
