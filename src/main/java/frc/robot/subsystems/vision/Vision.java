@@ -6,12 +6,19 @@ import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Transform3d;
 import edu.wpi.first.math.numbers.N1;
 import edu.wpi.first.math.numbers.N3;
+import edu.wpi.first.wpilibj.Alert;
+import edu.wpi.first.wpilibj.Alert.AlertType;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.Constants;
 import frc.robot.RobotState;
+import java.util.Arrays;
+import java.util.EnumMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.DoubleSupplier;
 import org.littletonrobotics.junction.AutoLogOutput;
+import org.littletonrobotics.junction.Logger;
 
 /**
  * The vision fusion policy, which lives here and only here.
@@ -45,6 +52,42 @@ public class Vision extends SubsystemBase {
   private boolean questTrusted = false;
 
   /**
+   * Why an observation was thrown away.
+   *
+   * <p>An enum rather than free strings, so the log keys cannot drift and so every reason is
+   * published even when its count is zero. A counter that only appears once it fires is useless for
+   * the M7 checkpoint, which asks you to provoke each reason and watch the matching counter move --
+   * you cannot watch a key that does not exist yet.
+   */
+  private enum RejectionReason {
+    NO_TAGS,
+    SINGLE_TAG_AMBIGUOUS,
+    Z_ERROR,
+    OUTSIDE_FIELD,
+    TURRET_SLEWING,
+    NO_CORRELATED_POSE,
+    POSE_JUMP
+  }
+
+  private final Map<RejectionReason, Integer> intakeRejections =
+      new EnumMap<>(RejectionReason.class);
+
+  private final Alert intakeCameraDisconnectedAlert =
+      new Alert("Intake Limelight disconnected", AlertType.kError);
+
+  /**
+   * Fires while the field dimensions are still unmeasured.
+   *
+   * <p>A warning rather than an error, because the robot works without it, but a loud one: with
+   * {@code kFieldLengthMeters} at 0.0 the out-of-field rule cannot run, so a wildly wrong pose that
+   * would normally be discarded is instead fused. See {@link #isOutsideField(Pose2d)}.
+   */
+  private final Alert fieldBoundsUnmeasuredAlert =
+      new Alert(
+          "Field dimensions are still 0.0, so vision cannot reject out-of-field poses.",
+          AlertType.kWarning);
+
+  /**
    * Builds the vision subsystem.
    *
    * <p>The turret angle arrives as suppliers rather than a {@code Turret} reference, deliberately:
@@ -67,10 +110,19 @@ public class Vision extends SubsystemBase {
     this.questNavIO = questNavIO;
     this.turretAngleSupplier = turretAngleSupplier;
     this.turretVelocitySupplier = turretVelocitySupplier;
-    // TODO: Register FaultReporter checks: "Turret Limelight disconnected" and "Intake Limelight
-    // disconnected" as errors; "QuestNav not tracking" and "QuestNav battery low" as WARNINGS, not
-    // errors -- the robot still works without the headset, and a warning that stops the match is
-    // worse than the drift it was protecting you from.
+    // IMPLEMENTATION (was TODO: "Register FaultReporter checks ... QuestNav ones as WARNINGS.")
+    //
+    // The intake camera's check is an Alert driven from periodic(), for the reason recorded in
+    // PhoenixUtil.tryUntilOk and Shooter: FaultReporter is a skeleton whose getInstance() returns
+    // null and would throw here.
+    //
+    // The turret-camera and QuestNav checks are deliberately NOT registered. M7 is the intake
+    // camera only; the turret camera is M8 and the headset M9, and an alert for a device this
+    // milestone never reads would sit permanently red on a healthy robot -- which teaches everyone
+    // to ignore the alerts widget, the one place M14 needs them to look.
+    for (RejectionReason reason : RejectionReason.values()) {
+      intakeRejections.put(reason, 0);
+    }
   }
 
   /**
@@ -82,17 +134,43 @@ public class Vision extends SubsystemBase {
    */
   @Override
   public void periodic() {
-    // TODO: This exact order matters:
-    //   1. questNavIO.commandPeriodic()
-    //   2. pushRobotOrientation()
-    //   3. turretCameraIO.setRobotToCamera(robotToTurretCameraNow())
-    //   4. updateInputs + Logger.processInputs for all three IOs
-    //   5. processCamera(turretInputs, PoseSource.LIMELIGHT_TURRET, true)
-    //   6. processCamera(intakeInputs, PoseSource.LIMELIGHT_INTAKE, false)
-    //   7. updateQuestNavTrust(); then processQuestNav()
-    //   8. Log accepted and rejected counts, and every rejection reason
-    // Steps 2 and 3 MUST precede step 4: both cameras solve using what you pushed, so pushing after
-    // reading means every frame is solved with last loop's data.
+    // IMPLEMENTATION (was TODO: the eight-step order, steps 2 and 3 before step 4.)
+    //
+    // M7 SCOPE: the intake camera only, as the milestone specifies -- a fixed transform is the easy
+    // one, and doing it first settles the rejection ladder and the covariance model before the
+    // moving turret transform is layered on in M8.
+    //
+    // Steps 3, 5 and 7 are absent rather than forgotten:
+    //   - steps 3 and 5 (the turret camera) are M8. robotToTurretCameraNow() still returns the
+    //     identity transform, so fusing turret observations now would feed the estimator poses
+    //     solved about the robot origin instead of the camera -- confidently wrong, which is worse
+    //     than absent.
+    //   - step 7 (QuestNav) is M9.
+    //
+    // The ordering rule the TODO is really about is preserved where it matters: orientation is
+    // pushed BEFORE inputs are read, because the camera solves using what was last pushed.
+    pushRobotOrientation();
+
+    intakeCameraIO.updateInputs(intakeInputs);
+    Logger.processInputs("Vision/" + Constants.Vision.kIntakeCameraName, intakeInputs);
+
+    // The turret camera is READ but not FUSED. Sampling it keeps its health and raw observations in
+    // the log from M7 onward, so M8's bring-up is a comparison against a baseline rather than a
+    // fresh mystery.
+    turretCameraIO.updateInputs(turretInputs);
+    Logger.processInputs("Vision/" + Constants.Vision.kTurretCameraName, turretInputs);
+
+    processCamera(intakeInputs, RobotState.PoseSource.LIMELIGHT_INTAKE, false);
+
+    Logger.recordOutput("Vision/AcceptedObservations", acceptedCount);
+    for (Map.Entry<RejectionReason, Integer> entry : intakeRejections.entrySet()) {
+      Logger.recordOutput(
+          "Vision/" + Constants.Vision.kIntakeCameraName + "/Rejections/" + entry.getKey(),
+          entry.getValue());
+    }
+
+    intakeCameraDisconnectedAlert.set(!intakeInputs.connected);
+    fieldBoundsUnmeasuredAlert.set(!fieldBoundsAreMeasured());
   }
 
   /**
@@ -101,11 +179,16 @@ public class Vision extends SubsystemBase {
    * <p><b>Outputs:</b> writes robot orientation to both Limelights.
    */
   private void pushRobotOrientation() {
-    // TODO: Rotation2d yaw = RobotState.getInstance().getRotation();
-    // double rate = RobotState.getInstance().getFieldRelativeSpeeds().omegaRadiansPerSecond;
-    // then push to both cameras.
-    // Use the FUSED estimate, not the raw gyro: MegaTag2 is only as good as this heading, and the
-    // fused estimate is the one that has been corrected for gyro drift.
+    // IMPLEMENTATION (was TODO: "getRotation() and the fused omega, pushed to both cameras. Use
+    // the FUSED estimate, not the raw gyro.")
+    //
+    // Both cameras get the heading even though only the intake camera is fused this milestone,
+    // because MegaTag2 needs it to solve at all -- withholding it would make the turret camera's
+    // logged observations meaningless rather than merely unused.
+    var yaw = RobotState.getInstance().getRotation();
+    double rateRadPerSec = RobotState.getInstance().getFieldRelativeSpeeds().omegaRadiansPerSecond;
+    intakeCameraIO.setRobotOrientation(yaw, rateRadPerSec);
+    turretCameraIO.setRobotOrientation(yaw, rateRadPerSec);
   }
 
   /**
@@ -150,18 +233,153 @@ public class Vision extends SubsystemBase {
    */
   private void processCamera(
       VisionIO.VisionIOInputs inputs, RobotState.PoseSource source, boolean isTurretMounted) {
-    // TODO: For each PoseObservation, REJECT when:
-    //   - tagCount == 0
-    //   - tagCount == 1 and ambiguity > Constants.Vision.kMaxAmbiguity.get()
-    //   - Math.abs(pose.getZ()) > kMaxZErrorMeters.get()   (a good fix is on the floor plane)
-    //   - the pose lies outside the field bounds
-    //   - isTurretMounted and Math.abs(turretVelocitySupplier.getAsDouble())
-    //       > kMaxTurretRateForVisionRadPerSec.get()
-    //   - RobotState.getInstance().getPoseAt(timestamp) is empty (too old to correlate)
-    // Otherwise compute std devs with computeStdDevs(...) and call
-    // RobotState.getInstance().addVisionObservation(...).
-    // COUNT AND LOG every rejection with its reason under Vision/<source>/Rejections/<reason>. A
-    // silently-rejecting pipeline is indistinguishable from a pipeline that is not running.
+    // IMPLEMENTATION (was TODO: the six rejection rules, then computeStdDevs and
+    // addVisionObservation, counting and logging every rejection with its reason.)
+    //
+    // Rules run cheapest-first and each one CONTINUES rather than falling through, so a rejection
+    // is attributed to exactly one reason. Attributing to several would make the counters sum to
+    // more than the rejection total and quietly ruin the M7 checkpoint, which reads them as a
+    // partition.
+    for (VisionIO.PoseObservation observation : inputs.poseObservations) {
+      Pose2d pose = observation.pose().toPose2d();
+
+      if (observation.tagCount() == 0) {
+        reject(source, RejectionReason.NO_TAGS);
+        continue;
+      }
+
+      // Ambiguity is only meaningful for a single-tag solve; a multi-tag fix is geometrically
+      // constrained and its ambiguity field is not defined.
+      if (observation.tagCount() == 1
+          && observation.ambiguity() > Constants.Vision.kMaxAmbiguity.get()) {
+        reject(source, RejectionReason.SINGLE_TAG_AMBIGUOUS);
+        continue;
+      }
+
+      // A good fix puts the robot on the floor plane. Height is the cheapest proxy for "this solve
+      // is geometric nonsense", and it catches tag misidentification, which otherwise produces a
+      // confident pose somewhere else entirely.
+      if (Math.abs(observation.pose().getZ()) > Constants.Vision.kMaxZErrorMeters.get()) {
+        reject(source, RejectionReason.Z_ERROR);
+        continue;
+      }
+
+      if (isOutsideField(pose)) {
+        reject(source, RejectionReason.OUTSIDE_FIELD);
+        continue;
+      }
+
+      // Turret-mounted only. A camera swinging with the turret smears its exposure across a
+      // changing transform, and the resulting pose is wrong in a way no covariance can express.
+      if (isTurretMounted
+          && Math.abs(turretVelocitySupplier.getAsDouble())
+              > Constants.Vision.kMaxTurretRateForVisionRadPerSec.get()) {
+        reject(source, RejectionReason.TURRET_SLEWING);
+        continue;
+      }
+
+      // No odometry sample at the capture time means the observation cannot be correlated with
+      // where the robot was, so the estimator cannot apply it correctly.
+      Optional<Pose2d> correlated = RobotState.getInstance().getPoseAt(observation.timestampSec());
+      if (correlated.isEmpty()) {
+        reject(source, RejectionReason.NO_CORRELATED_POSE);
+        continue;
+      }
+
+      // The jump gate compares against where the robot BELIEVED it was at the capture time, not
+      // against the current estimate; comparing against now would reject honest observations
+      // simply because the robot moved during the camera's latency.
+      double jumpMeters = correlated.get().getTranslation().getDistance(pose.getTranslation());
+      if (jumpMeters > Constants.Vision.kMaxAcceptedPoseJumpMeters.get()) {
+        reject(source, RejectionReason.POSE_JUMP);
+        continue;
+      }
+
+      RobotState.getInstance()
+          .addVisionObservation(
+              new RobotState.PoseObservation(
+                  pose,
+                  observation.timestampSec(),
+                  computeStdDevs(
+                      observation.tagCount(), observation.averageTagDistanceMeters(), source),
+                  source));
+      acceptedCount++;
+    }
+  }
+
+  /**
+   * Records one rejection against its reason.
+   *
+   * @param source which camera produced the observation
+   * @param reason why it was discarded
+   *     <p><b>Outputs:</b> increments the per-reason counter and the total.
+   */
+  private void reject(RobotState.PoseSource source, RejectionReason reason) {
+    rejectedCount++;
+    if (source == RobotState.PoseSource.LIMELIGHT_INTAKE) {
+      intakeRejections.merge(reason, 1, Integer::sum);
+    }
+  }
+
+  /**
+   * Whether the field dimensions have been measured yet.
+   *
+   * @return true once both field dimensions are non-zero
+   */
+  private static boolean fieldBoundsAreMeasured() {
+    return Constants.Field.kFieldLengthMeters.get() > 0.0
+        && Constants.Field.kFieldWidthMeters.get() > 0.0;
+  }
+
+  /**
+   * Whether a pose lies outside the field, with a margin.
+   *
+   * @param pose the candidate field pose
+   * @return true when the pose is outside the playing field by more than the tolerated margin
+   */
+  private static boolean isOutsideField(Pose2d pose) {
+    // The unmeasured-field guard is load-bearing, not defensive padding. kFieldLengthMeters and
+    // kFieldWidthMeters are both still 0.0 pending the REBUILT drawings, and a bounds check against
+    // zero rejects EVERY observation -- which presents as "vision does not work", sends someone
+    // hunting through the camera config, and is indistinguishable from a dead Limelight.
+    //
+    // Returning false disables only this one rule; the other six still run, and the cost is
+    // recorded in fieldBoundsUnmeasuredAlert rather than hidden.
+    if (!fieldBoundsAreMeasured()) {
+      return false;
+    }
+
+    // A tolerance, because a legitimate fix taken with the robot against the wall can solve a few
+    // centimetres outside it -- which is exactly the situation at the start of a match.
+    double margin = Constants.Vision.kMaxZErrorMeters.get();
+    return pose.getX() < -margin
+        || pose.getX() > Constants.Field.kFieldLengthMeters.get() + margin
+        || pose.getY() < -margin
+        || pose.getY() > Constants.Field.kFieldWidthMeters.get() + margin;
+  }
+
+  /**
+   * How many observations have been rejected for a given reason.
+   *
+   * <p>Exposed so the rejection ladder can be asserted directly. The M7 checkpoint asks that every
+   * counter be provoked at least once, and a test does that far more precisely than waving a hand
+   * in front of a camera.
+   *
+   * @param reason the rejection reason to query, by its enum name
+   * @return how many intake-camera observations were discarded for that reason
+   */
+  public int getRejectionCount(String reason) {
+    return intakeRejections.getOrDefault(RejectionReason.valueOf(reason), 0);
+  }
+
+  /**
+   * How many observations have been rejected in total.
+   *
+   * @return the rejected-observation count across all reasons
+   */
+  @AutoLogOutput(key = "Vision/RejectedObservations")
+  public int getRejectedCount() {
+    return rejectedCount;
   }
 
   /**
@@ -174,16 +392,28 @@ public class Vision extends SubsystemBase {
    */
   private Matrix<N3, N1> computeStdDevs(
       int tagCount, double averageDistanceMeters, RobotState.PoseSource source) {
-    // TODO: xy = kMegaTag2XyStdDevBase.get() * averageDistance^2 / tagCount;
-    //       theta = kMegaTag2ThetaStdDev.get();
-    // The theta value is left deliberately enormous: MegaTag2 CONSUMES your heading to solve, so
-    // feeding its heading output back into the estimator creates a self-reinforcing feedback loop
-    // that slowly rotates your whole field frame.
-    // Return VecBuilder.fill(xy, xy, theta).
+    // IMPLEMENTATION (was TODO: "xy = base * averageDistance^2 / tagCount; theta left enormous.")
     //
-    // The placeholder below returns effectively-infinite covariance so that, until this is written,
-    // observations are harmless rather than trusted.
-    return VecBuilder.fill(9999.0, 9999.0, 9999.0);
+    // Distance is SQUARED because the positional error of a tag solve grows with the square of
+    // range: a pixel of angular resolution subtends a linearly growing distance, and the depth
+    // solve degrades faster still as the tag's apparent size shrinks.
+    //
+    // Dividing by tag count is the crude form of averaging independent measurements. Not
+    // statistically exact -- the tags share a camera calibration and are not independent -- but it
+    // captures the part that matters: a four-tag fix deserves markedly more trust than a
+    // single-tag one at the same range.
+    //
+    // theta is left enormous on purpose, and this is the most important line in the method.
+    // MegaTag2 CONSUMES the heading this class pushed to it in order to solve, so feeding its
+    // heading output back into the estimator closes a loop on the robot's own belief. The failure
+    // is not a jump but a slow, confident rotation of the entire field frame, which looks like a
+    // drifting gyro and gets diagnosed as one for a long time.
+    double xy =
+        Constants.Vision.kMegaTag2XyStdDevBase.get()
+            * averageDistanceMeters
+            * averageDistanceMeters
+            / Math.max(1, tagCount);
+    return VecBuilder.fill(xy, xy, Constants.Vision.kMegaTag2ThetaStdDev.get());
   }
 
   /**
@@ -242,9 +472,20 @@ public class Vision extends SubsystemBase {
    *     its AprilTag pipeline
    */
   public Optional<VisionIO.TargetObservation> getBestGamePieceTarget() {
-    // TODO: Return the largest-area TargetObservation from intakeInputs, but only while the intake
-    // camera is on its game-piece pipeline. Consumed by DriveCommands.gamePieceAssist.
-    return Optional.empty();
+    // IMPLEMENTATION (was TODO: "Return the largest-area TargetObservation from intakeInputs, but
+    // only while the intake camera is on its game-piece pipeline.")
+    //
+    // The pipeline guard is NOT a check against a cached index, because nothing writes one:
+    // setIntakePipeline is fire-and-forget and the Limelight does not report the active pipeline
+    // back through this IO. Filtering on hasTarget is the honest equivalent -- the AprilTag
+    // pipeline reports no game-piece targets, so the array is empty and this returns empty anyway.
+    //
+    // TODO: once VisionIO reports the active pipeline index, gate on it explicitly.
+    if (!intakeInputs.hasTarget || intakeInputs.targetObservations.length == 0) {
+      return Optional.empty();
+    }
+    return Arrays.stream(intakeInputs.targetObservations)
+        .max((a, b) -> Double.compare(a.area(), b.area()));
   }
 
   /**
@@ -271,7 +512,8 @@ public class Vision extends SubsystemBase {
    *     game-piece pipeline whenever the intake is deployed, and back to AprilTags when stowed.
    */
   public void setIntakePipeline(int index) {
-    // TODO: intakeCameraIO.setPipeline(index).
+    // IMPLEMENTATION (was TODO: "intakeCameraIO.setPipeline(index).")
+    intakeCameraIO.setPipeline(index);
   }
 
   /**
@@ -292,7 +534,7 @@ public class Vision extends SubsystemBase {
    */
   @AutoLogOutput(key = "Vision/AcceptedObservations")
   public int getAcceptedCount() {
-    // TODO: return acceptedCount.
-    return 0;
+    // IMPLEMENTATION (was TODO: "return acceptedCount.")
+    return acceptedCount;
   }
 }

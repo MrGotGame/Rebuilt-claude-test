@@ -462,6 +462,23 @@ public class RobotState {
     // the timestamp predates the buffer, which callers must treat as "skip this measurement".")
     lock.readLock().lock();
     try {
+      // The window check is what makes the documented contract true. WPILib's
+      // TimeInterpolatableBuffer.getSample CLAMPS to its endpoints rather than returning empty for
+      // an out-of-range timestamp, so a bare delegation quietly answers every query -- correlating
+      // a thirty-second-old vision frame against the oldest pose still buffered and reporting that
+      // as a valid correlation.
+      //
+      // Found by M7's rejection-ladder tests: the NO_CORRELATED_POSE rule could never fire, because
+      // this method never said no. M2's checkpoint could not have caught it either, since
+      // getPoseAt(now - 0.1) is well inside the window.
+      //
+      // Only the OLD side is guarded, deliberately. A timestamp slightly newer than the last
+      // odometry sample is normal -- odometry is discrete and a camera frame can land between
+      // samples -- and clamping forward by a few milliseconds is both harmless and correct.
+      var samples = poseBuffer.getInternalBuffer();
+      if (samples.isEmpty() || timestampSec < samples.firstKey()) {
+        return Optional.empty();
+      }
       return poseBuffer.getSample(timestampSec);
     } finally {
       lock.readLock().unlock();
