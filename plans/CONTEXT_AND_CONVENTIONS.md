@@ -167,14 +167,13 @@ Branch heads and status at the time of writing. Nothing below has been verified 
 | `feature-drive` | M1 | Drivetrain, `RobotState` odometry path, tunables, `PhoenixUtil`, `DriveCommands`. Builds. Teleop default command bound (left stick translate, right stick rotate). |
 | `feature-robot-state` | M2 | Branched off `feature-drive`. Vision ingestion with rejection rules, staleness, pose confidence, QuestNav trust, `AllianceFlipUtil`. Builds. |
 | `feature-shooting-parameters` | M3 | Branched off `claude-test`, independent. `ShotParameters`, `ShootingSolver`, `TurretUnwrapper`, `GeomUtil`. 24 tests pass, mutation score 13/13. |
-| `feature-flywheel` | M4 | Branched off `claude-test`, independent. `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` FSM, plus a NetworkTables bench harness. Builds. **Simulation checkpoint verified, negative cases included**; hardware outstanding. Carries `PhoenixUtil`, `PowerBudget`, `LoggedTunableNumber` and `LoggedTunableGains` byte-identical from `feature-drive`. |
+| `feature-flywheel` | M4 | Branched off `claude-test`, independent. `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` FSM, plus a NetworkTables bench harness. Builds. **Simulation checkpoint complete, negative cases included**; hardware outstanding. Carries `PhoenixUtil`, `PowerBudget`, `LoggedTunableNumber` and `LoggedTunableGains` byte-identical from `feature-drive`. |
 
-**M4's simulation checkpoint has been done**, including deliberate failures: zeroed gains drive the
-machine to `FAULTED` after `kSpinUpTimeoutSec`, and a zero goal resolves to `IDLE` instead of
-faulting. See `PROJECT_OVERVIEW.md` for the full list and for the two things it did **not**
-establish — nothing has run on hardware, and the `ifChanged → setGains` path is still unexercised in
-isolation because the zeroed-gains test moved `kS` and `kV` too, and `ShooterIOSim` reads those
-directly from `Constants` rather than through `setGains`.
+**M4's simulation checkpoint is complete**, including deliberate failures: zeroed gains drive the
+machine to `FAULTED` after `kSpinUpTimeoutSec`, a zero goal resolves to `IDLE` instead of faulting,
+and editing `Shooter/Kp` alone changes the response with no redeploy. Everything still outstanding
+on M4 needs a robot. See `PROJECT_OVERVIEW.md` for the full record, including a note on why a low
+`kP` settling short points at the guessed `kV` and should be left alone until M6 measures it.
 
 **M2's checkpoint is a hard gate** and has not been done: drive a 3 m square by hand, confirm the
 estimated pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically
