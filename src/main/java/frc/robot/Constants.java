@@ -429,10 +429,54 @@ public final class Constants {
 
     public static final LoggedTunableNumber kHasPieceVelocityDropRpm =
         new LoggedTunableNumber("Indexer/HasPieceVelDrop", 400.0);
+
+    /**
+     * How long after a speed change the load predicate is ignored.
+     *
+     * <p>Spin-up from rest satisfies both halves of the load test at once -- high current AND a
+     * large shortfall against the goal -- so an empty indexer told to FEED reported a phantom piece
+     * and then "lost" it on reaching speed, which the shot counter recorded as a shot. Debouncing
+     * was relied on to outlast that transient and did not. Ignoring the predicate until the wheel
+     * has had time to settle removes the failure by construction rather than by timing margin.
+     *
+     * <p>TODO: MEASURE -- read the spin-up duration from Indexer/Inputs and set this comfortably
+     * above it.
+     */
+    public static final LoggedTunableNumber kDetectionSettleSec =
+        new LoggedTunableNumber("Indexer/DetectionSettleSec", 0.4);
+
     public static final LoggedTunableNumber kHasPieceDebounceSec =
         new LoggedTunableNumber("Indexer/HasPieceDebounce", 0.06);
     public static final LoggedTunableNumber kShotDetectDebounceSec =
         new LoggedTunableNumber("Indexer/ShotDebounce", 0.08);
+
+    /**
+     * How long an EJECT request runs before the machine parks itself back in IDLE, seconds.
+     *
+     * <p>A duration rather than a sensor test on purpose: the whole reason to eject is that the
+     * piece is jammed or the wrong piece, which is exactly the situation in which piece detection
+     * cannot be trusted to tell you when it has gone. A bounded run also stops a held EJECT button
+     * from grinding the indexer against a stuck piece for the rest of the match.
+     *
+     * <p>TODO: tune on the robot. Watch Indexer/Inputs/velocityRpm while ejecting a piece and take
+     * the time from the reversal to the piece clearing, plus a margin.
+     */
+    public static final LoggedTunableNumber kEjectDurationSec =
+        new LoggedTunableNumber("Indexer/EjectDuration", 0.75);
+
+    /** Indexer moment of inertia for IndexerIOSim, kg*m^2. TODO: pull from CAD. */
+    public static final double kMoiKgM2 = 0.001;
+
+    /**
+     * How far past the piece-detection thresholds IndexerIOSim's synthetic piece pushes,
+     * dimensionless.
+     *
+     * <p>Expressed as a multiple of {@link #kHasPieceCurrentAmps} and {@link
+     * #kHasPieceVelocityDropRpm} rather than as absolute amps and RPM, so that retuning either
+     * threshold on the robot cannot silently stop the simulated piece from being detected -- which
+     * would present as "the sim stopped working" long after the change that caused it.
+     */
+    public static final double kSimPieceDetectionMargin = 1.5;
   }
 
   // ------------------------------------------------------------------------------- the turret ----
