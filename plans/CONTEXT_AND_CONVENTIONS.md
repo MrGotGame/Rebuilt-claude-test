@@ -107,6 +107,34 @@ loads the `wpiHal` native — and that native is not in the offline repo.
 **The GitHub repo is private.** Clone new working directories from a local sibling directory rather
 than from GitHub; a non-interactive shell cannot answer the credential prompt.
 
+**The agent cannot signal processes outside its sandbox.** `kill` returns "Permission denied" even
+for the user's own PIDs, and `ss` is blocked as well, so the agent can list processes but cannot
+stop them or inspect listening sockets. `./gradlew --stop` is the exception that works, because it
+talks to the Gradle daemons over a socket rather than by signal — and stopping a daemon also kills
+the simulation it forked. Note that typing a command with the `!` prefix in Claude Code does **not**
+get around this: that runs in the same sandbox.
+
+**`./gradlew simulateJava` launches no GUI.** `build.gradle` sets
+`wpi.sim.addGui().defaultEnabled = false`, which the AdvantageKit template does on purpose, since
+log replay requires every HAL sim extension to be disabled. Use VS Code's
+*WPILib: Simulate Robot Code* command and tick the extensions you want. Do not flip that flag to
+true — it would break replay, which is the reason this project uses AdvantageKit at all.
+
+**`bin/` is the VS Code language server's output and is not what Gradle runs.** If robot code dies
+with `java.lang.Error: Unresolved compilation problem` while `./gradlew build` passes, the IDE's
+class output is stale or broken and something launched from `bin/` rather than
+`build/classes/java/main`; that error string is an Eclipse JDT construct and `javac` never emits it.
+Delete `bin/` — it is gitignored and regenerates. The specific cause of this, now fixed on `main`,
+was `.vscode/settings.json` shipping with `java.import.gradle.annotationProcessing.enabled` set to
+false: AdvantageKit's `@AutoLog` is an annotation processor, so with it off the language server
+never generates the `XxxIOInputsAutoLogged` types and poisons every class that references one.
+
+**AdvantageScope is read-only until you turn tuning mode on.** Values under `/Tuning` appear only
+when the live source is *NetworkTables 4 (AdvantageKit)*, as a top-level `Tuning` table rather than
+under `AdvantageKit/`, and editing needs the slider icon right of the search bar — purple means
+active. Booleans then get a red/green circle to click. Any NT-writing dashboard works too; the Sim
+GUI's own NetworkTables window is the quickest.
+
 ---
 
 ## 4. Verification expectations
@@ -139,6 +167,14 @@ Branch heads and status at the time of writing. Nothing below has been verified 
 | `feature-drive` | M1 | Drivetrain, `RobotState` odometry path, tunables, `PhoenixUtil`, `DriveCommands`. Builds. Teleop default command bound (left stick translate, right stick rotate). |
 | `feature-robot-state` | M2 | Branched off `feature-drive`. Vision ingestion with rejection rules, staleness, pose confidence, QuestNav trust, `AllianceFlipUtil`. Builds. |
 | `feature-shooting-parameters` | M3 | Branched off `claude-test`, independent. `ShotParameters`, `ShootingSolver`, `TurretUnwrapper`, `GeomUtil`. 24 tests pass, mutation score 13/13. |
+| `feature-flywheel` | M4 | Branched off `claude-test`, independent. `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` FSM, plus a NetworkTables bench harness. Builds. **Simulation checkpoint verified, negative cases included**; hardware outstanding. Carries `PhoenixUtil`, `PowerBudget`, `LoggedTunableNumber` and `LoggedTunableGains` byte-identical from `feature-drive`. |
+
+**M4's simulation checkpoint has been done**, including deliberate failures: zeroed gains drive the
+machine to `FAULTED` after `kSpinUpTimeoutSec`, and a zero goal resolves to `IDLE` instead of
+faulting. See `PROJECT_OVERVIEW.md` for the full list and for the two things it did **not**
+establish — nothing has run on hardware, and the `ifChanged → setGains` path is still unexercised in
+isolation because the zeroed-gains test moved `kS` and `kV` too, and `ShooterIOSim` reads those
+directly from `Constants` rather than through `setGains`.
 
 **M2's checkpoint is a hard gate** and has not been done: drive a 3 m square by hand, confirm the
 estimated pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically
@@ -163,13 +199,18 @@ whole vision and shooting stack rests on that last one.
 
 ## 6. Suggested next steps
 
-1. **Push the outstanding branches.** `main`, `claude-test`, and the three feature branches all have
+1. **Push the outstanding branches.** `main`, `claude-test`, and the four feature branches all have
    unpushed commits.
 2. **Commit the regenerated `TunerConstants.java`** on `claude-test`.
-3. **Perform M2's hardware checkpoint** before building anything that consumes pose.
-4. **M4 — the flywheel** (lane B, needs no drivetrain). The plan calls it the template for the other
-   four mechanisms, so it is worth reviewing carefully before lane B builds the rest in parallel.
-5. **The constants rename** (section 2), ideally as its own mechanical branch.
-6. **Integration branches**, merging in the order `feature-drive` → `claude-test`, then
+3. **Review and accept M4.** The plan calls the flywheel the template for the other four mechanisms,
+   so lane B should not start them in parallel until its IO layer, FSM shape and logging have been
+   read and agreed. Everything from `handleStateTransition` down is meant to be copied.
+4. **Perform M2's hardware checkpoint** before building anything that consumes pose, and M4's
+   hardware checkpoint when a flywheel exists.
+5. **M5 — the remaining four mechanisms** (lane B), once M4 is accepted.
+6. **The constants rename** (section 2), ideally as its own mechanical branch.
+7. **Integration branches**, merging in the order `feature-drive` → `claude-test`, then
    `feature-robot-state` (fast-forwards, being stacked on drive), then `feature-shooting-parameters`
-   (independent; `LoggedTunableNumber.java` is byte-identical on both sides, so it merges cleanly).
+   (independent; `LoggedTunableNumber.java` is byte-identical on both sides, so it merges cleanly),
+   then `feature-flywheel` last, whose four copied util files collapse to no change once drive is
+   in.
