@@ -152,7 +152,8 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M6 | Characterize everything | — | not started; needs hardware |
 | M7 | Intake Limelight, rejection ladder, covariance model | `feature-limelight` | Complete in simulation — rejection ladder 5/5 under mutation; hardware checkpoint outstanding |
 | M8 | Turret camera: `robotToTurretCameraNow/At`, slew-rate rejection | `feature-limelight-complete` | **Simulation checkpoint complete** — 12 + 5 tests, mutation score 7/7; hardware checkpoint outstanding |
-| M9+ | QuestNav, superstructure, autos | not started | — |
+| M9 | QuestNav: trust gate, seeding, re-seeding, degradation | `feature-questnav` | **Simulation checkpoint complete** — 18 tests, mutation score 12/12; hardware checkpoint outstanding |
+| M10+ | Superstructure, commands, autos | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
@@ -243,6 +244,55 @@ pose that wanders exactly when the shooter is aiming. The observations are still
 suppressed, because a silently inert camera is the harder failure to notice, but
 `turretTransformUnmeasuredAlert` fires continuously until someone measures it.
 
+### M9, and the difference between a limitation and a bug
+
+M9 completes section 7. Both halves of its checkpoint run as tests: seed against a tag, blind both
+Limelights, push 3 m and the pose still tracks; then drop the headset mid-run and confirm trust
+goes false, the reason is recorded, and the pose degrades to odometry rather than jumping.
+
+The suite runs on **wheels that under-report by 10 %**, and that choice is the whole point. With
+perfect odometry, "the pose tracks with both cameras blind" would hold whether or not a single
+QuestNav frame was ever fused — the same vacuity M8 had to design around, in a new costume. One
+test asserts the odometry shortfall directly so the checkpoint cannot quietly become a no-op.
+
+Two things are worth carrying forward.
+
+**A test that cannot fail is worse than no test.** The case covering "refuse a re-seed while the
+robot is moving" reported three re-seeds during a 3 m drive. The guard was right; the *harness* was
+lying to it. Chassis speeds reach `RobotState` through a separate `addDriveSpeedsObservation` call
+that `Drive.periodic()` makes and the test did not, so `getFieldRelativeSpeeds()` read zero forever
+and the "nearly stationary" guard was satisfied at full speed. **When a test drives `RobotState`
+directly, check which of its write paths the real subsystems feed and which the harness has
+silently left at zero** — a defaulted input makes a guard untestable without making it look broken.
+
+**Some failures are limits, not defects, and they should be written down rather than tuned away.**
+A case asserting that sustained drift withdraws trust with no tags in view failed, and it was right
+to. The trust gate's last clause compares the headset against `RobotState`'s estimate — but a
+trusted headset *is* that estimate's most heavily weighted part, so with no camera anchoring it the
+estimate follows the drift and the residual settles at a small equilibrium. Drift is simply not
+detectable without an absolute reference; comparing against odometry instead would not help, since
+odometry is a relative source with its own drift. That is now a named, permanent test recording the
+limit and what bounds it: M7 had already excluded QuestNav from `getVisionStalenessSec`, so the
+staleness clock runs the moment tags are lost and `readyToScore` closes however healthy the headset
+looks. **The robot drives on a possibly drifting pose; it does not shoot on one.**
+
+Mutation testing scored 4/7 on M8 and 8/12 here on the first run, and in both cases the survivors
+were worth more than the kills. All three real survivors were tests that passed for the wrong
+reason — one had blacked out the camera so thoroughly that the rule it was named for was never
+reached, one settled for less time than the hold it was meant to outlast, and one covered a
+simulator property that production defends against anyway. A fourth apparent survivor was a
+*defective mutation*, aimed at a code branch the suite never exercises, which is its own reminder:
+**a surviving mutation is a question, not a verdict — check that it mutated something the tests can
+actually reach before concluding the tests are at fault.** Second run: 12/12.
+
+One more verification habit earned its keep. The `QuestNavIOReal` skeleton carried
+`TODO: VERIFY that surface against the installed beta`, and doing it with `javap` found the plan
+wrong: `getBatteryPercent` and `getTrackingLostCounter` return `OptionalInt`, not
+`Optional<Integer>`. That particular error is loud, but the lesson is not about that one method —
+**a beta dependency's signatures are worth checking against the jar rather than against the
+document that describes it**, so the surface this project depends on is now listed in the class's
+own documentation for one-pass re-checking.
+
 ## Conventions
 
 These are followed throughout and should be maintained.
@@ -278,8 +328,14 @@ These affect everything downstream and are not bugs in any one branch:
   `kRobotToIntakeCamera` and `kRobotToQuest` are all `TODO: MEASURE from CAD`. The transform *maths*
   is now implemented and tested, but until the numbers exist each camera's poses are biased by its
   true offset from the robot origin — and for the turret camera that bias rotates with the turret.
-  `Vision` raises a warning alert while the turret mounting is unmeasured, and the measurement is a
-  prerequisite for M8's on-robot checkpoint rather than a tuning step after it.
+  `Vision` raises a warning alert for each unmeasured mounting, and the measurement is a
+  prerequisite for M8's and M9's on-robot checkpoints rather than a tuning step after them.
+  **`kRobotToQuest` is the worst of the four**: section 7.6 calls it the single largest error source
+  in the subsystem, because QuestNav carries the tightest covariance of any source, so a 2 cm error
+  there is a 2 cm bias that *wins* the fusion against every camera that disagrees with it.
+- **The whole vision stack is code-complete and hardware-untested.** Every method in
+  `frc/robot/subsystems/vision/` is implemented as of M9 — which makes it easy to mistake the
+  subsystem for finished. No Limelight has ever seen a tag and no headset has ever been connected.
 - **No hardware verification has been performed** on any milestone.
 
 ## Testing standard
