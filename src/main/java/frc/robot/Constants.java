@@ -360,6 +360,7 @@ public final class Constants {
      */
     public static final LoggedTunableNumber kPivotKg =
         new LoggedTunableNumber("Intake/PivotKg", 0.0);
+
     public static final LoggedTunableNumber kPivotCruiseRadPerSec =
         new LoggedTunableNumber("Intake/PivotCruise", 8.0);
     public static final LoggedTunableNumber kPivotAccelRadPerSec2 =
@@ -401,6 +402,7 @@ public final class Constants {
      */
     public static final LoggedTunableNumber kHomingDutyCycle =
         new LoggedTunableNumber("Intake/HomingDutyCycle", -0.15);
+
     public static final LoggedTunableNumber kHomingVelocityThresholdRadPerSec =
         new LoggedTunableNumber("Intake/HomingVelThreshold", 0.15);
     public static final LoggedTunableNumber kHomingSettleSec =
@@ -434,8 +436,8 @@ public final class Constants {
      *
      * <p>Added for M5. The soft limits exist to stop a runaway closed loop, not to define travel --
      * the hard stops do that. Setting them exactly at the stow and deploy angles would make homing
-     * impossible, because homing works by driving INTO a hard stop and the soft limit would cut
-     * the output just short of it every time.
+     * impossible, because homing works by driving INTO a hard stop and the soft limit would cut the
+     * output just short of it every time.
      *
      * <p>Roughly 6 degrees. Widen it if homing stalls short of the stop; narrow it if a runaway
      * gets far enough to do damage before the limit catches it.

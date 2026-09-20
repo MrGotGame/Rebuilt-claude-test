@@ -69,8 +69,8 @@ public class Intake extends SubsystemBase {
    *
    * <p>They are separate on purpose. A dead pivot motor stops the intake moving, which is obvious.
    * A dead absolute encoder is not obvious at all: the mechanism still works, because homing falls
-   * back to the hard stop, and the only symptom is that the pivot re-homes on every boot instead
-   * of knowing where it already is.
+   * back to the hard stop, and the only symptom is that the pivot re-homes on every boot instead of
+   * knowing where it already is.
    */
   private final Alert pivotDisconnectedAlert =
       new Alert("Intake pivot motor disconnected", AlertType.kError);
@@ -288,9 +288,10 @@ public class Intake extends SubsystemBase {
       case IDLE -> SystemState.IDLE;
       case STOW -> atGoal() ? SystemState.STOWED : SystemState.STOWING;
 
-      // The guard covers all three states that put the arm outside the stow position, not just the
-      // two named DEPLOY. EJECT swings to kEjectAngleRad, which is just as capable of meeting the
-      // turret as the deploy angle is.
+        // The guard covers all three states that put the arm outside the stow position, not just
+        // the
+        // two named DEPLOY. EJECT swings to kEjectAngleRad, which is just as capable of meeting the
+        // turret as the deploy angle is.
       case DEPLOY_AND_INTAKE -> {
         if (!deployAllowed.getAsBoolean()) {
           yield atGoal() ? SystemState.STOWED : SystemState.STOWING;
@@ -310,8 +311,8 @@ public class Intake extends SubsystemBase {
         yield SystemState.EJECTING;
       }
 
-      // Unreachable: both are handled above, before the homing gate. Listed so that adding a
-      // WantedState later is a compile error here rather than a silent fall-through.
+        // Unreachable: both are handled above, before the homing gate. Listed so that adding a
+        // WantedState later is a compile error here rather than a silent fall-through.
       case HOME, CHARACTERIZE -> systemState;
     };
   }
@@ -385,7 +386,7 @@ public class Intake extends SubsystemBase {
   private void applyState() {
     // IMPLEMENTATION (was TODO: "switch (systemState) calling the private handlers below.")
     switch (systemState) {
-      case IDLE -> idle();
+      case IDLE -> idling();
       case STOWING, STOWED -> stowing();
       case DEPLOYING -> deploying();
       case INTAKING -> intaking();
@@ -401,7 +402,13 @@ public class Intake extends SubsystemBase {
    *
    * <p><b>Outputs:</b> commands the pivot to its existing goal and stops the roller.
    */
-  private void idle() {
+  private void idling() {
+    // NAMED idling(), NOT idle(). WPILib 2026's Subsystem interface declares a public default
+    // idle() returning a Command, so a private idle() here is an attempt to weaken the access of
+    // an inherited method and does not compile. The gerund also matches every sibling handler --
+    // stowing, deploying, intaking, ejecting, homing, characterizing -- so the collision-avoiding
+    // name is the consistent one anyway. Do not "tidy" it back.
+    //
     // IDLE holds the last commanded angle rather than going neutral. A pivot with a gravity load
     // and no command falls, and the arm falling is how it arrives in the turret's arc unannounced.
     io.setPivotPosition(pivotGoalRad);
