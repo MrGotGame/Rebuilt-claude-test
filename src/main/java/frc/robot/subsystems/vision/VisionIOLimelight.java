@@ -8,6 +8,9 @@ import edu.wpi.first.networktables.DoublePublisher;
 import edu.wpi.first.networktables.IntegerSubscriber;
 import edu.wpi.first.networktables.NetworkTable;
 import edu.wpi.first.networktables.NetworkTableInstance;
+import edu.wpi.first.wpilibj.Timer;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Talks to a Limelight 4 over NetworkTables. Two details here are load-bearing.
@@ -36,6 +39,24 @@ public class VisionIOLimelight implements VisionIO {
   private final DoubleArraySubscriber targetSubscriber;
   private final IntegerSubscriber tagIdSubscriber;
 
+  // IMPLEMENTATION (was TODO: "The targetSubscriber above is a placeholder -- you likely want
+  // separate subscriptions for tv, tx, ty and ta rather than one array topic.")
+  //
+  // Added rather than replacing targetSubscriber, because that field is final and pre-filled by the
+  // skeleton. These four are what getBestGamePieceTarget actually reads.
+  private final edu.wpi.first.networktables.DoubleSubscriber tvSubscriber;
+  private final edu.wpi.first.networktables.DoubleSubscriber txSubscriber;
+  private final edu.wpi.first.networktables.DoubleSubscriber tySubscriber;
+  private final edu.wpi.first.networktables.DoubleSubscriber taSubscriber;
+
+  /** How long without a botpose sample before the camera is called disconnected, in seconds. */
+  private static final double kDisconnectTimeoutSec = 0.25;
+
+  /** Minimum botpose array length for the layout decoded in {@link #updateInputs}. */
+  private static final int kExpectedBotposeLength = 11;
+
+  private double lastPoseReceivedSec = 0.0;
+
   /**
    * Binds to one Limelight's NetworkTables entries.
    *
@@ -56,6 +77,10 @@ public class VisionIOLimelight implements VisionIO {
         table.getDoubleArrayTopic("botpose_wpiblue").subscribe(new double[] {});
     this.targetSubscriber = table.getDoubleArrayTopic("tx").subscribe(new double[] {});
     this.tagIdSubscriber = table.getIntegerTopic("tid").subscribe(0);
+    this.tvSubscriber = table.getDoubleTopic("tv").subscribe(0.0);
+    this.txSubscriber = table.getDoubleTopic("tx").subscribe(0.0);
+    this.tySubscriber = table.getDoubleTopic("ty").subscribe(0.0);
+    this.taSubscriber = table.getDoubleTopic("ta").subscribe(0.0);
     // TODO: VERIFY every NetworkTables key above against the Limelight 4 docs for YOUR firmware
     // version. Key names have changed between Limelight releases, and a wrong key fails silently as
     // "the camera never sees anything".
@@ -70,14 +95,82 @@ public class VisionIOLimelight implements VisionIO {
    */
   @Override
   public void updateInputs(VisionIOInputs inputs) {
-    // TODO: inputs.connected = the botpose subscriber has received a value within a 250 ms window.
-    // For each queued botpose_orb_wpiblue sample, the array layout is
-    //   [x, y, z, roll, pitch, yaw, latencyMs, tagCount, tagSpan, avgTagDist, avgTagArea]
-    // so build a PoseObservation with
-    //   timestampSec = sampleTimestampMicros / 1e6 - latencyMs / 1000.0
-    // Collect TargetObservations from tx/ty/ta whenever tv == 1.
-    // TODO: VERIFY the array layout against your firmware -- it has changed between releases, and
-    // reading the wrong index gives a plausible-looking but wrong pose.
+    // IMPLEMENTATION (was TODO: "connected = a botpose value within 250 ms; for each queued
+    // botpose_orb_wpiblue sample decode [x, y, z, roll, pitch, yaw, latencyMs, tagCount, tagSpan,
+    // avgTagDist, avgTagArea] and build a PoseObservation; collect TargetObservations from tx/ty/ta
+    // whenever tv == 1.")
+    //
+    // readQueue() rather than get(): the camera publishes faster than the robot loop, so a plain
+    // get() silently discards every frame but the newest. Draining the queue is what lets the
+    // estimator apply several observations per loop, each at its own capture time.
+    var queue = megaTag2Subscriber.readQueue();
+
+    // Connection is judged on RECENCY of data, not on the topic existing. A Limelight that has
+    // been unplugged leaves its NetworkTables entries behind, so an existence check reports a dead
+    // camera as healthy for the rest of the match.
+    if (queue.length > 0) {
+      lastPoseReceivedSec = Timer.getFPGATimestamp();
+    }
+    inputs.connected = Timer.getFPGATimestamp() - lastPoseReceivedSec < kDisconnectTimeoutSec;
+
+    List<PoseObservation> observations = new ArrayList<>();
+    for (var sample : queue) {
+      double[] v = sample.value;
+
+      // A short array means a firmware whose layout does not match the one decoded below. Skipping
+      // is deliberate: reading past the end would throw, and guessing at the missing fields would
+      // produce a plausible-looking but wrong pose, which is worse than no pose.
+      if (v.length < kExpectedBotposeLength) {
+        continue;
+      }
+
+      double latencyMs = v[6];
+      int tagCount = (int) v[7];
+      double avgTagDist = v[9];
+
+      // The Limelight timestamps its sample when it PUBLISHES, so the capture instant is that
+      // moment minus the pipeline latency it reports. Getting this wrong does not look like an
+      // error -- it looks like a pose estimate that is subtly wrong only while moving.
+      double timestampSec = sample.timestamp / 1.0e6 - latencyMs / 1000.0;
+
+      observations.add(
+          new PoseObservation(
+              timestampSec,
+              new edu.wpi.first.math.geometry.Pose3d(
+                  new edu.wpi.first.math.geometry.Translation3d(v[0], v[1], v[2]),
+                  new edu.wpi.first.math.geometry.Rotation3d(
+                      Math.toRadians(v[3]), Math.toRadians(v[4]), Math.toRadians(v[5]))),
+              // MegaTag2 does not publish a per-solve ambiguity; it is a multi-tag orientation-
+              // seeded solve. Reporting 0.0 is honest, and Vision only consults ambiguity when
+              // tagCount == 1 anyway.
+              0.0,
+              tagCount,
+              avgTagDist));
+    }
+    inputs.poseObservations = observations.toArray(new PoseObservation[0]);
+
+    boolean hasTarget = tvSubscriber.get() > 0.5;
+    inputs.hasTarget = hasTarget;
+    inputs.targetObservations =
+        hasTarget
+            ? new TargetObservation[] {
+              new TargetObservation(
+                  Timer.getFPGATimestamp(),
+                  Rotation2d.fromDegrees(txSubscriber.get()),
+                  Rotation2d.fromDegrees(tySubscriber.get()),
+                  taSubscriber.get())
+            }
+            : new TargetObservation[0];
+
+    long tid = tagIdSubscriber.get();
+    inputs.tagIds = tid > 0 ? new int[] {(int) tid} : new int[0];
+    inputs.latencySec = queue.length > 0 ? queue[queue.length - 1].value[6] / 1000.0 : 0.0;
+
+    // TODO: VERIFY the botpose array layout against your firmware before trusting a pose on the
+    // field. It has changed between Limelight releases, and reading the wrong index gives a
+    // plausible-looking but wrong pose. The length guard above turns a layout change into "no
+    // observations" rather than into a confident lie, but it cannot detect a REORDERED layout of
+    // the same length.
   }
 
   /**
@@ -87,7 +180,22 @@ public class VisionIOLimelight implements VisionIO {
    */
   @Override
   public void setRobotToCamera(Transform3d robotToCamera) {
-    // TODO: cameraPosePublisher.set(new double[] {x, y, z, rollDeg, pitchDeg, yawDeg}).
+    // IMPLEMENTATION (was TODO: "cameraPosePublisher.set(new double[] {x, y, z, rollDeg,
+    // pitchDeg, yawDeg}).")
+    //
+    // Degrees, not radians. The Limelight's robotspace entries are in degrees, and a radian value
+    // here is accepted without complaint and solves against a camera pointing somewhere else.
+    var t = robotToCamera.getTranslation();
+    var r = robotToCamera.getRotation();
+    cameraPosePublisher.set(
+        new double[] {
+          t.getX(),
+          t.getY(),
+          t.getZ(),
+          Math.toDegrees(r.getX()),
+          Math.toDegrees(r.getY()),
+          Math.toDegrees(r.getZ())
+        });
     // NOTE THE UNITS: the Limelight expects DEGREES here, while WPILib's Rotation3d is in RADIANS.
     // This is the single most common turret-camera bug, and it presents as a pose that is wrong by
     // an amount that grows with turret angle.
@@ -101,11 +209,16 @@ public class VisionIOLimelight implements VisionIO {
    */
   @Override
   public void setRobotOrientation(Rotation2d yaw, double yawRateRadPerSec) {
-    // TODO: robotOrientationPublisher.set(new double[] {yaw.getDegrees(),
-    //     Units.radiansToDegrees(yawRateRadPerSec), 0, 0, 0, 0});
-    // then NetworkTableInstance.getDefault().flush() so the camera sees it BEFORE it solves this
-    // frame. Without the flush the heading can arrive a frame late, which is exactly the stale-
-    // heading failure MegaTag2 is most sensitive to.
+    // IMPLEMENTATION (was TODO: "robotOrientationPublisher.set(new double[] {yaw.getDegrees(),
+    // ...}).")
+    //
+    // MegaTag2 uses only the yaw; the remaining five are required by the entry's shape and are
+    // published as zero. The flush is what makes the ordering guarantee in the class documentation
+    // real -- without it the write may not reach the camera before botpose is read this loop, and
+    // every frame solves against last loop's heading.
+    robotOrientationPublisher.set(
+        new double[] {yaw.getDegrees(), Math.toDegrees(yawRateRadPerSec), 0.0, 0.0, 0.0, 0.0});
+    NetworkTableInstance.getDefault().flush();
   }
 
   /**
@@ -115,7 +228,9 @@ public class VisionIOLimelight implements VisionIO {
    */
   @Override
   public void setPipeline(int index) {
-    // TODO: pipelinePublisher.set(index). Used to switch the intake camera between AprilTag and
+    // IMPLEMENTATION (was TODO: "pipelinePublisher.set(index).")
+    pipelinePublisher.set(index);
+    // Used to switch the intake camera between AprilTag and
     // game-piece pipelines.
   }
 
@@ -126,6 +241,7 @@ public class VisionIOLimelight implements VisionIO {
    */
   @Override
   public void setLeds(boolean on) {
-    // TODO: Write 3 (force on) or 1 (force off) to the "ledMode" entry.
+    // IMPLEMENTATION (was TODO: "Write 3 (force on) or 1 (force off) to the ledMode entry.")
+    table.getEntry("ledMode").setNumber(on ? 3 : 1);
   }
 }
