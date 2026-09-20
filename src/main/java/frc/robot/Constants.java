@@ -483,6 +483,61 @@ public final class Constants {
 
     /** Turret moment of inertia for TurretIOSim, kg*m^2. TODO: from CAD. */
     public static final double kMoiKgM2 = 0.02;
+
+    /**
+     * How close to the latched branch target a long-way-around sweep must get before the turret is
+     * treated as aiming again, radians.
+     *
+     * <p>Deliberately much looser than {@link #kToleranceRad}. This threshold decides when to stop
+     * suppressing the chassis-cancelling feedforward, not when a shot is allowed -- {@code
+     * Turret.atGoal()} still owns that. Making it as tight as the shot tolerance would hold the
+     * feedforward off through the settling tail of every sweep, which is exactly the part of the
+     * motion where the chassis may already be rotating again.
+     */
+    public static final LoggedTunableNumber kUnwrapExitToleranceRad =
+        new LoggedTunableNumber("Turret/UnwrapExitTolerance", Math.toRadians(10.0));
+
+    /**
+     * How long the turret may stay in {@code HOMING} before giving up and faulting, seconds.
+     *
+     * <p>Generous, because the fallback stall-homing path may have to traverse the whole travel at
+     * {@link #kHomingVolts}. The absolute-encoder path finishes in one loop and never approaches
+     * this.
+     */
+    public static final LoggedTunableNumber kHomingTimeoutSec =
+        new LoggedTunableNumber("Turret/HomingTimeout", 5.0);
+
+    /**
+     * Open-loop voltage used by the fallback stall-homing path, volts.
+     *
+     * <p><b>Negative drives toward {@link #kMinAngleRad}</b>, and the angle seeded when the turret
+     * stalls is {@code kMinAngleRad} for exactly that reason. Flipping this sign without also
+     * flipping the seed zeroes the turret against the wrong hard stop, which presents as a turret
+     * that is a full travel-width wrong and aims into the driver station.
+     *
+     * <p>Small on purpose: this path ends by deliberately stalling the mechanism against a hard
+     * stop, so the voltage must be low enough that doing so is harmless.
+     */
+    public static final LoggedTunableNumber kHomingVolts =
+        new LoggedTunableNumber("Turret/HomingVolts", -1.0);
+
+    /** Below this speed the stall-homing path believes the turret is against a stop, rad/s. */
+    public static final LoggedTunableNumber kHomingVelocityThresholdRadPerSec =
+        new LoggedTunableNumber("Turret/HomingVelThreshold", 0.15);
+
+    /**
+     * How long stall-homing drives before it is allowed to believe a low velocity, seconds.
+     *
+     * <p>Without this grace period the turret is stationary on the very first homing loop, so the
+     * velocity test would fire immediately and seed the current position as the hard stop. Homing
+     * would then always "succeed" and always be wrong.
+     */
+    public static final LoggedTunableNumber kHomingMinMotionSec =
+        new LoggedTunableNumber("Turret/HomingMinMotion", 0.25);
+
+    /** Largest voltage an operator manual jog may command, volts. */
+    public static final LoggedTunableNumber kManualMaxVolts =
+        new LoggedTunableNumber("Turret/ManualMaxVolts", 4.0);
   }
 
   // ------------------------------------------------------------------------------ the shooter ----
