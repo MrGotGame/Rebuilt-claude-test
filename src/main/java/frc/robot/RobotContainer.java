@@ -4,6 +4,7 @@ import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
+import edu.wpi.first.wpilibj2.command.button.Trigger;
 import frc.robot.autos.AutoFactory;
 import frc.robot.autos.AutoRoutines;
 import frc.robot.autos.AutoSelector;
@@ -42,6 +43,7 @@ import frc.robot.subsystems.vision.Vision;
 import frc.robot.subsystems.vision.VisionIO;
 import frc.robot.subsystems.vision.VisionIOLimelight;
 import frc.robot.subsystems.vision.VisionIOSim;
+import org.littletonrobotics.junction.networktables.LoggedNetworkBoolean;
 
 /**
  * The wiring harness for the whole robot.
@@ -70,6 +72,15 @@ public class RobotContainer {
       new CommandXboxController(Constants.Controls.kDriverPort);
   private final CommandXboxController operator =
       new CommandXboxController(Constants.Controls.kOperatorPort);
+
+  /**
+   * Dashboard toggle that drives the flywheel bench harness, or null outside tuning mode.
+   *
+   * <p>Not final, and deliberately left unassigned when {@link Constants#kTuningMode} is false, so
+   * that a competition robot never publishes this key at all. Nothing reads it except the trigger
+   * built in {@link #configureShooterTuningBindings()}.
+   */
+  private LoggedNetworkBoolean benchSpinUp;
 
   private final AutoFactory autoFactory;
   private final AutoRoutines autoRoutines;
@@ -214,48 +225,53 @@ public class RobotContainer {
   }
 
   /**
-   * Binds the operator controls that make the M4 flywheel checkpoint demonstrable, while tuning
-   * only.
+   * Binds the flywheel bench harness that makes the M4 checkpoint demonstrable, while tuning only.
    *
    * <p>This is a bench harness, not competition control. Every mechanism action in a match routes
    * through {@link Superstructure#setWantedStateCommand}, which is what makes an illegal mechanism
    * combination unrepresentable from a button -- but the superstructure's state machine is a
-   * skeleton until M10, so there is currently no route through it that can spin the flywheel. These
-   * three buttons fill that gap so the milestone can be verified when it is built rather than
-   * months later.
+   * skeleton until M10, so there is currently no route through it that can spin the flywheel. This
+   * fills that gap so the milestone can be verified when it is built rather than months later.
    *
-   * <p>Binding a subsystem directly is safe here for exactly one reason: the flywheel has no
+   * <p>The trigger is a NetworkTables boolean rather than a controller button, so the checkpoint
+   * needs no joystick on either the simulator or the robot. That is not just convenience: polling a
+   * controller button on an unpopulated Driver Station port makes WPILib log a
+   * "Joystick Button 4 on port 1 not available" warning on every loop, which buries the log you are
+   * trying to read. It also means the entire checkpoint -- trigger, target speed, and gains -- is
+   * driven from one AdvantageScope pane with nothing plugged in.
+   *
+   * <p>Driving a subsystem directly is acceptable here for exactly one reason: the flywheel has no
    * mechanical interlock with anything. It cannot collide with the intake or the turret and it has
    * no travel limits to crash into, which is why the plan picked it as the first mechanism. Do not
    * copy this pattern for the turret or the intake.
    *
-   * <p>The whole method is behind {@link Constants#kTuningMode}, so nothing below exists at an
-   * event.
-   *
-   * <p><b>Outputs:</b> registers three operator button triggers when tuning mode is on.
+   * <p><b>Outputs:</b> when tuning mode is on, publishes {@code /Tuning/Shooter/BenchSpinUp} and
+   * registers one trigger against it.
    */
   private void configureShooterTuningBindings() {
     if (!Constants.kTuningMode) {
       return;
     }
 
-    // Y: spin to the bench speed. Deliberately a fresh setGoal() on every press rather than a
-    // latched command, so that editing Shooter/BenchTestRpm under /Tuning and pressing Y again is
-    // the whole retune loop -- no redeploy, which is half of what the M4 checkpoint is asking you
-    // to demonstrate.
-    operator
-        .y()
+    // Defaults false, and NetworkTables does not persist it across a restart, so every boot starts
+    // with the flywheel un-commanded no matter how the last session was left.
+    benchSpinUp = new LoggedNetworkBoolean("/Tuning/Shooter/BenchSpinUp", false);
+
+    // LoggedNetworkBoolean implements BooleanSupplier, so it can back a Trigger directly. The
+    // command scheduler polls it every loop, which is what turns a dashboard checkbox into edges.
+    new Trigger(benchSpinUp)
+        // Rising edge: read kBenchTestRpm fresh rather than capturing it once, so editing the
+        // target speed and re-toggling is the whole retune loop, with no redeploy. That is half of
+        // what the M4 checkpoint asks you to demonstrate; the other half is editing Shooter/Kp in
+        // the same pane and watching the response change.
         .onTrue(
             Commands.runOnce(
-                () -> shooter.setGoal(Constants.Shooter.kBenchTestRpm.get()), shooter));
-
-    // A: back to the idle hold. This is the interesting one to watch, because IDLE is a closed-loop
-    // hold at kIdleRpm rather than a stop, and the difference between recovering from idle and
-    // recovering from zero is what the idle state exists to buy.
-    operator.a().onTrue(shooter.setWantedStateCommand(Shooter.WantedState.IDLE));
-
-    // B: coast down to a stop. The one way to actually stop the wheel from a button, for the pit.
-    operator.b().onTrue(shooter.setWantedStateCommand(Shooter.WantedState.COAST));
+                () -> shooter.setGoal(Constants.Shooter.kBenchTestRpm.get()), shooter))
+        // Falling edge: back to the idle hold rather than a stop, because IDLE is what the
+        // superstructure will actually command between shots and it is the state the checkpoint
+        // walks out of. To stop the wheel completely, disable the robot. COAST is deliberately not
+        // reachable from here -- it is a pit and brownout state that M10 will command.
+        .onFalse(shooter.setWantedStateCommand(Shooter.WantedState.IDLE));
   }
 
   /**

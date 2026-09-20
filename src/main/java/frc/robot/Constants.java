@@ -537,12 +537,19 @@ public final class Constants {
         new LoggedTunableNumber("Shooter/SpinUpTimeout", 3.0);
 
     /**
-     * Speed commanded by the tuning-mode bench binding in {@code RobotContainer}.
+     * Speed commanded by the tuning-mode bench harness in {@code RobotContainer}.
      *
      * <p>This exists so the M4 checkpoint can be run end to end from AdvantageScope with no code
-     * change: spin the wheel from a button, then edit {@code Shooter/Kp} and this value under
-     * {@code /Tuning} and watch the response change. It is reachable only while {@link
-     * Constants#kTuningMode} is true, so it cannot be triggered at an event.
+     * change and no controller: tick {@code /Tuning/Shooter/BenchSpinUp} to spin the wheel, then
+     * edit {@code Shooter/Kp} and this value in the same pane and watch the response change.
+     *
+     * <p>Note that this value is only read on the rising edge of that toggle, so changing it while
+     * the wheel is already spinning does nothing until you toggle off and back on. That is
+     * deliberate -- a live-following bench speed would make the flywheel chase every keystroke
+     * while somebody is typing a four-digit number.
+     *
+     * <p>The harness is reachable only while {@link Constants#kTuningMode} is true, so it cannot be
+     * triggered at an event.
      */
     public static final LoggedTunableNumber kBenchTestRpm =
         new LoggedTunableNumber("Shooter/BenchTestRpm", 3000.0);
