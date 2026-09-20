@@ -126,6 +126,20 @@ public class Intake extends SubsystemBase {
   private boolean homingSucceeded = false;
 
   /**
+   * Whether a homing attempt has been asked for and not yet started.
+   *
+   * <p>This exists because {@code wantedState} cannot distinguish "the operator just pressed HOME"
+   * from "HOME is the state we booted in", and HOME is the boot state. Latching FAULTED on {@code
+   * wantedState != HOME} therefore never engaged at startup: a pivot that could not home cycled
+   * HOMING to FAULTED and straight back every {@code kHomingTimeoutSec}, forever, stalling the
+   * motor on every pass -- exactly the failure the timeout exists to prevent.
+   *
+   * <p>Set by {@link #setWantedState(WantedState)} on a HOME request, cleared on entry to HOMING.
+   * Starts true so the robot still homes itself once at boot.
+   */
+  private boolean homeRequested = true;
+
+  /**
    * Builds the intake around a hardware implementation.
    *
    * @param io the hardware layer: real, simulated, or an empty implementation for log replay
@@ -139,6 +153,15 @@ public class Intake extends SubsystemBase {
     // registered, because FaultReporter is not implemented yet. See the field documentation.
     this.io = io;
     stateTimer.start();
+
+    // Entry actions for the state the machine BOOTS into. periodic() only fires onEnter on a
+    // transition, and systemState is initialised to HOMING at field level, so without this call
+    // the boot home runs with none of its entry work done: soft limits stay enabled, which is a
+    // software refusal to reach the very hard stop homing is driving towards, and homeRequested is
+    // never cleared, so FAULTED cannot latch and a failing home cycles HOMING to FAULTED and back
+    // forever. Any FSM whose initial state has entry actions needs this; it is not specific to the
+    // intake.
+    onEnter(systemState);
   }
 
   /**
@@ -252,7 +275,7 @@ public class Intake extends SubsystemBase {
     // fix it. Without the latch the machine would leave FAULTED the instant the pivot happened to
     // drift inside tolerance, and the alert would flicker instead of telling the pit crew there is
     // something jammed. Same rule as Shooter's fault.
-    if (systemState == SystemState.FAULTED && wantedState != WantedState.HOME) {
+    if (systemState == SystemState.FAULTED && !homeRequested) {
       return SystemState.FAULTED;
     }
 
@@ -330,6 +353,7 @@ public class Intake extends SubsystemBase {
       case HOMING -> {
         isHomed = false;
         homingSucceeded = false;
+        homeRequested = false;
         homingSettleTimer.reset();
         homingSettleTimer.stop();
 
@@ -476,8 +500,18 @@ public class Intake extends SubsystemBase {
     // on the way there". A pivot reverses direction at the top of its travel and is momentarily
     // stationary; without the settle window that instant reads as a hard stop and seeds the zero
     // in completely the wrong place.
-    if (Math.abs(inputs.pivotVelocityRadPerSec)
-        < Constants.Intake.kHomingVelocityThresholdRadPerSec.get()) {
+    boolean moving =
+        Math.abs(inputs.pivotVelocityRadPerSec)
+            >= Constants.Intake.kHomingVelocityThresholdRadPerSec.get();
+    // A hard stop is a stall, and a stall draws current. A dead motor also reports zero velocity
+    // but draws nothing, so the current term is what separates "arrived at the stop" from "never
+    // started". Requiring proof of motion as well would false-fault a pivot that booted already
+    // resting against its stop; requiring current does not, because driving into the stop pulls
+    // current immediately whether or not the arm ever moved.
+    boolean stalledAgainstSomething =
+        !moving && inputs.pivotStatorCurrentAmps >= Constants.Intake.kHomingCurrentAmps.get();
+
+    if (stalledAgainstSomething) {
       homingSettleTimer.start();
       if (homingSettleTimer.hasElapsed(Constants.Intake.kHomingSettleSec.get())) {
         homingSucceeded = true;
@@ -526,6 +560,7 @@ public class Intake extends SubsystemBase {
     if (wanted == WantedState.HOME) {
       isHomed = false;
       homingSucceeded = false;
+      homeRequested = true;
     }
   }
 

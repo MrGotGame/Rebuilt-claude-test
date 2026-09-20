@@ -426,7 +426,7 @@ public final class Constants {
      * as specified rather than failing to home for a reason nobody has written down yet.
      */
     public static final LoggedTunableNumber kHomingCurrentAmps =
-        new LoggedTunableNumber("Intake/HomingCurrent", 0.0);
+        new LoggedTunableNumber("Intake/HomingCurrent", 10.0);
 
     public static final double kPivotStatorLimitAmps = 60.0;
     public static final double kRollerStatorLimitAmps = 80.0;
