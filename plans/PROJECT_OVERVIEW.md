@@ -225,12 +225,94 @@ These affect everything downstream and are not bugs in any one branch:
   autonomous routine resolves to `Commands.none()` — silently.
 - **No hardware verification has been performed** on any milestone.
 
+## Testing standard
+
+**This is not optional, and it is not advice. Code goes onto a robot only after it has been proven
+in simulation, and a test counts as proof only once it has been shown capable of failing.**
+
+The reason is specific to this project. A mechanism defect costs a practice day, a broken belt, or a
+match. Every one is cheaper to find in a JUnit run that takes three seconds than on a field.
+
+### Every mechanism gets an FSM suite
+
+One `XxxFsmTest` per subsystem, built over that subsystem's `XxxIOSim`, asserting at minimum:
+
+- the machine reaches **every** `SystemState` (this is clause 2 of the per-mechanism checkpoint);
+- the mechanism actually converges under closed loop, not merely that a state name changed;
+- each guard **refuses** what it should refuse — a guard nobody tested is a guard nobody has;
+- any invariant the class promises. `TurretFsmTest` sweeps 2,880 aim angles asserting the commanded
+  position never leaves the travel limits, which is the M5 turret checkpoint discharged as a
+  property rather than as a screenshot.
+
+The harness pattern, proven and copyable from any of the M5 suites:
+
+```java
+HAL.initialize(500, 0);          // FIRST
+Constants.disableHal = true;     // then this, so every tunable reads its compiled-in default
+SimHooks.pauseTiming();          // the test drives the FPGA clock, not wall time
+// ... build the subsystem over XxxIOSim ...
+// step(): periodic(); SimHooks.stepTiming(0.02);
+// tearDown(): unregisterSubsystem, resumeTiming, disableHal = false, HAL.shutdown()
+```
+
+`SimHooks` matters more than it looks: any state timeout measured in seconds would otherwise depend
+on how fast the machine running the suite happens to be.
+
+### Tests must be falsified, not merely passed
+
+A suite whose author also wrote the code proves nothing until it has been broken on purpose. Two
+ways, and both are expected:
+
+**Mutation testing.** Inject a defect, confirm a test goes red, revert. M3 set the bar at 13/13;
+M5's floor roller and indexer ran 3/3 each. **The harness must assert that the substitution actually
+changed the file** — a mutation whose anchor silently fails to match reports a perfect score for
+doing nothing, which is worse than no mutation testing because it is actively reassuring. That
+happened once here and was caught only because the assertion existed.
+
+**Deliberate-failure cases as permanent tests.** Build the FSM over the *empty* `XxxIO` — a
+stand-in for a dead motor — and assert the machine still walks its states while every success
+predicate stays false. State is a software concept; speed, position and "at goal" are physical ones.
+A suite that cannot tell them apart passes against a robot that does not move.
+
+### Vacuous passes seen in this project, all real
+
+These are the shapes to look for, because each one was live in committed code:
+
+- `|measured − goal| < tolerance` is **true at rest** when both are zero. Every such predicate needs
+  a non-zero-goal term, or a stopped mechanism reports itself ready.
+- **Stall detection on velocity alone cannot see a dead motor**, which reads zero forever. Homing
+  accepted it and marked the mechanism trustworthy at an imaginary zero. Require stall *current*.
+- A threshold constant left at `0.0` makes `x >= threshold` **vacuously true** and silently disables
+  the check it was added for.
+- A **spin-up transient** can satisfy a load predicate — high current and a large velocity shortfall
+  are also what a game piece looks like. Gate on a settling window, not on a longer debounce.
+- `onEnter` **never fires for the state a machine boots into**, because no transition occurs. Entry
+  actions for the initial state must be run explicitly in the constructor.
+
+### An intermittent test is a bug report, not flakiness
+
+The indexer suite failed roughly two runs in three and looked flaky. It was reporting a real defect
+that would have fired on the robot every single time. **Never retry-until-green and never delete a
+flaky test.** Run it several times, find what differs, and fix whichever of the code or the test is
+wrong — in that order of suspicion. Derive test timing margins from the constants they depend on
+rather than guessing a loop count, so retuning a constant cannot silently re-introduce the problem.
+
+### Continuous integration
+
+`.github/workflows/build.yml` compiles and tests every push and pull request, on every branch. Test
+results are rendered into the job summary by `.github/scripts/test_summary.py`, so a red check names
+the suite, the case and the assertion without anyone opening a log. A branch that executes **zero**
+tests is called out in the summary rather than passing quietly.
+
 ## Building and testing
 
 ```bash
-./gradlew compileJava   # build
-./gradlew test          # run unit tests; HTML report at build/reports/tests/test/index.html
+./gradlew build         # compile, format, and run the unit tests
+./gradlew test          # tests only; HTML report at build/reports/tests/test/index.html
 ```
+
+Note that `build` already includes `test`; there is no way to compile through CI without the tests
+running.
 
 Spotless runs automatically before compilation and will reformat sources and strip imports that are
 only referenced inside commented-out code.
