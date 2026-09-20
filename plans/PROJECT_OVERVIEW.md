@@ -147,7 +147,7 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M1 | Regenerate drivetrain, field-relative driving | `feature-drive` | Code complete, builds; on-robot checkpoint outstanding |
 | M2 | `RobotState` owns the pose | `feature-robot-state` | Code complete, builds; **hardware checkpoint outstanding** |
 | M3 | `ShotParameters`, `ShootingSolver`, `TurretUnwrapper` + tests | `feature-shooting-parameters` | Complete — 24 tests pass, mutation score 13/13 |
-| M4 | Flywheel: `ShooterIO`, `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` | `feature-flywheel` | Code complete, builds; **simulation checkpoint verified**; hardware checkpoint outstanding |
+| M4 | Flywheel: `ShooterIO`, `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` | `feature-flywheel` | Code complete, builds; **simulation checkpoint complete**; hardware checkpoint outstanding |
 | M5+ | Remaining four mechanisms, vision, superstructure, autos | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
@@ -171,14 +171,26 @@ was confirmed in simulation:
   specification; it was added because `Superstructure` calls `setGoal(0.0)` whenever the shooting
   solver returns an unusable solution, which — with the shot tables still all zeros — is its shipped
   behaviour today.
+- Editing `Shooter/Kp` alone, with no redeploy, visibly changes the response: a high `kP` spins up
+  quickly and overshoots, a low `kP` spins up slowly and settles short. That isolates the
+  `LoggedTunableNumber.ifChanged → io.setGains` path, which matters because a broken `ifChanged`
+  fails *silently* — the flywheel simply keeps running on its compiled-in gains and nothing reports
+  a problem.
 
-Two things M4 has **not** established. The flywheel has never run on hardware, so
-"holds a commanded RPM within `kToleranceRpm`" is untested, and `kFollowerOpposesLeader` is still a
-guess that must be checked against the gearbox before the first spin-up. And the checkpoint's third
-clause — that editing `Shooter/Kp` changes the response with no redeploy — is only partly shown: the
-zeroed-gains test moved `kS` and `kV` as well, and `ShooterIOSim` reads those two straight from
-`Constants` inside `setVelocity` while only `kP` travels through `io.setGains`. Changing `kP` alone
-would isolate the `LoggedTunableNumber.ifChanged → setGains` path, which nothing has exercised yet.
+That is every clause of M4's checkpoint that can be answered without a robot. **What M4 has not
+established is anything about hardware**: the flywheel has never spun, so "holds a commanded RPM
+within `kToleranceRpm`" is untested, and `kFollowerOpposesLeader` is still a guess that must be
+checked against the gearbox before the first spin-up.
+
+One observation from the `kP` sweep is worth carrying into M6. That a *low* `kP` settles short —
+rather than simply arriving slowly — means the proportional term is making up a steady-state error
+the feedforward should have covered, and with `kI` at zero there is nothing else to close it. That
+is the signature of a `kV` that under-predicts the voltage needed to hold speed, which is expected:
+`kV` is still the guessed 0.118, and `kMoiKgM2` feeding the simulated plant is a placeholder marked
+*TODO: from CAD*. It means `kP` is currently compensating for a feedforward error rather than doing
+its own job. Do not tune around it — M6's `shooterStaircase` measures `kS` and `kV` at true steady
+state, and the gains should be revisited only after that, on hardware, where the numbers that
+actually matter live.
 
 ## Conventions
 
