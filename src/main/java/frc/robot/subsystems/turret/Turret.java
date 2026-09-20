@@ -134,9 +134,9 @@ public class Turret extends SubsystemBase {
    * The velocity feedforward last handed to the IO layer, in radians per second.
    *
    * <p>{@link #atGoal()} compares the measured velocity against this rather than against zero. A
-   * turret correctly counter-rotating at 6 rad/s to hold an aim while the chassis spins is
-   * <i>on target</i>; measuring it against zero would call that a miss and block every shot taken
-   * while turning, which is the entire point of the mechanism.
+   * turret correctly counter-rotating at 6 rad/s to hold an aim while the chassis spins is <i>on
+   * target</i>; measuring it against zero would call that a miss and block every shot taken while
+   * turning, which is the entire point of the mechanism.
    */
   private double lastCommandedVelocityRadPerSec = 0.0;
 
@@ -791,8 +791,8 @@ public class Turret extends SubsystemBase {
    *
    * <p>The single choke point through which every position command in this class passes. Clamping
    * here rather than in each handler is what makes the invariant in the class documentation
-   * checkable: {@code Turret/CommandedPositionRad} is written by this method and nowhere else, so
-   * a log proving that series stays inside the limits proves it for every state at once.
+   * checkable: {@code Turret/CommandedPositionRad} is written by this method and nowhere else, so a
+   * log proving that series stays inside the limits proves it for every state at once.
    *
    * <p>The clamp is a last line of defence, not the primary one -- {@link TurretUnwrapper} is
    * already required to return an in-range branch or report itself unreachable. It exists for the
@@ -944,9 +944,7 @@ public class Turret extends SubsystemBase {
     // meaningless -- and dangerous -- on an unseeded position. HOME obviously needs homing. IDLE,
     // MANUAL and CHARACTERIZE are all open-loop or neutral and are deliberately left available
     // without a zero, because they are the states somebody needs when homing itself has failed.
-    return wanted == WantedState.AIM
-        || wanted == WantedState.STOW
-        || wanted == WantedState.HOME;
+    return wanted == WantedState.AIM || wanted == WantedState.STOW || wanted == WantedState.HOME;
   }
 
   /**
