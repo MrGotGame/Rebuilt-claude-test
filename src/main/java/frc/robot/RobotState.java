@@ -495,6 +495,28 @@ public class RobotState {
     // IMPLEMENTATION (was TODO: "Read-locked turretAngleBuffer.getSample(timestampSec).")
     lock.readLock().lock();
     try {
+      // The same window guard getPoseAt carries, and for the same reason: WPILib's
+      // TimeInterpolatableBuffer.getSample CLAMPS an out-of-range query to its nearest endpoint
+      // rather than returning empty, so a bare delegation answers every question ever asked.
+      //
+      // This one is worse than the pose version, because of WHAT the wrong answer is. Clamping
+      // returns the OLDEST angle still buffered -- up to two seconds stale -- and section 7.2 of
+      // the plan exists specifically to stop a turret frame being un-projected with an angle it
+      // was not captured at. Rule 7 of the rejection ladder is the enforcement, and rule 7 fires
+      // on this method returning empty. Without the guard the rule is unreachable code: every
+      // frame gets a transform, some of them 180 degrees wrong, and the resulting pose error looks
+      // like a camera calibration problem rather than a buffer problem.
+      //
+      // Found while implementing M8. M7 could not have caught it -- the intake camera never calls
+      // this method -- and neither could M2's checkpoint, which only ever queries 100 ms back.
+      //
+      // Only the OLD side is guarded, matching getPoseAt. A query a few milliseconds newer than
+      // the last turret sample is routine, because the camera frame lands between 20 ms periodic
+      // calls, and clamping forward across that gap is both harmless and correct.
+      var samples = turretAngleBuffer.getInternalBuffer();
+      if (samples.isEmpty() || timestampSec < samples.firstKey()) {
+        return Optional.empty();
+      }
       return turretAngleBuffer.getSample(timestampSec);
     } finally {
       lock.readLock().unlock();

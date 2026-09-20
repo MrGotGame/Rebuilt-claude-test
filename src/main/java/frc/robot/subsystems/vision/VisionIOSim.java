@@ -5,7 +5,9 @@ import edu.wpi.first.math.geometry.Pose3d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Transform3d;
 import edu.wpi.first.wpilibj.Timer;
+import java.util.NavigableMap;
 import java.util.Random;
+import java.util.TreeMap;
 import java.util.function.Supplier;
 
 /**
@@ -15,6 +17,19 @@ import java.util.function.Supplier;
  * inside the camera frustum and emits a noisy {@link PoseObservation}. That is enough to develop
  * and tune the fusion policy without adding PhotonVision as a dependency, and it lets you inject
  * exactly the failure you want to test: no tags, one tag at long range, or a 30 cm outlier.
+ *
+ * <p><b>It solves the way a Limelight solves.</b> A real camera recovers the field pose of its own
+ * lens from the tags, and then subtracts whatever robot-to-camera transform was last written to
+ * {@code camerapose_robotspace_set} to report a robot pose. Those two transforms are the same only
+ * when the pushed value is correct; for a turret-mounted camera they routinely differ, and the
+ * difference is the whole subject of M8. So this sim keeps them separate: it composes the field
+ * pose of the lens using the <i>true</i> mounting, and un-composes it using the <i>pushed</i> one.
+ *
+ * <p>Deriving the reported pose straight from ground truth instead -- which is what this class did
+ * through M7 -- makes every turret-transform test vacuous. The camera would report the right answer
+ * no matter how wrong the transform was, the checkpoint would pass, and the composition order would
+ * ship unverified. That is precisely the shape of vacuous pass the project's testing standard
+ * lists.
  */
 public class VisionIOSim implements VisionIO {
   private final String name;
@@ -22,6 +37,39 @@ public class VisionIOSim implements VisionIO {
   private Transform3d robotToCamera = new Transform3d();
   private double noiseStdDevMeters = 0.02;
   private boolean forcedBlackout = false;
+
+  /**
+   * Where the lens physically is, as opposed to where the robot code told the camera it is.
+   *
+   * <p>Defaults to the pushed transform, which makes the two agree and reproduces the pre-M8
+   * behaviour exactly: a camera whose mounting is always exactly what was last published reports
+   * ground truth. A turret test overrides it with the real, live mounting so that a stale or
+   * mis-composed push shows up as a wrong pose, which is the only way the correction in {@code
+   * Vision.processCamera} can be shown to be doing anything.
+   */
+  private Supplier<Transform3d> trueRobotToCameraSupplier = null;
+
+  /**
+   * What the mounting and the pushed transform were at one past instant.
+   *
+   * @param trueRobotToCamera where the lens actually was
+   * @param pushedRobotToCamera what the camera had most recently been told, and therefore what it
+   *     subtracted when it reported a robot pose
+   */
+  private record MountSample(Transform3d trueRobotToCamera, Transform3d pushedRobotToCamera) {}
+
+  /**
+   * Mounting history, so an observation can be built for the instant it was captured.
+   *
+   * <p>A frame reported now was exposed {@code latencySec} ago, and both transforms have moved
+   * since. Using this loop's values for a frame captured four loops back would hand the sim the
+   * perfect knowledge the real system does not have, and would quietly remove the timing error the
+   * capture-time correction exists to undo.
+   */
+  private final NavigableMap<Double, MountSample> mountHistory = new TreeMap<>();
+
+  /** How much mounting history to retain, matching {@code RobotState}'s buffer depth, seconds. */
+  private static final double kMountHistorySec = 2.0;
 
   /**
    * Seeded deliberately, so a failing test reproduces.
@@ -112,6 +160,18 @@ public class VisionIOSim implements VisionIO {
   }
 
   /**
+   * Test hook that separates where the lens really is from where the code says it is.
+   *
+   * @param supplier the live, true robot-to-camera transform, or null to go back to trusting the
+   *     pushed value
+   *     <p><b>Outputs:</b> stores the supplier, which is sampled once per {@link #updateInputs}.
+   *     Until a test sets this, the sim behaves exactly as it did for M7.
+   */
+  public void setTrueRobotToCamera(Supplier<Transform3d> supplier) {
+    this.trueRobotToCameraSupplier = supplier;
+  }
+
+  /**
    * Test hook that simulates a camera losing every tag.
    *
    * @param blackout true to emit no observations
@@ -163,24 +223,51 @@ public class VisionIOSim implements VisionIO {
       return;
     }
 
+    // The mounting is sampled BEFORE the observation is built, so this loop's push is available to
+    // a frame captured this loop, and pruned to the same depth RobotState buffers poses.
+    double now = Timer.getFPGATimestamp();
+    mountHistory.put(
+        now,
+        new MountSample(
+            trueRobotToCameraSupplier == null ? robotToCamera : trueRobotToCameraSupplier.get(),
+            robotToCamera));
+    mountHistory.headMap(now - kMountHistorySec, false).clear();
+
     Pose2d truth = groundTruthPoseSupplier.get();
-    Pose3d reported =
+    Pose3d truePose =
         new Pose3d(
-                new edu.wpi.first.math.geometry.Translation3d(
-                    truth.getX() + random.nextGaussian() * noiseStdDevMeters,
-                    truth.getY() + random.nextGaussian() * noiseStdDevMeters,
-                    0.0),
-                new edu.wpi.first.math.geometry.Rotation3d(truth.getRotation()))
-            .transformBy(poseOffset);
+            new edu.wpi.first.math.geometry.Translation3d(
+                truth.getX() + random.nextGaussian() * noiseStdDevMeters,
+                truth.getY() + random.nextGaussian() * noiseStdDevMeters,
+                0.0),
+            new edu.wpi.first.math.geometry.Rotation3d(truth.getRotation()));
+
+    // The capture instant, which is what the timestamp below reports and what the mounting lookup
+    // must agree with. floorEntry rather than an interpolation: the pushed transform is a step
+    // function -- the camera holds the last value it received until the next one arrives -- and
+    // interpolating a step would invent a mounting the camera never used.
+    double captureTimeSec = now - latencySec;
+    var mountEntry = mountHistory.floorEntry(captureTimeSec);
+    MountSample mount =
+        mountEntry != null ? mountEntry.getValue() : mountHistory.firstEntry().getValue();
+
+    // The solve, in the two steps a Limelight actually performs. Step one is real: the tags fix the
+    // LENS in the field, which is why this uses the true mounting. Step two is arithmetic the
+    // camera does on the robot's behalf using the number the robot gave it, which is why it uses
+    // the pushed mounting. When they disagree, the reported robot pose is wrong by exactly that
+    // disagreement -- and on a turret at 12 rad/s they disagree by most of a metre.
+    Pose3d fieldToCamera = truePose.transformBy(mount.trueRobotToCamera());
+    Pose3d reported = fieldToCamera.transformBy(mount.pushedRobotToCamera().inverse());
+
+    // Applied last, after the solve, because this hook injects a FAULT in the answer -- a nonsense
+    // height, a teleport -- rather than a change in the geometry. Folding it in earlier would let
+    // the correction partially undo it and weaken the M7 rejection tests.
+    reported = reported.transformBy(poseOffset);
 
     inputs.poseObservations =
         new PoseObservation[] {
           new PoseObservation(
-              Timer.getFPGATimestamp() - latencySec,
-              reported,
-              ambiguity,
-              tagCount,
-              averageTagDistanceMeters)
+              captureTimeSec, reported, ambiguity, tagCount, averageTagDistanceMeters)
         };
     inputs.targetObservations = new TargetObservation[0];
     inputs.hasTarget = tagCount > 0;
@@ -195,10 +282,10 @@ public class VisionIOSim implements VisionIO {
   public void setRobotToCamera(Transform3d robotToCamera) {
     // IMPLEMENTATION (was TODO: "this.robotToCamera = robotToCamera.")
     //
-    // Stored but not yet consumed, because the pose is derived from ground truth rather than
-    // re-solved from tags in camera space. It is honoured here so that M8 -- which exists to catch
-    // exactly a bad turret-transform composition -- has the value available the moment the sim
-    // learns to solve from tags.
+    // M8 made this load-bearing. The value is now what updateInputs SUBTRACTS to turn the lens's
+    // field pose into a reported robot pose, exactly as the camera does with
+    // camerapose_robotspace_set -- so pushing a wrong transform here produces a wrong pose here,
+    // which is the only reason a turret-transform test can fail.
     this.robotToCamera = robotToCamera;
   }
 
