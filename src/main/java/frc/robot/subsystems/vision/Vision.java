@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.TreeMap;
+import java.util.function.BooleanSupplier;
 import java.util.function.DoubleSupplier;
 import org.littletonrobotics.junction.AutoLogOutput;
 import org.littletonrobotics.junction.Logger;
@@ -84,6 +85,25 @@ public class Vision extends SubsystemBase {
 
   /** How much push history to keep, matched to {@code RobotState}'s buffer depth, in seconds. */
   private static final double kPushHistorySec = 2.0;
+
+  /**
+   * Whether the intake is settled at its intaking position, right now.
+   *
+   * <p>A supplier rather than an {@code Intake} reference, matching the turret angle suppliers: it
+   * keeps vision from depending on the intake subsystem and makes this class testable.
+   */
+  private final BooleanSupplier intakeAtCameraPoseSupplier;
+
+  /**
+   * Whether the intake was at its camera pose, by the time it was sampled.
+   *
+   * <p>The same shape as {@link #pushedTurretTransforms}, and for the same reason M8 recorded about
+   * the blur gate: a frame is exposed 60-120 ms before it arrives, so asking "is the intake
+   * deployed now" answers a question about the wrong moment. An intake that has just reached its
+   * setpoint would wave through every frame still in flight from the swing -- captured somewhere
+   * along a 0.4 m arc, and fused against a transform describing the end of it.
+   */
+  private final NavigableMap<Double, Boolean> intakePoseHistory = new TreeMap<>();
 
   /**
    * Robot origin to the Quest headset.
@@ -169,6 +189,15 @@ public class Vision extends SubsystemBase {
      * that is not publishing.
      */
     NO_PUSHED_TRANSFORM,
+    /**
+     * The intake was not at its camera pose when this frame was captured.
+     *
+     * <p>Not in the plan's ladder, because the plan assumed the intake camera was frame-mounted. It
+     * is not -- it rides the pivot about 0.4 m from the axis -- so {@code kRobotToIntakeCamera}
+     * describes exactly one pivot position and this rule is what confines the camera's observations
+     * to it.
+     */
+    INTAKE_NOT_DEPLOYED,
     NO_CORRELATED_POSE,
     POSE_JUMP
   }
@@ -270,19 +299,22 @@ public class Vision extends SubsystemBase {
    * @param questNavIO the Quest 3S headset
    * @param turretAngleSupplier live robot-relative turret angle, in radians
    * @param turretVelocitySupplier live turret angular velocity, in radians per second
+   * @param intakeAtCameraPoseSupplier whether the intake is settled at its intaking position
    */
   public Vision(
       VisionIO turretCameraIO,
       VisionIO intakeCameraIO,
       QuestNavIO questNavIO,
       DoubleSupplier turretAngleSupplier,
-      DoubleSupplier turretVelocitySupplier) {
+      DoubleSupplier turretVelocitySupplier,
+      BooleanSupplier intakeAtCameraPoseSupplier) {
     this(
         turretCameraIO,
         intakeCameraIO,
         questNavIO,
         turretAngleSupplier,
         turretVelocitySupplier,
+        intakeAtCameraPoseSupplier,
         Constants.Vision.kRobotToTurretAxis,
         Constants.Vision.kTurretToCamera,
         Constants.Vision.kRobotToQuest);
@@ -304,6 +336,7 @@ public class Vision extends SubsystemBase {
    * @param questNavIO the Quest 3S headset
    * @param turretAngleSupplier live robot-relative turret angle, in radians
    * @param turretVelocitySupplier live turret angular velocity, in radians per second
+   * @param intakeAtCameraPoseSupplier whether the intake is settled at its intaking position
    * @param robotToTurretAxis robot origin to the turret's rotation axis
    * @param turretToCamera the turret frame at 0 rad to the camera lens
    * @param robotToQuest robot origin to the Quest headset
@@ -314,6 +347,7 @@ public class Vision extends SubsystemBase {
       QuestNavIO questNavIO,
       DoubleSupplier turretAngleSupplier,
       DoubleSupplier turretVelocitySupplier,
+      BooleanSupplier intakeAtCameraPoseSupplier,
       Transform3d robotToTurretAxis,
       Transform3d turretToCamera,
       Transform3d robotToQuest) {
@@ -322,6 +356,7 @@ public class Vision extends SubsystemBase {
     this.questNavIO = questNavIO;
     this.turretAngleSupplier = turretAngleSupplier;
     this.turretVelocitySupplier = turretVelocitySupplier;
+    this.intakeAtCameraPoseSupplier = intakeAtCameraPoseSupplier;
     this.robotToTurretAxis = robotToTurretAxis;
     this.turretToCamera = turretToCamera;
     this.robotToQuest = robotToQuest;
@@ -378,6 +413,7 @@ public class Vision extends SubsystemBase {
     // makes the estimate quietly worse whenever the robot is turning or the turret is tracking.
     pushRobotOrientation();
     pushTurretCameraTransform();
+    recordIntakeCameraPose();
 
     intakeCameraIO.updateInputs(intakeInputs);
     Logger.processInputs("Vision/" + Constants.Vision.kIntakeCameraName, intakeInputs);
@@ -420,6 +456,36 @@ public class Vision extends SubsystemBase {
             && questInputs.batteryPercent >= 0
             && questInputs.batteryPercent <= Constants.Vision.kQuestMinBatteryPercent.get());
     questTransformUnmeasuredAlert.set(questInputs.connected && !questMountingIsMeasured());
+  }
+
+  /**
+   * Samples whether the intake is at its camera pose, for later lookup by capture time.
+   *
+   * <p><b>Outputs:</b> appends to the intake pose history, prunes past the buffer window, and logs
+   * the current state.
+   */
+  private void recordIntakeCameraPose() {
+    double now = Timer.getFPGATimestamp();
+    boolean atPose = intakeAtCameraPoseSupplier.getAsBoolean();
+    intakePoseHistory.put(now, atPose);
+    intakePoseHistory.headMap(now - kPushHistorySec, false).clear();
+    Logger.recordOutput(
+        "Vision/" + Constants.Vision.kIntakeCameraName + "/IntakeAtCameraPose", atPose);
+  }
+
+  /**
+   * Whether the intake was at its camera pose when a frame was captured.
+   *
+   * @param timestampSec FPGA capture time, in seconds
+   * @return true only when a sample exists for that instant and it says the intake was in position
+   */
+  private boolean intakeWasAtCameraPose(double timestampSec) {
+    // floorEntry, not the live value: the state is a step function and the question is about the
+    // moment of exposure. Absent history means "cannot know", which resolves to false -- the same
+    // refuse-rather-than-guess rule rule 7 follows for the turret angle. A frame older than the
+    // window is not worth reconstructing for a camera that only contributes in one pose anyway.
+    var entry = intakePoseHistory.floorEntry(timestampSec);
+    return entry != null && entry.getValue();
   }
 
   /**
@@ -729,6 +795,22 @@ public class Vision extends SubsystemBase {
       Optional<Pose2d> correlated = RobotState.getInstance().getPoseAt(observation.timestampSec());
       if (correlated.isEmpty()) {
         reject(source, RejectionReason.NO_CORRELATED_POSE);
+        continue;
+      }
+
+      // The intake camera contributes only from the one pivot position kRobotToIntakeCamera
+      // describes. Judged at CAPTURE time, not now: the camera swings through roughly 0.4 m on its
+      // way there, so an intake that has just arrived still has blurred, mis-transformed frames in
+      // flight -- and those would arrive looking perfectly ordinary.
+      //
+      // Placed AFTER the correlation check, not before. Both fire for a frame older than the
+      // buffers, and "cannot be placed in the robot's history at all" is the more fundamental
+      // failure -- attributing such a frame to the intake's position would send someone to look at
+      // the intake when the problem is a stale timestamp. The same reasoning M9 applied when it
+      // split NO_TURRET_ANGLE from NO_PUSHED_TRANSFORM: a counter is only worth having if it
+      // names the thing that is actually wrong.
+      if (!isTurretMounted && !intakeWasAtCameraPose(observation.timestampSec())) {
+        reject(source, RejectionReason.INTAKE_NOT_DEPLOYED);
         continue;
       }
 

@@ -148,6 +148,57 @@ public class IntakeFsmTest {
     assertEquals(Intake.SystemState.IDLE, intake.getSystemState());
   }
 
+  /**
+   * {@code isIntaking()} is true for exactly one state, and it is not any of the deployed-looking
+   * ones.
+   *
+   * <p>Vision fuses the intake camera only while this is true, because the camera rides the pivot
+   * about 0.4 m from its axis and {@code kRobotToIntakeCamera} describes exactly one pose. Two
+   * states are easy to admit by mistake and both would be wrong: DEPLOYING has the arm mid-travel,
+   * somewhere along that arc; EJECTING has it deployed but to {@code kEjectAngleRad}, a DIFFERENT
+   * angle, which is the more dangerous of the two because the intake really is "out" and the error
+   * is a plausible constant rather than an obvious sweep.
+   *
+   * <p>Asserted as an invariant against the state rather than by visiting INTAKING directly. With
+   * the shipped placeholder gains the simulated arm oscillates about its setpoint instead of
+   * settling -- the same gap {@code everyStateIsReachableWithTheGuardOpen} records for STOWED -- so
+   * a case that demanded INTAKING would be testing the gains, not the predicate.
+   */
+  @Test
+  void isIntakingIsTrueForExactlyTheIntakingState() {
+    intake.setDeployGuard(() -> true);
+    step(loopsPastHomingTimeout());
+
+    Intake.WantedState[] tour = {
+      Intake.WantedState.DEPLOY_AND_INTAKE,
+      Intake.WantedState.EJECT,
+      Intake.WantedState.STOW,
+      Intake.WantedState.DEPLOY_AND_INTAKE,
+      Intake.WantedState.IDLE,
+    };
+    boolean sawDeploying = false;
+    boolean sawEjecting = false;
+    for (Intake.WantedState wanted : tour) {
+      intake.setWantedState(wanted);
+      for (int i = 0; i < 40; i++) {
+        step(1);
+        Intake.SystemState state = intake.getSystemState();
+        sawDeploying |= state == Intake.SystemState.DEPLOYING;
+        sawEjecting |= state == Intake.SystemState.EJECTING;
+        assertEquals(
+            state == Intake.SystemState.INTAKING,
+            intake.isIntaking(),
+            "isIntaking() disagreed with the state machine while in " + state);
+      }
+    }
+
+    // The tour must actually have visited the two states that would be wrong to admit, or the
+    // invariant above was never put under any pressure.
+    assertTrue(sawDeploying, "the tour never passed through DEPLOYING, so mid-travel was untested");
+    assertTrue(
+        sawEjecting, "the tour never passed through EJECTING, so the eject angle was untested");
+  }
+
   /** A pivot that never stops moving cannot home, and must fault rather than stall all match. */
   @Test
   void homingTimesOutToFaulted() {

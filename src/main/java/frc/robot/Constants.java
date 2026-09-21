@@ -1,6 +1,7 @@
 package frc.robot;
 
 import com.ctre.phoenix6.CANBus;
+import edu.wpi.first.math.geometry.Quaternion;
 import edu.wpi.first.math.geometry.Rotation3d;
 import edu.wpi.first.math.geometry.Transform3d;
 import edu.wpi.first.math.geometry.Translation2d;
@@ -858,26 +859,77 @@ public final class Constants {
     public static final String kIntakeCameraName = "limelight-intake";
 
     /**
-     * Robot origin to the turret's rotation axis. Only the translation and any fixed tilt live
-     * here; the turret's own rotation is composed in at runtime.
+     * Robot origin to the turret's rotation axis, with the axis frame taken at floor level.
      *
-     * <p>TODO: MEASURE from CAD.
+     * <p>MEASURED from {@code Robot.step} via {@code tools/step_inspect.py}: the turret gear's
+     * circular extent gives the axis, and the assembly origin was shown to coincide with the FRC
+     * robot origin by three independent routes (frame bounding box centred within 1 mm, the four
+     * swerve modules symmetric about it, and module hardware bottoming out at exactly Z = 0).
+     *
+     * <p>The Z is deliberately 0 rather than the gear height. Only the rotation matters here --
+     * {@code GeomUtil.rotateAboutZ} spins about the axis's own Z and the height does not affect
+     * that -- so putting the frame on the floor keeps {@code kTurretToCamera} readable as "how far
+     * up and out the camera sits", instead of splitting the height across two constants.
+     *
+     * <p>Rotation is identity: turret zero points ROBOT RIGHT, and that offset is carried in {@code
+     * kTurretToCamera} rather than here, so this constant stays a pure position.
      */
     public static final Transform3d kRobotToTurretAxis =
-        new Transform3d(new Translation3d(0.0, 0.0, 0.0), new Rotation3d(0.0, 0.0, 0.0));
+        new Transform3d(new Translation3d(0.167638, -0.187325, 0.0), new Rotation3d());
 
     /**
-     * Turret frame at 0 rad to the turret camera lens. TODO: MEASURE from CAD, verify with a tag.
+     * Turret frame at 0 rad to the turret camera lens.
+     *
+     * <p>MEASURED from CAD. The lens was located from the geometry rather than guessed: a
+     * Limelight's model carries a concentric barrel of circles stepping along the optical axis, and
+     * its centre sits at the exact lateral centre of the housing, which is a free check that the
+     * right feature was found. Using the housing's bounding-box centre instead would have put the
+     * camera about 19 mm behind the lens along its own view direction.
+     *
+     * <p>The CAD is posed with the turret at +90 degrees -- pointing robot-forward -- while turret
+     * zero points robot RIGHT, so the extraction was un-rotated by 90 degrees to reach the frame
+     * this constant is defined in. Get that wrong and every turret-camera pose is off by the posed
+     * angle: exactly the failure M8's checkpoint hunts, arriving from the CAD rather than the code.
+     *
+     * <p>The rotation is a quaternion because {@code Rotation3d(roll, pitch, yaw)} builds Rz.Ry.Rx,
+     * and that order is easy to get backwards and wrong only away from zero. It encodes a camera
+     * tilted 20 degrees up and mounted in PORTRAIT -- rolled 90 degrees, so image-up points
+     * robot-left. Sanity check: at turret zero this points bearing -90 degrees (right), 20 degrees
+     * up.
+     *
+     * <p>TODO: VERIFY with a tag. CAD does not know how the thing was actually bolted on, and a
+     * lens's entrance pupil sits a little behind its front element.
      */
     public static final Transform3d kTurretToCamera =
-        new Transform3d(new Translation3d(0.0, 0.0, 0.0), new Rotation3d(0.0, 0.0, 0.0));
+        new Transform3d(
+            new Translation3d(-0.133756, -0.038737, 0.435000),
+            new Rotation3d(new Quaternion(-0.405580, 0.579228, -0.405580, 0.579228)));
 
     /**
-     * Robot origin to the intake camera lens; fixed, since the camera rides the frame. TODO:
-     * MEASURE.
+     * Robot origin to the intake camera lens, <b>valid only while the intake is at its intaking
+     * position</b>.
+     *
+     * <p>This is NOT a fixed camera, and section 7.2 of the plan is wrong about it: "the intake
+     * camera needs none of this: its transform is the constant kRobotToIntakeCamera, pushed once at
+     * construction" was written from an assumption the hardware did not honour. The camera rides
+     * the pivoting intake, roughly 0.4 m from the pivot axis -- nearly three times the turret
+     * camera's 0.139 m lever arm -- so a 60 degree deploy sweeps the lens through about 0.4 m.
+     *
+     * <p>Rather than give the intake camera the full moving-transform treatment M8 built for the
+     * turret, the fusion is GATED: observations are only accepted when the intake was in its
+     * intaking position at the moment of capture, which is the one pose this constant describes.
+     * See {@code Vision}'s INTAKE_NOT_DEPLOYED rejection. The cost is that the camera contributes
+     * nothing while stowed, ejecting or in transit; the benefit is that what it does contribute is
+     * correct rather than approximately correct.
+     *
+     * <p>MEASURED from CAD in that pose, which is how the assembly happened to be saved. The camera
+     * points straight backwards and level, laterally centred to within 0.3 mm -- a good pose for
+     * holding tags behind the robot while the turret looks elsewhere.
      */
     public static final Transform3d kRobotToIntakeCamera =
-        new Transform3d(new Translation3d(0.0, 0.0, 0.0), new Rotation3d(0.0, 0.0, 0.0));
+        new Transform3d(
+            new Translation3d(-0.614800, -0.000300, 0.387300),
+            new Rotation3d(new Quaternion(0.0, 0.0, 0.002886, 0.999996)));
 
     /**
      * Robot origin to the Quest 3S headset origin.

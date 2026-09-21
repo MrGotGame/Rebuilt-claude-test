@@ -48,7 +48,21 @@ public class VisionRejectionTest {
     seedOdometry();
 
     intakeSim = new VisionIOSim(Constants.Vision.kIntakeCameraName, () -> new Pose2d());
-    vision = new Vision(new VisionIO() {}, intakeSim, new QuestNavIO() {}, () -> 0.0, () -> 0.0);
+    // The intake is held at its camera pose: this suite is about the rejection ladder, and the
+    // gate that confines the intake camera to one pivot pose is covered by IntakeCameraGateTest.
+    vision =
+        new Vision(
+            new VisionIO() {}, intakeSim, new QuestNavIO() {}, () -> 0.0, () -> 0.0, () -> true);
+
+    // Warm the intake-pose history before any case measures anything. Vision records that history
+    // once per periodic, so for the first couple of loops after construction it cannot answer for
+    // a frame captured one camera-latency ago and correctly refuses to fuse it. That is real
+    // behaviour, not a test artifact -- it happens on the robot too, for about 40 ms after boot --
+    // but it would otherwise show up as a couple of rejections in cases that are about other
+    // rules entirely. Blacked out, so warming produces no observations of its own to count.
+    intakeSim.setBlackout(true);
+    step(4);
+    intakeSim.setBlackout(false);
   }
 
   /** Releases the HAL and unregisters the subsystem so cases cannot leak into each other. */

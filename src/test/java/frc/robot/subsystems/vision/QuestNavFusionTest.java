@@ -114,6 +114,9 @@ public class QuestNavFusionTest {
             questSim,
             () -> 0.0,
             () -> 0.0,
+            // The intake is held at its camera pose throughout, because this suite is about
+            // other rules; the gate itself is covered by IntakeCameraGateTest.
+            () -> true,
             NO_TURRET_MOUNTING,
             NO_TURRET_MOUNTING,
             ROBOT_TO_QUEST);

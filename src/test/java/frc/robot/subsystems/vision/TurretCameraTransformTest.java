@@ -157,6 +157,9 @@ public class TurretCameraTransformTest {
             new QuestNavIO() {},
             () -> turretAngleRad,
             () -> turretVelocityRadPerSec,
+            // The intake is held at its camera pose throughout, because this suite is about
+            // other rules; the gate itself is covered by IntakeCameraGateTest.
+            () -> true,
             ROBOT_TO_TURRET_AXIS,
             TURRET_TO_CAMERA,
             NO_HEADSET_MOUNTING);
@@ -575,6 +578,9 @@ public class TurretCameraTransformTest {
             new QuestNavIO() {},
             () -> turretAngleRad,
             () -> turretVelocityRadPerSec,
+            // The intake is held at its camera pose throughout, because this suite is about
+            // other rules; the gate itself is covered by IntakeCameraGateTest.
+            () -> true,
             ROBOT_TO_TURRET_AXIS,
             TURRET_TO_CAMERA,
             NO_HEADSET_MOUNTING);

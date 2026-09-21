@@ -110,7 +110,8 @@ public class RobotContainer {
                 new VisionIOLimelight(Constants.Vision.kIntakeCameraName),
                 new QuestNavIOReal(),
                 turret::getPositionRad,
-                turret::getVelocityRadPerSec);
+                turret::getVelocityRadPerSec,
+                intake::isIntaking);
         break;
 
       case SIM:
@@ -136,7 +137,8 @@ public class RobotContainer {
                     () -> RobotState.getInstance().getEstimatedPose()),
                 new QuestNavIOSim(() -> RobotState.getInstance().getEstimatedPose()),
                 turret::getPositionRad,
-                turret::getVelocityRadPerSec);
+                turret::getVelocityRadPerSec,
+                intake::isIntaking);
         break;
 
       default:
@@ -161,7 +163,8 @@ public class RobotContainer {
                 new VisionIO() {},
                 new QuestNavIO() {},
                 turret::getPositionRad,
-                turret::getVelocityRadPerSec);
+                turret::getVelocityRadPerSec,
+                intake::isIntaking);
         break;
     }
 

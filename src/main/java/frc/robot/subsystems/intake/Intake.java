@@ -638,6 +638,28 @@ public class Intake extends SubsystemBase {
   }
 
   /**
+   * Whether the intake is settled at its intaking position.
+   *
+   * <p>Consumed by {@code Vision}, which fuses the intake camera's observations only while this is
+   * true. That camera rides the pivot about 0.4 m from its axis, so {@code kRobotToIntakeCamera}
+   * describes exactly one pose -- this one -- and is wrong everywhere else.
+   *
+   * @return true when the state machine is in {@link SystemState#INTAKING}
+   */
+  @AutoLogOutput(key = "Intake/IsIntaking")
+  public boolean isIntaking() {
+    // The STATE, not a position test, for the same reason isStowed is: INTAKING is only reachable
+    // through atGoal(), which requires isHomed, so a true here cannot come from an untrusted
+    // encoder reading. DEPLOYING is deliberately excluded -- the pivot is still in transit and the
+    // camera is somewhere along a 0.4 m arc.
+    //
+    // EJECTING is excluded too, and that one is easy to miss: the intake is also deployed in that
+    // state, but to kEjectAngleRad, a DIFFERENT pivot angle. Accepting it would fuse camera poses
+    // computed with the wrong transform -- plausible, on the field, and wrong.
+    return systemState == SystemState.INTAKING;
+  }
+
+  /**
    * The live pivot angle, published for the AdvantageScope 3D component pose.
    *
    * @return pivot angle at the gearbox output, in radians
