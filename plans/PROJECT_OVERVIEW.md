@@ -153,6 +153,7 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M7 | Intake Limelight, rejection ladder, covariance model | `feature-limelight` | Complete in simulation — rejection ladder 5/5 under mutation; hardware checkpoint outstanding |
 | M8 | Turret camera: `robotToTurretCameraNow/At`, slew-rate rejection | `feature-limelight-complete` | **Simulation checkpoint complete** — 12 + 5 tests, mutation score 7/7; hardware checkpoint outstanding |
 | M9 | QuestNav: trust gate, seeding, re-seeding, degradation | `feature-questnav` | **Simulation checkpoint complete** — 18 tests, mutation score 12/12; hardware checkpoint outstanding |
+| — | Camera mountings measured from CAD; intake-camera gating | `feature-cad-constants` | 3 of 4 transforms measured; 6 tests, mutation score 6/6; `kRobotToQuest` still unmeasured |
 | M10+ | Superstructure, commands, autos | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
@@ -293,6 +294,50 @@ wrong: `getBatteryPercent` and `getTrackingLostCounter` return `OptionalInt`, no
 document that describes it**, so the surface this project depends on is now listed in the class's
 own documentation for one-pass re-checking.
 
+### The intake camera is not where the plan says it is
+
+Section 7.2 of `PLAN_3_MAXIMUM.md` states:
+
+> *"The intake camera needs none of this: its transform is the constant `kRobotToIntakeCamera`,
+> pushed once at construction."*
+
+**That is wrong, and the CAD is what showed it.** The intake Limelight rides the *pivoting* intake,
+roughly **0.4 m from the pivot axis** — nearly three times the turret camera's 0.139 m lever arm —
+so a 60° deploy sweeps the lens through about 0.4 m. A single constant transform describes exactly
+one pivot position and is wrong everywhere else.
+
+The chosen response is **gating rather than generalising**: the camera is fused only while the
+intake is settled at its intaking position, which is the pose the constant was measured in. That
+buys correctness cheaply, at the cost of the camera contributing nothing while stowed, ejecting or
+in transit. Giving it M8's full moving-transform machinery remains the option if that cost bites.
+
+Two details are worth carrying forward because both were nearly missed:
+
+- **`EJECTING` must not count as "deployed".** The intake *is* out in that state, but at a
+  different angle, so admitting it would fuse poses computed with the wrong transform. That error
+  is a plausible-looking constant rather than an obvious sweep, which makes it the harder of the
+  two to notice.
+- **The gate judges the moment of capture, not of arrival** — M8's blur-gate lesson in a new
+  costume. An intake that has just reached its setpoint still has 60–120 ms of frames in flight
+  that were exposed mid-arc, and they arrive looking entirely ordinary. **Any rule about where a
+  mechanism was needs a timestamped history, not a live read.** That is now three separate places
+  this has come up; treat a live read of mechanism state inside vision as a defect by default.
+
+### What CAD could and could not answer
+
+`tools/step_inspect.py` and `tools/onshape_measurements.py` exist for this, and
+`docs/CAD_MEASUREMENTS.md` carries the detail. The short version, because the expectation is easy
+to get wrong: **CAD answered four of roughly thirty-three outstanding measurements.** Every SysId
+gain, every encoder offset, every hard-stop angle, the field dimensions, the game piece and the
+robot mass come from somewhere else. It is not a shortcut past M6.
+
+What it did answer, it answered well. The hardest fact — where the robot origin is — came free:
+the assembly origin already coincides with it, confirmed three independent ways. And the lens
+positions were recovered from the geometry rather than guessed, by finding the concentric barrel of
+circles each Limelight model carries along its optical axis. **Using the housing bounding-box
+centre instead would have been ~19 mm out along the camera's own view direction**, which is right
+at the M8 checkpoint's tolerance and would have rotated with the turret.
+
 ## Conventions
 
 These are followed throughout and should be maintained.
@@ -324,8 +369,12 @@ These affect everything downstream and are not bugs in any one branch:
   an infinite flywheel command, but cannot aim until the tables are measured on a real field.
 - **PathPlanner is unconfigured.** `AutoFactory.configureAutoBuilder()` is unimplemented, so every
   autonomous routine resolves to `Commands.none()` — silently.
-- **Every camera mounting transform is still identity.** `kRobotToTurretAxis`, `kTurretToCamera`,
-  `kRobotToIntakeCamera` and `kRobotToQuest` are all `TODO: MEASURE from CAD`. The transform *maths*
+- **One camera mounting transform is still identity.** `kRobotToTurretAxis`, `kTurretToCamera`
+  and `kRobotToIntakeCamera` have been **measured from CAD** and carry real values;
+  `kRobotToQuest` remains `TODO: MEASURE`, because the headset is a tessellated placeholder in
+  the STEP export with no geometry. Measure it to the **centre of the headset's front face**:
+  QuestNav reports a "third-eye" pose on the lens plane, and the Quest 3S has no lens tilt
+  (the Quest 3's 7° does, but that is a different headset). The transform *maths*
   is now implemented and tested, but until the numbers exist each camera's poses are biased by its
   true offset from the robot origin — and for the turret camera that bias rotates with the turret.
   `Vision` raises a warning alert for each unmeasured mounting, and the measurement is a
