@@ -58,7 +58,7 @@ Measured scope, as of this file being written:
 
 | Location | Declarations | Note |
 |---|---|---|
-| `Constants.java` | 176 | rename these |
+| `Constants.java` | 176 when this was counted; M10 added a `Superstructure` block plus three `Field` and `Vision` entries | rename these |
 | `RobotState.java` | 1 | `kBufferSeconds`; rename |
 | `generated/TunerConstants.java` | 51 | **do not rename** — see below |
 | References tree-wide | ~760 | all must be updated with the declarations |
@@ -203,6 +203,8 @@ hardware.
 | `feature-indexer` | M5 | Branched off `claude-test`. Piece detection, shot counting, and `IndexerIOSim.setSimulatedPiecePresent` so those paths are reachable with no hardware. 6 tests, mutation 3/3. |
 | `feature-intake` | M5 | Branched off `claude-test`. Pivot plus roller, homing, and the deploy guard. 8 tests; the suite found three real bugs, all fixed. |
 | `feature-turret` | M5 | Branched off **`feature-drive`**, because `Turret.periodic()` needs `RobotState`. Carries `TurretUnwrapper` byte-identical from `feature-shooting-parameters` — do not edit it there. 4 FSM tests plus the 12 inherited unwrapper cases; found and fixed the dead-motor homing bug. |
+| `integration-m1_m9` | — | Everything through M9 combined, and the base M10 was cut from. A merge target only; never commit onto it. |
+| `feature-superstructure` | M10 | Branched off `integration-m1_m9`. `Superstructure` with all fourteen states, both interlocks, the `readyToScore` gate, the driver bindings, and `SuperstructureFsmTest`. **121 tests, none skipped, mutation score 26/26.** Also implements `FaultReporter`, whose `getInstance()` returned null and which M10's gate dereferences, and closes an intake home-latch hole and an angular-guard hole in `TurretUnwrapper` that only a cross-mechanism client could reach. Hardware checkpoint outstanding. |
 
 **M4's simulation checkpoint is complete**, including deliberate failures: zeroed gains drive the
 machine to `FAULTED` after `kSpinUpTimeoutSec`, a zero goal resolves to `IDLE` instead of faulting,
@@ -233,8 +235,14 @@ whole vision and shooting stack rests on that last one.
 
 ## 6. Suggested next steps
 
-1. **Push the outstanding branches.** `main`, `claude-test` and all seven feature branches have
-   unpushed commits. Pushing is the user's job; the agent cannot reach `~/.ssh`.
+1. **Push the outstanding branches.** `main`, `claude-test`, the integration branches and every
+   feature branch have unpushed commits — including `feature-superstructure`, which carries M10.
+   Pushing is the user's job; the agent cannot reach `~/.ssh`.
+
+   Related, and cheap to fix: the agent cannot write `git config --global` from inside the snap
+   sandbox, so it commits with `git -c user.name=... -c user.email=...` matching the existing
+   history. Setting a repository-local identity once in each working directory would remove the
+   need to remember that, and a forgotten `-c` is a hard error rather than a silent wrong author.
 2. **Commit the regenerated `TunerConstants.java`** on `claude-test`.
 3. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
    layer, FSM shape and logging should be read and agreed before anything is built on top.
