@@ -162,6 +162,20 @@ public class Superstructure extends SubsystemBase {
    */
   private boolean readyToScore = false;
 
+  /**
+   * The same gate as {@link #readyToScore}, minus the shot-solution term.
+   *
+   * <p>A pass does not go through the solver -- it is a lob at a fixed speed toward a fixed
+   * translation, so there is no {@code ShotParameters} to check and the shot tables are never
+   * indexed at a distance nobody measured them at. Reusing readyToScore for it would make passing
+   * wait on a solution to the GOAL that has nothing to do with the pass, which on this branch means
+   * waiting forever: the tables are zeros, so term 1 is false and the pass could never leave.
+   *
+   * <p>Every other term still applies. Aiming a pass needs the robot to know where it is just as
+   * much as aiming a shot does, and turret.atGoal() is what stops a pass leaving mid-slew.
+   */
+  private boolean readyToPass = false;
+
   /** How many times a shot has been taken with the readiness gate bypassed, since boot. */
   private int forcedShotCount = 0;
 
@@ -773,10 +787,11 @@ public class Superstructure extends SubsystemBase {
     aimAt(target.minus(robot).getAngle(), 0.0);
     shooter.setGoal(Constants.Superstructure.kPassRpm.get());
 
-    // The same gate as a scored shot, minus term 1: there is no shot solution to check because
-    // there was no solve. turret.atGoal() and the flywheel's predictive readiness still apply, and
-    // they are what stop a pass leaving mid-slew.
-    boolean feed = readyToScore || ignoreShotTolerances;
+    // readyToPass, not readyToScore. The difference is term 1: there is no shot solution to check
+    // because there was no solve, and gating on one would make a pass wait on a solution to the
+    // GOAL -- which on this branch never arrives, so the pass could never leave. Every other term
+    // still applies.
+    boolean feed = readyToPass;
     indexer.setWantedState(feed ? Indexer.WantedState.FEED : Indexer.WantedState.HOLD);
     floorRoller.setWantedState(feed ? FloorRoller.WantedState.FEED : FloorRoller.WantedState.IDLE);
   }
@@ -1014,9 +1029,10 @@ public class Superstructure extends SubsystemBase {
     Logger.recordOutput("Superstructure/ReadyTerms/ChassisStationary", chassisStationary);
     Logger.recordOutput("Superstructure/ReadyTerms/TolerancesIgnored", ignoreShotTolerances);
 
-    boolean gatePasses =
-        shotUsable
-            && turretAtGoal
+    // Split so the pass gate is the same computation minus one term, rather than a second copy of
+    // seven conditions free to drift out of step with these.
+    boolean everythingButTheSolution =
+        turretAtGoal
             && flywheelReady
             && hasPiece
             && visionFresh
@@ -1025,7 +1041,9 @@ public class Superstructure extends SubsystemBase {
             && noCriticalFault
             && chassisStationary;
 
-    readyToScore = ignoreShotTolerances || gatePasses;
+    readyToScore = ignoreShotTolerances || (shotUsable && everythingButTheSolution);
+    readyToPass = ignoreShotTolerances || everythingButTheSolution;
+    Logger.recordOutput("Superstructure/ReadyToPass", readyToPass);
   }
 
   /**

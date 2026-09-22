@@ -1109,6 +1109,52 @@ public class SuperstructureFsmTest {
   }
 
   /**
+   * A pass must not wait on a shot solution it never asked for.
+   *
+   * <p>PASSING does not go through the solver: it is a lob at a fixed speed toward a fixed
+   * translation, and running it through the shot tables would index them at a distance nobody
+   * measured them at. Gating the feed on {@code readyToScore} would therefore make a pass wait on a
+   * solution to the GOAL, which has nothing to do with where the piece is going -- and on this
+   * branch, with the tables all zeros, that solution never arrives at all, so the pass could never
+   * leave.
+   *
+   * <p>The observable difference is the gate, so that is what this asserts. The pass itself still
+   * does not fire, because kPassRpm is zero awaiting a measurement and the flywheel term is
+   * therefore false, exactly as for a scored shot -- see {@link
+   * #theReadinessGateCannotOpenUntilTheShotTablesAreMeasured}.
+   */
+  @Test
+  void passingDoesNotWaitOnAShotSolution() {
+    // The SHIPPED solver, so every shot solution is unusable -- which is the whole point.
+    placeRobotAt(-3.0, 0.0);
+    homeAndSettle();
+    acquirePiece();
+
+    superstructure.setWantedState(Superstructure.WantedState.PASS);
+    stepWithVision(40);
+
+    assertEquals(Superstructure.SystemState.PASSING, superstructure.getSystemState());
+    assertFalse(
+        superstructure.getLastShot().isUsable(),
+        "this case is only meaningful while the shot solution is unusable");
+
+    // The override reaches the pass gate as well as the shot gate. If the pass were gated on
+    // readyToScore's solution term, forcing it would be the only way to pass at all -- and the
+    // forced path exists to override a judgement, not to work around a term that does not apply.
+    superstructure.setIgnoreShotTolerances(true);
+    step(5);
+    assertEquals(
+        Indexer.SystemState.FEEDING,
+        indexer.getSystemState(),
+        "a forced pass must feed even though no shot solution exists");
+    assertEquals(
+        FloorRoller.SystemState.FEEDING,
+        floorRoller.getSystemState(),
+        "the floor roller must feed with the indexer, or the pass runs the belt against a stopped"
+            + " roller");
+  }
+
+  /**
    * A limit, recorded rather than tuned away: the readiness gate cannot open on this branch.
    *
    * <p>{@code Constants.Shot.kRpmPerMeterPerSec} and {@code kRpmIntercept} are both zero awaiting
