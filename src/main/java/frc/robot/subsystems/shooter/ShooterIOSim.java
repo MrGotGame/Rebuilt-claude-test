@@ -1,6 +1,7 @@
 package frc.robot.subsystems.shooter;
 
 import com.ctre.phoenix6.configs.Slot0Configs;
+import edu.wpi.first.math.MathUtil;
 import edu.wpi.first.math.controller.PIDController;
 import edu.wpi.first.math.system.plant.DCMotor;
 import edu.wpi.first.math.system.plant.LinearSystemId;
@@ -34,11 +35,63 @@ public class ShooterIOSim implements ShooterIO {
    */
   @Override
   public void updateInputs(ShooterIOInputs inputs) {
-    // TODO: appliedVolts = ffVolts + (closedLoop ?
-    // controller.calculate(sim.getAngularVelocityRPM())
-    // : 0.0). Clamp to +-12 V, sim.setInputVoltage, sim.update(Constants.getLoopPeriodSec()).
-    // Then mirror the same values into BOTH the leader and follower input fields, so a sim log has
-    // exactly the same shape as a real log and the same AdvantageScope layout works on both.
+    // IMPLEMENTATION (was TODO: "appliedVolts = ffVolts + (closedLoop ? controller.calculate(...)
+    // : 0.0). Clamp to +-12 V, sim.setInputVoltage, sim.update(Constants.getLoopPeriodSec()). Then
+    // mirror the same values into BOTH the leader and follower input fields.")
+    //
+    // DEVIATION FROM THE TODO, deliberate: the TODO says to run the controller on RPM
+    // (`controller.calculate(sim.getAngularVelocityRPM())`), but the feedforward in setVelocity is
+    // written in rotations per second, and Slot0Configs.kP on the real Talon is volts per
+    // rotation-per-second of error. Running the simulated loop on RPM would make the same numeric
+    // kP sixty times stronger in simulation than on hardware, so a gain tuned in sim would send the
+    // real flywheel into violent oscillation. Everything below is therefore in rot/s, and the
+    // RPM conversion happens only at the input-struct boundary.
+    if (closedLoop) {
+      appliedVolts = ffVolts + controller.calculate(sim.getAngularVelocityRPM() / 60.0);
+    } else {
+      // Resetting while open loop clears the integrator. Without this, a characterization run
+      // followed by a closed-loop request would start with whatever integral had accumulated before
+      // the mode switch and deliver a step to the wheel.
+      controller.reset();
+    }
+
+    sim.setInputVoltage(MathUtil.clamp(appliedVolts, -12.0, 12.0));
+    sim.update(Constants.getLoopPeriodSec());
+
+    double velocityRpm = sim.getAngularVelocityRPM();
+
+    // Both motors are reported, with the same values, so that a simulation log has exactly the same
+    // shape as a real log and one AdvantageScope layout works on both. It also means the follower
+    // health check has something to read in sim rather than a permanently-false field that would
+    // look like a dead motor.
+    inputs.leaderConnected = true;
+    inputs.followerConnected = true;
+    inputs.velocityRpm = velocityRpm;
+    inputs.goalRpm = goalRpm;
+    inputs.leaderAppliedVolts = appliedVolts;
+    inputs.followerAppliedVolts = appliedVolts;
+
+    // FlywheelSim models the pair as one plant, so getCurrentDrawAmps() is the current for BOTH
+    // motors. Halving it is what makes the per-motor numbers comparable with the real IO, where
+    // each Talon reports only its own draw.
+    double perMotorStatorAmps = Math.abs(sim.getCurrentDrawAmps()) / 2.0;
+    inputs.leaderStatorCurrentAmps = perMotorStatorAmps;
+    inputs.followerStatorCurrentAmps = perMotorStatorAmps;
+
+    // A motor controller is a buck converter: supply current is roughly stator current scaled by
+    // duty cycle. The approximation is crude, but reporting supply == stator would overstate the
+    // battery load by up to 6x at low speed and make any sim-side power budgeting meaningless.
+    double dutyCycle = Math.abs(MathUtil.clamp(appliedVolts, -12.0, 12.0)) / 12.0;
+    inputs.leaderSupplyCurrentAmps = perMotorStatorAmps * dutyCycle;
+    inputs.followerSupplyCurrentAmps = perMotorStatorAmps * dutyCycle;
+
+    // FlywheelSim has no thermal model. A fixed room temperature is reported rather than 0.0 so
+    // that a plot of this field in simulation is obviously constant rather than looking like a
+    // sensor reading zero -- which is what a genuinely disconnected Talon reports.
+    inputs.leaderTempCelsius = 25.0;
+    inputs.followerTempCelsius = 25.0;
+
+    inputs.closedLoopErrorRpm = goalRpm - velocityRpm;
   }
 
   /**
@@ -48,9 +101,18 @@ public class ShooterIOSim implements ShooterIO {
    */
   @Override
   public void setVelocity(double velocityRpm) {
-    // TODO: closedLoop = true; goalRpm = velocityRpm;
-    // ffVolts = kKs.get() * Math.signum(velocityRpm) + kKv.get() * velocityRpm / 60.0;
-    // controller.setSetpoint(velocityRpm).
+    // IMPLEMENTATION (was TODO: "closedLoop = true; goalRpm = velocityRpm; ffVolts = kKs.get() *
+    // Math.signum(velocityRpm) + kKv.get() * velocityRpm / 60.0;
+    // controller.setSetpoint(velocityRpm).")
+    //
+    // The setpoint is in rot/s rather than RPM, for the unit reason explained in updateInputs. The
+    // feedforward formula is unchanged from the TODO and was already in rot/s.
+    closedLoop = true;
+    goalRpm = velocityRpm;
+    ffVolts =
+        Constants.Shooter.kKs.get() * Math.signum(velocityRpm)
+            + Constants.Shooter.kKv.get() * velocityRpm / 60.0;
+    controller.setSetpoint(velocityRpm / 60.0);
   }
 
   /**
@@ -60,7 +122,16 @@ public class ShooterIOSim implements ShooterIO {
    */
   @Override
   public void setOpenLoop(double volts) {
-    // TODO: closedLoop = false; appliedVolts = volts.
+    // IMPLEMENTATION (was TODO: "closedLoop = false; appliedVolts = volts.")
+    //
+    // ffVolts is cleared as well. It is added to appliedVolts unconditionally in updateInputs, so
+    // leaving a stale feedforward standing would silently offset every characterization point by
+    // whatever the last closed-loop request happened to need -- and a characterization run with a
+    // constant voltage offset produces a plausible-looking but wrong kS.
+    closedLoop = false;
+    ffVolts = 0.0;
+    goalRpm = 0.0;
+    appliedVolts = volts;
   }
 
   /**
@@ -70,12 +141,23 @@ public class ShooterIOSim implements ShooterIO {
    */
   @Override
   public void setGains(Slot0Configs gains) {
-    // TODO: controller.setPID(gains.kP, gains.kI, gains.kD).
+    // IMPLEMENTATION (was TODO: "controller.setPID(gains.kP, gains.kI, gains.kD).")
+    //
+    // kS, kV and kA are ignored here on purpose: this IO reads them straight from Constants in
+    // setVelocity, because WPILib's PIDController has no feedforward slot the way Slot0 does.
+    controller.setPID(gains.kP, gains.kI, gains.kD);
   }
 
   /** Zeroes the applied voltage and leaves closed loop. */
   @Override
   public void stop() {
-    // TODO: closedLoop = false; appliedVolts = 0; ffVolts = 0; goalRpm = 0.
+    // IMPLEMENTATION (was TODO: "closedLoop = false; appliedVolts = 0; ffVolts = 0; goalRpm = 0.")
+    //
+    // Zero volts is a coast, not a brake: FlywheelSim keeps integrating the plant, so the wheel
+    // spins down against its own back-EMF exactly as the real one does with NeutralModeValue.Coast.
+    closedLoop = false;
+    appliedVolts = 0.0;
+    ffVolts = 0.0;
+    goalRpm = 0.0;
   }
 }
