@@ -1122,6 +1122,14 @@ public class SuperstructureFsmTest {
    * does not fire, because kPassRpm is zero awaiting a measurement and the flywheel term is
    * therefore false, exactly as for a scored shot -- see {@link
    * #theReadinessGateCannotOpenUntilTheShotTablesAreMeasured}.
+   *
+   * <p><b>A KNOWN EQUIVALENT MUTANT LIVES HERE, and it is not this case's fault.</b> Replacing the
+   * whole pass gate with the shot gate survives mutation testing, because the two differ only when
+   * every non-solution term is true while the solution term is false -- and "every non-solution
+   * term is true" needs the flywheel at a non-zero goal, which needs kPassRpm. With it at zero the
+   * two gates agree in every reachable state, so no test can tell them apart. Measuring kPassRpm
+   * makes the distinction observable; when that happens, add a case asserting a pass feeds while a
+   * shot solution is unusable, and this note can go.
    */
   @Test
   void passingDoesNotWaitOnAShotSolution() {
