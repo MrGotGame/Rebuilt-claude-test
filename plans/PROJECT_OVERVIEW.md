@@ -88,8 +88,17 @@ elsewhere.
 
 - **`main`** — the reference line. Holds the original skeleton and shared documentation such as this
   file. Feature work is **not** merged here.
-- **`claude-test`** — the integration line that features branch from and eventually merge into.
+- **`claude-test`** — reserved for the integration of the **entire system**: where the full, working
+  robot code goes. It is *not* where milestone groups are combined.
+- **`integration-*`** — one branch per group of milestones being combined, each with its own sibling
+  directory. `integration-m5_m7` joined M5's mechanisms to M7's vision; `integration-m1_m9` combines
+  everything through M9 and is the base for M10.
 - **`feature-*`** — one branch per unit of work, usually one milestone from the plan's build order.
+
+**No branch is ever deleted**, including ones fully merged into an integration branch. The branches
+*are* the documentation — they get walked through with students — so a branch whose content now
+lives elsewhere is still the record of how that piece was built. Merged is not the same as finished
+with.
 
 ### Creating a feature branch
 
@@ -154,6 +163,7 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M8 | Turret camera: `robotToTurretCameraNow/At`, slew-rate rejection | `feature-limelight-complete` | **Simulation checkpoint complete** — 12 + 5 tests, mutation score 7/7; hardware checkpoint outstanding |
 | M9 | QuestNav: trust gate, seeding, re-seeding, degradation | `feature-questnav` | **Simulation checkpoint complete** — 18 tests, mutation score 12/12; hardware checkpoint outstanding |
 | — | Camera mountings measured from CAD; intake-camera gating | `feature-cad-constants` | 3 of 4 transforms measured; 6 tests, mutation score 6/6; `kRobotToQuest` still unmeasured |
+| — | Combine M1–M9 as the base for M10 | `integration-m1_m9` | Complete — M3 and M4 merged in; 112 tests, 103 passing, 0 failures |
 | M10+ | Superstructure, commands, autos | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
@@ -456,6 +466,35 @@ These are the shapes to look for, because each one was live in committed code:
   are also what a game piece looks like. Gate on a settling window, not on a longer debounce.
 - `onEnter` **never fires for the state a machine boots into**, because no transition occurs. Entry
   actions for the initial state must be run explicitly in the constructor.
+
+### Shared singletons make tests order-dependent, and merges expose it
+
+`RobotState` is a process-wide singleton, the suite runs in **one JVM with no forking**, and
+`RobotState.initialize()` is idempotent — so every test class shares one pose estimator, and class
+ordering decides what state each class inherits.
+
+This surfaced when M3 and M4 were merged into `integration-m1_m9`.
+`TurretCameraTransformTest.theCorrectionIsExactAndNotMerelyClose` began failing about **half** of
+all full-suite runs, at ~1.75 mm against a 1 mm bound, **with no production code changed**. Adding
+two test classes had changed the ordering. The case had been passing partly because the previous
+ordering happened to suit it: it was latently fragile before the merge, and the merge only revealed
+it.
+
+Two things are worth copying from how it was resolved:
+
+- **Measure the defect before touching the bound.** Injecting the two defects the case exists to
+  catch gave 4.27 mm and 8.53 mm, against 1.75 mm of contamination — which is what established
+  that the production code was fine and the bound was what needed to move. Without those numbers
+  the only honest options would have been to guess or to leave it red.
+- **A loosened bound must be re-falsified.** Widening a tolerance until a test passes is the move
+  this standard forbids. Deriving it from measured defect magnitudes is different, but only if you
+  then prove the new bound still catches them — all three relevant mutations were re-run and all
+  three still fail. **A bound that no longer catches its defects is worse than no bound**, because
+  it still reads as coverage.
+
+The margin left is thinner than it should be, and the real fix is to stop sharing `RobotState`
+between test classes rather than to keep re-deriving the number. That is recorded in the test
+itself as the standing recommendation.
 
 ### An intermittent test is a bug report, not flakiness
 
