@@ -288,6 +288,19 @@ public class Intake extends SubsystemBase {
     }
 
     if (wantedState == WantedState.HOME) {
+      // Consume the request HERE as well as in onEnter(HOMING). A HOME that arrives while the
+      // machine is ALREADY in HOMING produces no transition, so onEnter never fires and the flag
+      // lingers for the rest of the match -- which permanently disables the FAULTED latch above,
+      // because that latch is written as "faulted AND nobody is asking to re-home". A jammed pivot
+      // then cycles HOMING -> FAULTED -> HOMING forever, stalling the motor on every pass. That is
+      // precisely the failure this flag was introduced to prevent, arriving from the other side.
+      //
+      // Found in M10: Superstructure.homing() issues one HOME to each mechanism on entry, and the
+      // intake is already homing itself at boot, so the very first loop of the very first match
+      // left the flag set. The turret does not have the bug because it consumes its own request at
+      // the top of handleStateTransition regardless of which state it is in.
+      homeRequested = false;
+
       if (homingSucceeded) {
         return SystemState.STOWING;
       }

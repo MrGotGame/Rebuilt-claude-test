@@ -213,17 +213,21 @@ public class RobotContainer {
     // Getting any one of these backwards produces a robot that drives mirrored on that axis, which
     // is obvious on a practice field and very confusing if only one axis is wrong.
     //
-    // joystickDrive is used rather than joystickDriveWithOverride deliberately: it is the
-    // template's proven implementation, and the override path is inert anyway while
-    // Superstructure.getRequestedDriveHeading() still returns Optional.empty(). Switching to the
-    // override version is a one-line change once the superstructure is implemented:
+    // joystickDriveWithOverride as of M10. The note that used to stand here said this was a
+    // one-line change once the superstructure existed, and it was: getRequestedDriveHeading() now
+    // returns a heading while the machine is in WAITING_FOR_TURRET, which is how the drivetrain
+    // helps a turret reach an aim point outside its travel.
     //
-    //   DriveCommands.joystickDriveWithOverride(
-    //       drive, () -> -driver.getLeftY(), () -> -driver.getLeftX(), () -> -driver.getRightX(),
-    //       superstructure::getRequestedDriveHeading)
+    // The override is an additive nudge and never a takeover -- it applies only while the rotation
+    // stick is inside its deadband, so the driver takes rotation back by touching it, with no mode
+    // and no button. An assist a driver cannot override is an assist they will not use.
     drive.setDefaultCommand(
-        DriveCommands.joystickDrive(
-            drive, () -> -driver.getLeftY(), () -> -driver.getLeftX(), () -> -driver.getRightX()));
+        DriveCommands.joystickDriveWithOverride(
+            drive,
+            () -> -driver.getLeftY(),
+            () -> -driver.getLeftX(),
+            () -> -driver.getRightX(),
+            superstructure::getRequestedDriveHeading));
 
     // Reset the field-relative heading to zero. Held on a button rather than automatic because it
     // redefines which way "forward" means for the driver, and .ignoringDisable(true) lets the team
@@ -245,25 +249,69 @@ public class RobotContainer {
     // Cross the wheels into an X to resist being pushed. Bound to X for the mnemonic.
     driver.x().onTrue(Commands.runOnce(drive::stopWithX, drive));
 
-    // ------------------------------------------------------- not yet bound: awaiting mechanisms
-    // ----
+    // ------------------------------------------------------------- driver: the mechanisms ----
     //
-    // The bindings below are intentionally NOT wired yet, because every one of them routes through
-    // Superstructure, whose state machine is still stubbed. Binding them now would give a driver
-    // buttons that silently do nothing.
-    //
-    //   rightBumper   whileTrue -> SCORE_ON_MOVE,      onFalse -> DEFAULT
-    //   rightTrigger  whileTrue -> INTAKE,             onFalse -> DEFAULT
-    //   leftBumper    whileTrue -> SCORE_STATIONARY,   onFalse -> DEFAULT
-    //   leftTrigger   whileTrue -> PASS,               onFalse -> DEFAULT
-    //   Y             onTrue    -> HOME
-    //
-    // Operator: manual turret nudge on a stick, flywheel RPM trim on the D-pad, and a "force shoot"
-    // toggle calling superstructure.setIgnoreShotTolerances(true).
-    //
-    // Route EVERY mechanism action through superstructure.setWantedStateCommand(...). Binding a
+    // EVERY mechanism action routes through superstructure.setWantedStateCommand(...). Binding a
     // subsystem directly is what lets a button put the robot into a combination the state machine
     // never intended, and it is exactly what this architecture exists to prevent.
+    //
+    // Every one is held-to-run with an explicit release back to DEFAULT rather than a toggle. A
+    // toggle leaves the robot in a scoring state after the driver has moved on to something else,
+    // and the state it is left in is invisible from behind the glass.
+    //
+    // setWantedStateCommand does not require the superstructure, so a held button re-firing cannot
+    // interrupt the default drive command.
+    driver
+        .rightTrigger(Constants.Controls.kTriggerThreshold.get())
+        .whileTrue(superstructure.setWantedStateCommand(Superstructure.WantedState.INTAKE))
+        .onFalse(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));
+
+    driver
+        .rightBumper()
+        .whileTrue(superstructure.setWantedStateCommand(Superstructure.WantedState.SCORE_ON_MOVE))
+        .onFalse(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));
+
+    driver
+        .leftBumper()
+        .whileTrue(
+            superstructure.setWantedStateCommand(Superstructure.WantedState.SCORE_STATIONARY))
+        .onFalse(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));
+
+    driver
+        .leftTrigger(Constants.Controls.kTriggerThreshold.get())
+        .whileTrue(superstructure.setWantedStateCommand(Superstructure.WantedState.PASS))
+        .onFalse(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));
+
+    // HOME is onTrue rather than whileTrue: it is a request to re-establish the zeros, not a state
+    // to hold, and the superstructure walks itself out to STOWED when both mechanisms report homed.
+    // It is also the only thing that clears a latched fault.
+    driver.y().onTrue(superstructure.setWantedStateCommand(Superstructure.WantedState.HOME));
+
+    // --------------------------------------------------------------- operator: overrides ----
+    //
+    // Force shoot, held rather than latched. Holding it means the override cannot be left on by
+    // accident, which matters because it bypasses every readiness tolerance: a forced shot that
+    // misses and a solver bug look identical in a match video. The superstructure raises an alert
+    // and counts forced shots so the two can be told apart afterwards.
+    operator
+        .rightBumper()
+        .onTrue(Commands.runOnce(() -> superstructure.setIgnoreShotTolerances(true)))
+        .onFalse(Commands.runOnce(() -> superstructure.setIgnoreShotTolerances(false)));
+
+    // EJECT is on the operator rather than the driver: it is a jam-clearing action somebody
+    // watching the mechanism asks for, not something the driver reaches for mid-cycle.
+    operator
+        .b()
+        .whileTrue(superstructure.setWantedStateCommand(Superstructure.WantedState.EJECT))
+        .onFalse(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));
+
+    // STILL NOT BOUND, and deliberately: the plan's operator layout also lists a manual turret
+    // nudge on a stick and a flywheel RPM trim on the D-pad. Neither has a route through the
+    // superstructure -- there is no WantedState for "jog the turret by hand", and adding one would
+    // mean a fifteenth SystemState that section 4.11 does not have. Binding Turret.setManualVolts
+    // or Shooter.setGoal straight from a button is precisely the thing the paragraph above forbids,
+    // so they wait for a decision about what the state machine should call them rather than being
+    // smuggled in as a special case.
   }
 
   /**
@@ -354,8 +402,27 @@ public class RobotContainer {
    * does not deliver a step input to a mechanism.
    */
   public void onDisable() {
-    // TODO: superstructure.setWantedState(Superstructure.WantedState.IDLE) and tell every subsystem
-    // to reset its motion profiles.
+    // IMPLEMENTATION (was TODO: "superstructure.setWantedState(Superstructure.WantedState.IDLE)
+    // and tell every subsystem to reset its motion profiles.")
+    //
+    // Delegated to Superstructure.onDisable rather than setting the wanted state from here, because
+    // parking the robot is more than one assignment: the force-shoot override has to be dropped,
+    // the shot solution forgotten, and any requested drive heading released. Doing that here would
+    // put three pieces of the superstructure's own safety contract in a different file, where the
+    // next person to add a fourth would have no reason to look.
+    //
+    // The override is the one that matters. It is a toggle an operator holds during a scoring run,
+    // and if it survived a disable the robot would come back for the next match with the readiness
+    // gate already bypassed.
+    superstructure.onDisable();
+
+    // The per-subsystem motion-profile reset the TODO also asks for is NOT done here, and that is a
+    // deferral rather than an oversight: no mechanism exposes a reset entry point yet, and each
+    // one's profile lives inside its Phoenix configuration rather than in this code. Commanding
+    // IDLE, which onDisable does through the superstructure, already stops every mechanism, so
+    // nothing is left driving; what is outstanding is only the re-enable transient. Left for M14's
+    // brake-mode and competition-hardening pass, which is where the disable path gets its real
+    // treatment.
   }
 
   /**

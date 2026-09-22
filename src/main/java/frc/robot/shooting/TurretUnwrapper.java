@@ -35,6 +35,18 @@ public class TurretUnwrapper {
 
   private TurretUnwrapper() {}
 
+  /** One full revolution, in radians. Named so the wrapped arc search reads as turns. */
+  private static final double kFullTurnRad = 2.0 * Math.PI;
+
+  /**
+   * How many whole-turn images of a forbidden arc {@link #passesThroughArcWrapped} examines before
+   * giving up and reporting a conflict.
+   *
+   * <p>A real turret sweep spans well under two turns, so this is only ever reached by nonsense
+   * input, and reporting a conflict there is the fail-closed answer.
+   */
+  private static final int kMaxTurnsSearched = 16;
+
   /**
    * Picks the best in-range turret position for a desired direction.
    *
@@ -189,5 +201,63 @@ public class TurretUnwrapper {
     double arcMin = Math.min(arcMinRad, arcMaxRad);
     double arcMax = Math.max(arcMinRad, arcMaxRad);
     return sweepMin <= arcMax && arcMin <= sweepMax;
+  }
+
+  /**
+   * Whether a sweep between two positions would pass through a forbidden arc, <b>at any whole
+   * number of turns</b>.
+   *
+   * <p>This is the physical question, and it is the one the intake/turret interlock needs. {@link
+   * #passesThroughArc} compares raw intervals, which is correct only while the turret and the arc
+   * are expressed on the same branch. They are not: this turret's travel is plus or minus 200
+   * degrees, so the unwrapper can legitimately park it at -180 degrees to reach the direction an
+   * operator would call +180 degrees, and those are the same piece of physical space -- with the
+   * intake sitting in it.
+   *
+   * <p>Added in M10, because the superstructure's interlock test found exactly that. The conflict
+   * arc is configured as 150 to 210 degrees, and a turret that had unwrapped to -180 degrees passed
+   * a raw interval test while standing squarely in the intake's path, so the intake's deploy guard
+   * opened and the arm swung into it. It is a quiet failure: the guard reports no conflict, so
+   * nothing in the log says anything at all until the two mechanisms meet.
+   *
+   * @param fromRad starting position, in radians
+   * @param toRad ending position, in radians
+   * @param arcMinRad lower bound of the forbidden arc, in radians
+   * @param arcMaxRad upper bound of the forbidden arc, in radians
+   * @return true when the swept interval overlaps the forbidden arc or any full-turn image of it
+   */
+  public static boolean passesThroughArcWrapped(
+      double fromRad, double toRad, double arcMinRad, double arcMaxRad) {
+    double sweepMin = Math.min(fromRad, toRad);
+    double sweepMax = Math.max(fromRad, toRad);
+    double arcMin = Math.min(arcMinRad, arcMaxRad);
+    double arcMax = Math.max(arcMinRad, arcMaxRad);
+
+    // A bound against nonsense input, checked before the turn range is computed from it. A NaN
+    // sweep would otherwise produce a NaN turn count; failing CLOSED -- reporting a conflict -- is
+    // the right answer for a guard whose whole job is to refuse.
+    if (!Double.isFinite(sweepMin)
+        || !Double.isFinite(sweepMax)
+        || !Double.isFinite(arcMin)
+        || !Double.isFinite(arcMax)) {
+      return true;
+    }
+
+    // Only the translates that could possibly reach the sweep are tried, computed rather than a
+    // fixed few: a hardcoded range would be silently too small the day somebody widens the travel,
+    // and a safety check must not quietly stop covering ground.
+    int lowestTurn = (int) Math.floor((sweepMin - arcMax) / kFullTurnRad);
+    int highestTurn = (int) Math.ceil((sweepMax - arcMin) / kFullTurnRad);
+    if (highestTurn - lowestTurn > kMaxTurnsSearched) {
+      return true;
+    }
+
+    for (int turns = lowestTurn; turns <= highestTurn; turns++) {
+      double offset = turns * kFullTurnRad;
+      if (passesThroughArc(fromRad, toRad, arcMin + offset, arcMax + offset)) {
+        return true;
+      }
+    }
+    return false;
   }
 }

@@ -462,8 +462,13 @@ public class Turret extends SubsystemBase {
         systemState == SystemState.UNWRAPPING
             ? latchedBranchTargetRad
             : lastUnwrapResult.targetPositionRad();
+    // passesThroughArcWrapped, not passesThroughArc. The conflict arc is a piece of PHYSICAL space,
+    // and this turret's travel is wider than a full circle, so the unwrapper can park it at -180
+    // degrees to point where an operator would say +180 degrees. A raw interval test against an arc
+    // configured as 150-210 degrees does not see that branch at all, and the turret sweeps through
+    // the deployed intake reporting no conflict. Found by the M10 interlock test.
     if (intakeArcBlocked.getAsBoolean()
-        && TurretUnwrapper.passesThroughArc(
+        && TurretUnwrapper.passesThroughArcWrapped(
             inputs.positionRad,
             sweepTarget,
             Constants.Turret.kIntakeConflictMinRad.get(),

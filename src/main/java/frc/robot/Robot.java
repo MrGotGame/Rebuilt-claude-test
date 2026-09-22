@@ -115,7 +115,22 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void disabledInit() {
-    // TODO: disabledTimer.restart(); brakeModeReleased = false; robotContainer.onDisable().
+    // IMPLEMENTATION (was TODO: "disabledTimer.restart(); brakeModeReleased = false;
+    // robotContainer.onDisable().")
+    //
+    // Implemented as part of M10, because M10 is the first milestone with a disable path worth
+    // running: Superstructure.onDisable drops the force-shoot override, forgets the shot solution
+    // and releases any requested drive heading, and none of that happens unless this method calls
+    // it. Leaving the call out would have made that safety contract dead code.
+    //
+    // The two brake-mode statements belong to M14 and are implemented here rather than deferred
+    // because they only prepare state: the timer that measures how long the robot has been still,
+    // and the once-only latch that goes with it. What actually drops the drivetrain to coast lives
+    // in disabledPeriodic and is still M14's, so setting these up now costs nothing and means the
+    // timer is honest whenever that arrives.
+    disabledTimer.restart();
+    brakeModeReleased = false;
+    robotContainer.onDisable();
   }
 
   /**

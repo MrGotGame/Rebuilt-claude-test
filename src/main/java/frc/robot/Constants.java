@@ -208,6 +208,23 @@ public final class Constants {
         new LoggedTunableNumber("Field/GamePieceDiameter", 0.0);
 
     /**
+     * Blue-alliance pass destination X, meters, blue-origin coordinates.
+     *
+     * <p>TODO: MEASURE. A pass is a lob to a teammate or to a staging area, so this is a tactical
+     * choice about the REBUILT field rather than a dimension that can be read off a drawing -- pick
+     * it once the field layout is known and the team has decided where pieces should be dropped.
+     * Left at the origin it is not a guess, it is an admission: {@code Superstructure}'s PASSING
+     * state aims at it and commands {@link Superstructure#kPassRpm}, which is also zero, so passing
+     * is inert rather than wrong until both are chosen.
+     */
+    public static final LoggedTunableNumber kPassTargetXMeters =
+        new LoggedTunableNumber("Field/PassTargetX", 0.0);
+
+    /** Blue-alliance pass destination Y, meters. TODO: MEASURE, same decision as above. */
+    public static final LoggedTunableNumber kPassTargetYMeters =
+        new LoggedTunableNumber("Field/PassTargetY", 0.0);
+
+    /**
      * The goal position to aim at, already flipped for the current alliance.
      *
      * @return goal center on the floor plane, in meters, in the current alliance's frame
@@ -232,6 +249,18 @@ public final class Constants {
       // Height is NOT flipped: the goal is the same distance off the carpet on both alliances.
       Translation2d flipped = goalTranslation();
       return new Translation3d(flipped.getX(), flipped.getY(), kGoalHeightMeters.get());
+    }
+
+    /**
+     * The pass destination, already flipped for the current alliance.
+     *
+     * @return the pass target in meters, in the current alliance's frame
+     */
+    public static Translation2d passTranslation() {
+      // Flipped on every call for the same reason goalTranslation() is: the alliance is not known
+      // until the driver station connects, which is always after this class has initialized.
+      return AllianceFlipUtil.apply(
+          new Translation2d(kPassTargetXMeters.get(), kPassTargetYMeters.get()));
     }
   }
 
@@ -882,6 +911,72 @@ public final class Constants {
         new LoggedTunableNumber("Shot/MaxDistance", 7.0);
   }
 
+  // ----------------------------------------------------------------------- the superstructure ----
+
+  /**
+   * Cross-mechanism timing and thresholds owned by {@code Superstructure}.
+   *
+   * <p>Everything here describes a decision no single mechanism can make on its own. The
+   * per-mechanism tolerances that feed the readiness gate live with their mechanisms, and the six
+   * shot-quality thresholds live in {@link Shot}; this class holds only what is genuinely about the
+   * robot as a whole.
+   */
+  public static final class Superstructure {
+    private Superstructure() {}
+
+    /**
+     * How long the robot-level homing sequence may run before it gives up and faults, seconds.
+     *
+     * <p>Deliberately longer than <b>both</b> mechanism homing timeouts ({@link
+     * Intake#kHomingTimeoutSec} at 3 s and {@link Turret#kHomingTimeoutSec} at 5 s). A mechanism
+     * that cannot home must fault first, because its own fault names the mechanism and raises the
+     * alert a pit crew can act on. If this timeout fired first the only thing anyone would see is
+     * "the superstructure faulted", which is true of both mechanisms and therefore useless.
+     */
+    public static final LoggedTunableNumber kHomingTimeoutSec =
+        new LoggedTunableNumber("Superstructure/HomingTimeout", 7.0);
+
+    /**
+     * How fast the chassis may be translating and still count as stationary for {@code
+     * SCORING_STATIONARY}, in meters per second.
+     *
+     * <p>This is the ninth term the plan adds to the readiness gate for the stationary shot only.
+     * 0.15 m/s is a robot that has stopped and is settling on its wheels rather than one still
+     * creeping into position; the point of asking for a stationary shot is that the velocity
+     * compensation is taken out of the answer, and a robot that is still moving has put it back in
+     * without telling the solver.
+     *
+     * <p>TODO: tune during M11 alongside the shot tables. Start loose and tighten while watching
+     * the hit rate, exactly as plan section 6.5 prescribes for every other term.
+     */
+    public static final LoggedTunableNumber kMaxChassisSpeedForStationaryShotMetersPerSec =
+        new LoggedTunableNumber("Superstructure/MaxStationaryShotSpeed", 0.15);
+
+    /**
+     * Flywheel speed used for a pass, in RPM.
+     *
+     * <p>TODO: MEASURE. A pass is a lob over a known distance to {@link Field#passTranslation()},
+     * so this depends on both the REBUILT field and the chosen pass destination, and the project's
+     * standing rule is that field-dependent numbers are never guessed. Zero is not a placeholder
+     * that will quietly misbehave: {@code Shooter}'s zero-goal guard resolves a zero goal to IDLE
+     * rather than faulting, so PASSING aims correctly and simply declines to fire until somebody
+     * measures this.
+     */
+    public static final LoggedTunableNumber kPassRpm =
+        new LoggedTunableNumber("Superstructure/PassRpm", 0.0);
+
+    /**
+     * How long the floor roller keeps feeding after a piece has been detected, seconds.
+     *
+     * <p>The plan asks the INDEXING state to run the floor roller "briefly", and this is that word
+     * made measurable. It exists so the roller cannot be left running indefinitely by an operator
+     * holding the intake button down with a piece already aboard, which would grind the next piece
+     * against the first one.
+     */
+    public static final LoggedTunableNumber kIndexFeedSec =
+        new LoggedTunableNumber("Superstructure/IndexFeedSec", 0.5);
+  }
+
   // ------------------------------------------------------------------------------- the vision ----
 
   /** Camera names, mounting transforms, and vision trust policy. */
@@ -890,6 +985,25 @@ public final class Constants {
 
     public static final String kTurretCameraName = "limelight-turret";
     public static final String kIntakeCameraName = "limelight-intake";
+
+    /**
+     * Intake-camera pipeline that runs AprilTag localisation.
+     *
+     * <p>Plain {@code static final int}s rather than tunables, because these index pipelines
+     * configured in the Limelight's own web UI. Changing the number here without also changing the
+     * pipeline in the camera does not retune anything; it selects the wrong pipeline, which
+     * presents as a camera that has silently stopped seeing tags.
+     *
+     * <p>{@code Superstructure} owns the switching: game pieces while the intake is deployed,
+     * AprilTags whenever it is not. The switch costs roughly 100 ms, which is why it is driven from
+     * state entry and exit rather than from a per-loop condition that could chatter.
+     */
+    public static final int kAprilTagPipelineIndex = 0;
+
+    /**
+     * Intake-camera pipeline that runs game-piece detection. See {@link #kAprilTagPipelineIndex}.
+     */
+    public static final int kGamePiecePipelineIndex = 1;
 
     /**
      * Robot origin to the turret's rotation axis, with the axis frame taken at floor level.

@@ -157,6 +157,62 @@ public class TurretUnwrapperTest {
             Math.toRadians(250.0), Math.toRadians(300.0), arcMin, arcMax));
   }
 
+  /**
+   * The forbidden arc is physical space, so it must be found on every branch the turret can reach.
+   *
+   * <p>This turret's travel is plus or minus 200 degrees, which is wider than a full circle, so the
+   * unwrapper can legitimately park it at -180 degrees to point where an operator would say +180
+   * degrees. With the conflict arc configured as 150 to 210 degrees, the raw interval test says
+   * that position is nowhere near the intake -- and the intake's deploy guard opens while the
+   * turret is standing squarely in its path.
+   *
+   * <p>This was not hypothetical. M10's interlock test drove a simulated turret at 180 degrees, the
+   * unwrapper chose the negative branch, and the guard reported no conflict. The failure is silent:
+   * nothing in the log says anything at all until the two mechanisms meet.
+   */
+  @Test
+  void passesThroughArcWrappedFindsTheArcOnEitherBranch() {
+    double arcMin = Math.toRadians(150.0);
+    double arcMax = Math.toRadians(210.0);
+
+    // The defect, stated as a test. Both of these are the same physical direction.
+    assertFalse(
+        TurretUnwrapper.passesThroughArc(
+            Math.toRadians(-180.0), Math.toRadians(-180.0), arcMin, arcMax),
+        "precondition: the raw test cannot see the negative branch, which is why the wrapped one"
+            + " exists");
+    assertTrue(
+        TurretUnwrapper.passesThroughArcWrapped(
+            Math.toRadians(-180.0), Math.toRadians(-180.0), arcMin, arcMax),
+        "a turret at -180 degrees is in an arc that spans 180 degrees, whichever branch it took");
+
+    // A sweep that crosses the arc's negative image, in both directions.
+    assertTrue(
+        TurretUnwrapper.passesThroughArcWrapped(
+            Math.toRadians(-100.0), Math.toRadians(-200.0), arcMin, arcMax));
+    assertTrue(
+        TurretUnwrapper.passesThroughArcWrapped(
+            Math.toRadians(-200.0), Math.toRadians(-100.0), arcMin, arcMax));
+
+    // The positive branch still behaves exactly as the raw test does.
+    assertTrue(
+        TurretUnwrapper.passesThroughArcWrapped(
+            Math.toRadians(100.0), Math.toRadians(250.0), arcMin, arcMax));
+
+    // And it must not become a guard that refuses everything, which would be the easy way to pass
+    // every assertion above and would leave the intake unable to deploy at all. 0 to 100 degrees is
+    // clear of the arc on every branch a 400-degree travel can reach.
+    assertFalse(
+        TurretUnwrapper.passesThroughArcWrapped(0.0, Math.toRadians(100.0), arcMin, arcMax));
+    assertFalse(
+        TurretUnwrapper.passesThroughArcWrapped(
+            Math.toRadians(-100.0), Math.toRadians(-20.0), arcMin, arcMax));
+
+    // Nonsense input fails CLOSED. A guard whose job is to refuse must not answer "no conflict"
+    // because it was handed a NaN.
+    assertTrue(TurretUnwrapper.passesThroughArcWrapped(Double.NaN, 0.0, arcMin, arcMax));
+  }
+
   /** The safety margin held back from each stop must be honoured. */
   @Test
   void limitMarginIsRespected() {
