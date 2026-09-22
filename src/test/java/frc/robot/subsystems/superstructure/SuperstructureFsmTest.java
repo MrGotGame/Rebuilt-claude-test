@@ -87,6 +87,14 @@ public class SuperstructureFsmTest {
    */
   private static boolean injectedFaultActive = false;
 
+  /**
+   * Whether this suite's injected <b>warning</b>-severity fault is currently active.
+   *
+   * <p>Separate from the error above because the severity distinction is the thing under test:
+   * {@code anyCritical()} must count one and ignore the other.
+   */
+  private static boolean injectedWarningActive = false;
+
   private static boolean faultRegistered = false;
 
   private Drive drive;
@@ -128,9 +136,15 @@ public class SuperstructureFsmTest {
       FaultReporter.getInstance()
           .register(
               "SuperstructureFsmTest injected fault", AlertType.kError, () -> injectedFaultActive);
+      FaultReporter.getInstance()
+          .register(
+              "SuperstructureFsmTest injected warning",
+              AlertType.kWarning,
+              () -> injectedWarningActive);
       faultRegistered = true;
     }
     injectedFaultActive = false;
+    injectedWarningActive = false;
 
     buildRobot(
         new ShootingSolver(),
@@ -145,6 +159,7 @@ public class SuperstructureFsmTest {
   @AfterEach
   void tearDown() {
     injectedFaultActive = false;
+    injectedWarningActive = false;
     unregisterAll();
     CommandScheduler.getInstance().cancelAll();
     SimHooks.resumeTiming();
@@ -460,7 +475,42 @@ public class SuperstructureFsmTest {
         new ShooterIOSim(),
         new FloorRollerIOSim());
 
-    step(loopsPastHomingTimeout());
+    // Watched loop by loop from boot rather than sampled at the end, because the defect that hides
+    // here is a COUNT and not a state. A jammed pivot that re-enters HOMING after faulting stalls
+    // its motor for another full timeout, and by the time any end-of-run sample is taken the
+    // machine has settled back into FAULTED and looks perfectly well behaved.
+    //
+    // Mutation testing is what forced this shape. Reverting the intake's home-latch fix survived
+    // BOTH a single end-of-run sample and a window that only started once the robot had already
+    // faulted: the extra homing attempt happens early, finishes before either check begins, and
+    // leaves no trace in the final state.
+    int intakeHomingEntries = intake.getSystemState() == Intake.SystemState.HOMING ? 1 : 0;
+    Intake.SystemState previousIntakeState = intake.getSystemState();
+    boolean robotHasFaulted = false;
+
+    int watchLoops =
+        loopsPastHomingTimeout()
+            + (int) (2.5 * Constants.Intake.kHomingTimeoutSec.get() / LOOP_SEC);
+    for (int i = 0; i < watchLoops; i++) {
+      step(1);
+
+      Intake.SystemState now = intake.getSystemState();
+      if (now == Intake.SystemState.HOMING && previousIntakeState != Intake.SystemState.HOMING) {
+        intakeHomingEntries++;
+      }
+      previousIntakeState = now;
+
+      // Once the robot has faulted it must stay faulted, checked every loop rather than once, for
+      // the same reason: a machine flickering out of FAULTED passes a single sample half the time,
+      // which is worse than no assertion because it still reads as coverage.
+      robotHasFaulted |= superstructure.getSystemState() == Superstructure.SystemState.FAULTED;
+      if (robotHasFaulted) {
+        assertEquals(
+            Superstructure.SystemState.FAULTED,
+            superstructure.getSystemState(),
+            "the robot left FAULTED without being asked to re-home, after " + i + " loops");
+      }
+    }
 
     assertEquals(
         Superstructure.SystemState.FAULTED,
@@ -468,14 +518,21 @@ public class SuperstructureFsmTest {
         "a robot that cannot home must fault, not sit in HOMING for the rest of the match");
     assertFalse(intake.isHomed(), "a timed-out home must not mark the pivot trustworthy");
 
-    // The mechanism must have faulted FIRST, and stayed faulted. Its alert names the intake; the
-    // robot-level fault names nothing. A mechanism cycling FAULTED -> HOMING -> FAULTED would stall
-    // the motor once per kHomingTimeoutSec for the rest of the match, which is the failure the
-    // intake's own home latch exists to prevent.
+    // The mechanism must have faulted FIRST, and its alert names the intake; the robot-level fault
+    // names nothing.
     assertEquals(
         Intake.SystemState.FAULTED,
         intake.getSystemState(),
         "the intake must latch FAULTED rather than cycle back into HOMING");
+
+    // ONE homing attempt, the one it booted into. Every extra entry is another full kHomingTimeout
+    // of driving a jammed pivot into a stop it cannot find, which is precisely what the timeout
+    // exists to stop.
+    assertEquals(
+        1,
+        intakeHomingEntries,
+        "the intake re-homed after faulting; each retry is another full-timeout stall against a"
+            + " jam, and nothing asked for it");
   }
 
   /** Only an explicit home request may clear a fault. */
@@ -885,6 +942,128 @@ public class SuperstructureFsmTest {
     superstructure.setWantedState(Superstructure.WantedState.IDLE);
     step(10);
     assertEquals(Superstructure.SystemState.IDLE, superstructure.getSystemState());
+
+    // One forced shot in that whole tour, and exactly one. The tour passed through four scoring
+    // states and only one of them bypassed the gate; a counter that rose on any of the others
+    // would turn the post-match question "how many shots did the operator force" into noise.
+    // Mutation testing found this: incrementing on entry to ANY scoring state broke nothing,
+    // because no other case in this suite visits more than one.
+    assertEquals(
+        1,
+        superstructure.getForcedShotCount(),
+        "only the forced state may raise the forced-shot count");
+  }
+
+  /**
+   * A turret that cannot reach the aim point must divert a scoring request too.
+   *
+   * <p>Added to close a surviving mutation: deleting {@code turret.isOutOfRange()} from the scoring
+   * guard broke nothing, because every other case in this suite aims at a direction the turret can
+   * always reach. The guard was real code that no test could reach, which is the same thing as no
+   * guard at all until somebody deploys the intake at the wrong moment.
+   *
+   * <p>The block is produced the way it happens on a field: a piece is collected, which leaves the
+   * intake out, and the shot that follows wants the turret pointed straight backwards -- through
+   * the arc the intake is standing in.
+   */
+  @Test
+  void aBlockedTurretDivertsScoringToWaitingForTurret() {
+    buildRobot(
+        usableSolver(),
+        new IntakeIOSim(),
+        new IndexerIOSim(),
+        new TurretIOSim(),
+        new ShooterIOSim(),
+        new FloorRollerIOSim());
+
+    // +3 m in front of a goal at the origin, facing along +X, so the shot wants the turret at 180
+    // degrees -- squarely inside the 150-210 degree conflict arc.
+    placeRobotAt(3.0, 0.0);
+    homeAndSettle();
+    acquirePiece();
+    assertFalse(intake.isStowed(), "this case needs the intake still out after the pickup");
+
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    boolean sawWaiting = false;
+    for (int i = 0; i < 200 && !sawWaiting; i++) {
+      step(1);
+      sawWaiting = superstructure.getSystemState() == Superstructure.SystemState.WAITING_FOR_TURRET;
+    }
+
+    assertTrue(
+        superstructure.getLastShot().isUsable(),
+        "this case is only meaningful while the solution itself is fine -- otherwise it would be"
+            + " testing the usable-solution guard instead");
+    assertTrue(
+        sawWaiting,
+        "a scoring request the turret cannot carry out must divert, not sit in a scoring state"
+            + " with the turret refusing underneath it");
+    assertTrue(turret.isOutOfRange(), "the turret should be the thing refusing");
+    assertNotEquals(
+        Indexer.SystemState.FEEDING, indexer.getSystemState(), "fed while the turret was blocked");
+
+    // A LIMIT, recorded rather than asserted away. WAITING_FOR_TURRET is also the state that asks
+    // the drivetrain to rotate, and here it correctly asks for nothing: the aim point is reachable,
+    // it is the PATH that is blocked, and rotating the chassis would not retract the intake.
+    //
+    // The other reason to be in this state -- an aim point outside the travel entirely -- cannot be
+    // reached at all with the shipped placeholder limits of plus or minus 200 degrees, because a
+    // travel wider than a full circle can reach every direction on some branch. So the requested
+    // heading is unreachable code on this branch, and will stop being so the moment M6 measures the
+    // real hard stops, which will almost certainly be narrower. Do not delete it as dead.
+    assertTrue(
+        superstructure.getRequestedDriveHeading().isEmpty(),
+        "an intake-blocked turret is not fixed by rotating the chassis, so no heading should be"
+            + " requested");
+  }
+
+  /**
+   * A warning-severity fault must not stop the robot shooting.
+   *
+   * <p>Added to close a surviving mutation: dropping the {@code kError} test from {@code
+   * anyCritical()} broke nothing, because this suite only ever registered an error. The distinction
+   * is load-bearing and deliberate -- {@code Vision} registers both QuestNav checks as WARNINGS
+   * precisely because the robot shoots perfectly well without the headset, and an error badge for a
+   * degraded-but-working robot is how a drive team learns to ignore red.
+   */
+  @Test
+  void aWarningSeverityFaultDoesNotStopScoring() {
+    buildRobot(
+        usableSolver(),
+        new IntakeIOSim(),
+        new IndexerIOSim(),
+        new TurretIOSim(),
+        new ShooterIOSim(),
+        new FloorRollerIOSim());
+    placeRobotAt(-3.0, 0.0);
+    homeAndSettle();
+    acquirePiece();
+
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    step(30);
+    assertEquals(
+        Superstructure.SystemState.SCORING_ON_THE_MOVE,
+        superstructure.getSystemState(),
+        "precondition: a healthy robot with a piece and a solution scores");
+
+    injectedWarningActive = true;
+    step(10);
+
+    assertFalse(
+        FaultReporter.getInstance().anyCritical(),
+        "a warning is not critical; treating it as one would ground the robot for a low headset"
+            + " battery");
+    assertEquals(
+        Superstructure.SystemState.SCORING_ON_THE_MOVE,
+        superstructure.getSystemState(),
+        "a warning-severity fault stopped the robot scoring");
+
+    // ... and it is still reported, which is the other half of the contract. A severity that
+    // silences a fault entirely would be worse than one that over-reports it.
+    assertTrue(
+        FaultReporter.getInstance().getActiveFaultNames().stream()
+            .anyMatch(name -> name.contains("injected warning")),
+        "the warning was not reported at all");
   }
 
   /**
