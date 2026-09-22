@@ -164,7 +164,8 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M9 | QuestNav: trust gate, seeding, re-seeding, degradation | `feature-questnav` | **Simulation checkpoint complete** — 18 tests, mutation score 12/12; hardware checkpoint outstanding |
 | — | Camera mountings measured from CAD; intake-camera gating | `feature-cad-constants` | 3 of 4 transforms measured; 6 tests, mutation score 6/6; `kRobotToQuest` still unmeasured |
 | — | Combine M1–M9 as the base for M10 | `integration-m1_m9` | Complete — M3 and M4 merged in; 112 tests, 103 passing, 0 failures |
-| M10+ | Superstructure, commands, autos | not started | — |
+| M10 | `Superstructure`: fourteen states, both interlocks, the `readyToScore` gate | `feature-superstructure` | **Simulation checkpoint complete** — 121 tests, 0 skipped, mutation score 26/26; hardware checkpoint outstanding |
+| M11+ | Shot tables, shoot-on-the-move, autos, hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
@@ -303,6 +304,82 @@ wrong: `getBatteryPercent` and `getTrackingLostCounter` return `OptionalInt`, no
 **a beta dependency's signatures are worth checking against the jar rather than against the
 document that describes it**, so the surface this project depends on is now listed in the class's
 own documentation for one-pass re-checking.
+
+### M10, and two interlocks that were each half an interlock
+
+M10 is the `Superstructure`: the only class allowed to command more than one subsystem. All
+fourteen `SystemState`s, both directions of the intake/turret interlock, the eight-term
+`readyToScore` gate of section 6.5, and `SuperstructureFsmTest`. The nine `@Disabled` placeholders
+are gone; the suite runs 121 tests with none skipped.
+
+**The checkpoint asks for ten FSM tests and the skeleton shipped nine.** The plan was right and the
+skeleton was one short. The missing case is `everySystemStateIsReachable`, which this project's own
+testing standard requires of every state machine and which none of the nine placeholders covered.
+
+**Four things were latent in already-merged code and only a cross-mechanism client could find them.**
+Each is the same shape: a rule that was correct for the single caller that existed and wrong for
+the one M10 added.
+
+- **`setWantedState(HOME)` is an edge, not a level.** Both position mechanisms clear their homed
+  flag and arm a one-shot request that their transition step consumes *ahead of* their own timeout.
+  A `homing()` handler that commanded HOME once per loop — which is how every other handler in the
+  superstructure commands its mechanisms — restarts homing on every loop, so neither mechanism can
+  finish and neither can fault either. The robot sits in HOMING until the robot-level timeout with
+  no mechanism alert to say which one was stuck. **A mechanism whose setter has side effects cannot
+  be driven from a per-loop handler**, and nothing in the signature says so.
+- **The intake's own home latch had the matching hole.** A HOME arriving while the machine is
+  already in HOMING produces no transition, so `onEnter` never fires and the flag lingers —
+  disabling a FAULTED latch written as "faulted AND nobody is asking to re-home". The turret never
+  had the bug, because it consumes its own request unconditionally at the top of its transition
+  method. Two mechanisms, the same field, two different lifecycles.
+- **The superstructure's fault latch could not be copied from the mechanisms.** They boot into
+  IDLE; this one boots into HOMING with HOME already requested, so "faulted AND `wantedState !=
+  HOME`" is true at boot and stays true. A homing timeout latched FAULTED for exactly one loop
+  before dropping back into HOMING. Three tests caught it at once. **A latch keyed on a request
+  being absent is wrong for any machine whose boot state is that request**; key it on the edge.
+- **`FaultReporter.getInstance()` returned `null`.** Term 8 of the gate dereferences it, so the
+  superstructure would have thrown on its first loop. Every subsystem already carried a comment
+  promising to register "once that class is implemented", so implementing it was a prerequisite
+  rather than a diversion. The per-device registrations are still M14's, which means
+  `anyCritical()` returns false on the robot today and term 8 is inert until they arrive.
+
+**The interlock had a silent hole, and it is the one worth remembering.** The conflict arc is
+configured as 150°–210° while the turret's travel is ±200° — *wider than a full circle*. So the
+unwrapper legitimately parks the turret at −180° to point where an operator would say +180°, and
+`TurretUnwrapper.passesThroughArc`, which compares raw intervals, does not see that branch at all.
+The guard reported no conflict for a turret standing squarely in the intake's path: the deploy
+guard opened and the arm would have swung into it. **Nothing in the log says anything at all until
+the two mechanisms meet.** `passesThroughArcWrapped` tests every full-turn image of the arc and
+fails closed on non-finite input; both halves of the interlock use it. The generalisation is worth
+carrying: **an angular guard written as an interval is only correct while everything it compares
+lives on the same branch**, and a turret with more than 360° of travel guarantees that they do not.
+
+**Mutation testing ran 22/26, then 25/26, then 26/26**, and the fourth survivor was the instructive
+one. "The intake must latch FAULTED rather than cycle back into HOMING" was first written as a
+single end-of-run sample, which a machine cycling every three seconds passes about half the time.
+The obvious repair — watch every loop across a window longer than two timeouts — **also survived**,
+and re-running the harness rather than trusting the repair is the only reason that was caught. The
+defect is a *count*, not a state: the spurious re-home happens early, finishes before any window
+that begins after the robot has faulted, and leaves the machine sitting in a perfectly well-behaved
+FAULTED. The case now counts entries into HOMING from boot and asserts exactly one. **When a defect
+is "it happened twice", no assertion about the final state can see it.**
+
+**Two things deliberately do not work, and both are recorded as named tests rather than left to be
+rediscovered.** The readiness gate cannot open at all on this branch: `kRpmPerMeterPerSec` and
+`kRpmIntercept` are both zero awaiting M11, so every solved shot carries a flywheel speed of zero
+and `Shooter.willBeAtSpeedIn` refuses a zero goal by design. Term 3 is false however good every
+other input is, and `theReadinessGateCannotOpenUntilTheShotTablesAreMeasured` makes the other seven
+true first and then pins the one that cannot be. Separately, `getRequestedDriveHeading` is
+unreachable: the other route into `WAITING_FOR_TURRET` is an aim point outside the travel, and a
+travel wider than a full circle reaches every direction on some branch. **It is not dead code** —
+it becomes reachable the moment M6 measures hard stops that are almost certainly narrower than the
+±200° placeholder.
+
+What M10 has **not** established is anything about hardware. No interlock has been tested against
+real geometry, and `kIntakeConflictMinRad` and `kIntakeConflictMaxRad` are still guesses. The
+checkpoint clause that matters most — deliberately deploy the intake into the turret's arc and
+confirm both directions hold — has been discharged in simulation against simulated geometry only,
+and simulated geometry cannot be wrong about where the mechanisms actually are.
 
 ### The intake camera is not where the plan says it is
 
@@ -524,5 +601,7 @@ running.
 Spotless runs automatically before compilation and will reformat sources and strip imports that are
 only referenced inside commented-out code.
 
-The `SuperstructureFsmTest` cases report as SKIPPED. They are `@Disabled` placeholders belonging to
-a later milestone and are expected to stay that way until the superstructure is implemented.
+`SuperstructureFsmTest`'s cases used to report as SKIPPED, as `@Disabled` placeholders belonging to
+a later milestone. **M10 implemented them**, and the suite now runs with nothing skipped at all. A
+skipped test appearing in the summary again is therefore a regression to investigate rather than an
+expected state.
