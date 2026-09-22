@@ -194,7 +194,7 @@ hardware.
 | Branch | Milestone | State |
 |---|---|---|
 | `main` | — | Skeleton plus shared docs. Feature work is never merged here. |
-| `claude-test` | — | Integration line. Has an uncommitted regenerated `TunerConstants.java` that should be committed. |
+| `claude-test` | — | Integration line. **Carries the original skeleton `TunerConstants.java`.** A regenerated one was committed (738dcfc) and then reverted (a44af06) with no reason recorded, so the file is byte-identical to the initial commit and the regenerated version is not on the branch at all. |
 | `feature-drive` | M1 | Drivetrain, `RobotState` odometry path, tunables, `PhoenixUtil`, `DriveCommands`. Builds. Teleop default command bound (left stick translate, right stick rotate). |
 | `feature-robot-state` | M2 | Branched off `feature-drive`. Vision ingestion with rejection rules, staleness, pose confidence, QuestNav trust, `AllianceFlipUtil`. Builds. |
 | `feature-shooting-parameters` | M3 | Branched off `claude-test`, independent. `ShotParameters`, `ShootingSolver`, `TurretUnwrapper`, `GeomUtil`. 24 tests pass, mutation score 13/13. |
@@ -243,7 +243,13 @@ whole vision and shooting stack rests on that last one.
    sandbox, so it commits with `git -c user.name=... -c user.email=...` matching the existing
    history. Setting a repository-local identity once in each working directory would remove the
    need to remember that, and a forgotten `-c` is a hard error rather than a silent wrong author.
-2. **Commit the regenerated `TunerConstants.java`** on `claude-test`.
+2. **Decide what to do about `TunerConstants.java` on `claude-test`.** An earlier version of
+   this file said a regenerated one was sitting there uncommitted and should be committed. It is
+   not, and has not been since September 19: it was committed and then reverted, no reason was
+   recorded with the revert, and the file now matches the initial skeleton exactly. So there is
+   nothing to commit — acting on the old instruction would mean regenerating it again from Tuner X,
+   which is a decision rather than a chore, and whoever reverted it may have had a reason worth
+   knowing first.
 3. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
    layer, FSM shape and logging should be read and agreed before anything is built on top.
 4. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done:
