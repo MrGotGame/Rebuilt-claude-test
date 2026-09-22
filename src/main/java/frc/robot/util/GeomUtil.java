@@ -26,8 +26,13 @@ public class GeomUtil {
    * @return the translational part as a vector, in meters per second
    */
   public static Translation2d toTranslation(ChassisSpeeds fieldRelativeSpeeds) {
-    // TODO: return new Translation2d(speeds.vxMetersPerSecond, speeds.vyMetersPerSecond).
-    return Translation2d.kZero;
+    // IMPLEMENTATION (was TODO: "new Translation2d(speeds.vxMetersPerSecond,
+    // speeds.vyMetersPerSecond).")
+    //
+    // The angular component is dropped deliberately: callers want the translational velocity as a
+    // planar vector, and omega is handled separately by the turret feedforward.
+    return new Translation2d(
+        fieldRelativeSpeeds.vxMetersPerSecond, fieldRelativeSpeeds.vyMetersPerSecond);
   }
 
   /**
@@ -41,8 +46,13 @@ public class GeomUtil {
    * @return signed speed along the line of sight, in meters per second; positive means closing
    */
   public static double radialComponent(Translation2d velocity, Rotation2d lineOfSight) {
-    // TODO: return v.getX() * lineOfSight.getCos() + v.getY() * lineOfSight.getSin().
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "Project velocity onto lineOfSight: v.getX()*cos + v.getY()*sin.
+    // Positive means closing.")
+    //
+    // A dot product of the velocity with the unit vector along the line of sight. This is the
+    // component that changes RANGE during the shot's flight, so it is what the flywheel speed has
+    // to compensate for.
+    return velocity.getX() * lineOfSight.getCos() + velocity.getY() * lineOfSight.getSin();
   }
 
   /**
@@ -56,8 +66,14 @@ public class GeomUtil {
    * @return signed speed across the line of sight, in meters per second
    */
   public static double tangentialComponent(Translation2d velocity, Rotation2d lineOfSight) {
-    // TODO: return -v.getX() * lineOfSight.getSin() + v.getY() * lineOfSight.getCos().
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "Perpendicular projection: -v.getX()*sin + v.getY()*cos. Drives the
+    // turret velocity feedforward (omega = tangential / distance).")
+    //
+    // The cross-product magnitude against the line-of-sight unit vector, i.e. the dot product with
+    // that vector rotated 90 degrees counter-clockwise. This is the component that sweeps the
+    // BEARING during flight, which is why dividing it by distance yields the angular rate the
+    // turret must match.
+    return -velocity.getX() * lineOfSight.getSin() + velocity.getY() * lineOfSight.getCos();
   }
 
   /**
@@ -71,6 +87,14 @@ public class GeomUtil {
     // IMPLEMENTATION (was TODO: "Compose base with a Rotation3d(0, 0, yawRad) applied at base's
     // origin. Verify the composition ORDER against the WPILib Transform3d docs -- getting pre-
     // versus post-multiplication backwards is the single most common vision bug.")
+    //
+    // MERGE NOTE (integration-m1_m9): M3 and M8 implemented this method independently, weeks
+    // apart, and produced a BYTE-IDENTICAL return statement. Only the commentary conflicted. That
+    // is worth recording rather than discarding, because this is the one method the M8 checkpoint
+    // names as most likely to be silently wrong, and two derivations agreeing is real evidence
+    // about the composition order -- the kind that is hard to come by for a bug whose signature is
+    // "correct at zero, wrong everywhere else". M8's comment is kept below as the fuller of the
+    // two; M3's made the same argument more briefly.
     //
     // The order is base-THEN-rotation, because the rotation is the turret's and the turret's axis
     // is where `base` ends. Transform3d.plus composes the argument in the frame the receiver
@@ -100,8 +124,12 @@ public class GeomUtil {
    * @return the same pose at Z = 0 with zero roll and pitch
    */
   public static Pose3d toPose3d(Pose2d pose) {
-    // TODO: return new Pose3d(pose).
-    return new Pose3d();
+    // IMPLEMENTATION (was TODO: "new Pose3d(pose) - used when publishing to AdvantageScope's 3D
+    // field.")
+    //
+    // The Pose3d(Pose2d) constructor places the pose on the floor plane with zero roll and pitch,
+    // which is what AdvantageScope's 3D field expects for a ground robot.
+    return new Pose3d(pose);
   }
 
   /**
@@ -118,9 +146,39 @@ public class GeomUtil {
    *     element above it
    */
   public static double interpolate(double[] xs, double[] ys, double x) {
-    // TODO: Binary-search or linear-scan xs for the bracketing pair, then lerp. Clamp at both ends
-    // rather than extrapolating -- extrapolating a shot table past its measured range produces
-    // confidently wrong flywheel speeds.
-    return 0.0;
+    // IMPLEMENTATION (was TODO: "Linear interpolation with clamping at both ends, over pre-sorted
+    // xs. Used to build the shot tables in a unit-testable way.")
+    //
+    // CLAMPS rather than extrapolates. Extrapolating a shot table past its measured range produces
+    // a confidently wrong flywheel speed, and the robot fires it without hesitation. Clamping at
+    // least keeps the error bounded by the edge of what was actually measured.
+    if (xs.length == 0 || xs.length != ys.length) {
+      throw new IllegalArgumentException(
+          "interpolate() needs non-empty arrays of equal length; got xs="
+              + xs.length
+              + " ys="
+              + ys.length);
+    }
+    if (x <= xs[0]) {
+      return ys[0];
+    }
+    if (x >= xs[xs.length - 1]) {
+      return ys[ys.length - 1];
+    }
+
+    // Linear scan. These tables are 8-10 entries, so a binary search would add branching complexity
+    // for no measurable gain on a 20 ms loop.
+    for (int i = 0; i < xs.length - 1; i++) {
+      if (x <= xs[i + 1]) {
+        double span = xs[i + 1] - xs[i];
+        // Guard against duplicate breakpoints, which would divide by zero.
+        if (span == 0.0) {
+          return ys[i];
+        }
+        double t = (x - xs[i]) / span;
+        return ys[i] + t * (ys[i + 1] - ys[i]);
+      }
+    }
+    return ys[ys.length - 1];
   }
 }
