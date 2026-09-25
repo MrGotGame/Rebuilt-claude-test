@@ -205,7 +205,7 @@ hardware.
 | `feature-turret` | M5 | Branched off **`feature-drive`**, because `Turret.periodic()` needs `RobotState`. Carries `TurretUnwrapper` byte-identical from `feature-shooting-parameters` — do not edit it there. 4 FSM tests plus the 12 inherited unwrapper cases; found and fixed the dead-motor homing bug. |
 | `integration-m1_m9` | — | Everything through M9 combined, and the base M10 was cut from. A merge target only; never commit onto it. |
 | `feature-superstructure` | M10 | Branched off `integration-m1_m9`. `Superstructure` with all fourteen states, both interlocks, the `readyToScore` gate, the driver bindings, and `SuperstructureFsmTest`. **122 tests, none skipped, mutation score 26/26.** Also implements `FaultReporter`, whose `getInstance()` returned null and which M10's gate dereferences, and closes an intake home-latch hole and an angular-guard hole in `TurretUnwrapper` that only a cross-mechanism client could reach. Hardware checkpoint outstanding. |
-| `feature-hopper` | M10b | Branched off `feature-superstructure`. The hopper retrofit (plan §2.4), to be built in the eleven-step order in `PROJECT_OVERVIEW.md`. Step 0 done: identical to `feature-superstructure`, builds, 122 tests pass. |
+| `feature-hopper` | M10b | Branched off `feature-superstructure`. The hopper retrofit (plan §2.4), to be built in the eleven-step order in `PROJECT_OVERVIEW.md`. Steps 0–1 done: the hopper constants are added (`76eac25`), nothing reads them yet, builds, 122 tests pass. |
 
 **M4's simulation checkpoint is complete**, including deliberate failures: zeroed gains drive the
 machine to `FAULTED` after `kSpinUpTimeoutSec`, a zero goal resolves to `IDLE` instead of faulting,
