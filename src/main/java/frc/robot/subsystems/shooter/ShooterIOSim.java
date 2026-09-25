@@ -17,6 +17,9 @@ public class ShooterIOSim implements ShooterIO {
   private double ffVolts = 0.0;
   private double goalRpm = 0.0;
 
+  /** Speed a simulated piece will take out of the wheel at the end of the next update, RPM. */
+  private double pendingDipRpm = 0.0;
+
   /** Builds the flywheel model: two motors driving one shared inertia. NOTE: pre-filled, final. */
   public ShooterIOSim() {
     sim =
@@ -57,6 +60,14 @@ public class ShooterIOSim implements ShooterIO {
 
     sim.setInputVoltage(MathUtil.clamp(appliedVolts, -12.0, 12.0));
     sim.update(Constants.getLoopPeriodSec());
+
+    // A piece injected since the last update lands after the model has advanced, so this loop's
+    // reading carries the whole dip. See injectShot(double) for why that ordering matters.
+    if (pendingDipRpm > 0.0) {
+      double dippedRpm = Math.max(0.0, sim.getAngularVelocityRPM() - pendingDipRpm);
+      sim.setAngularVelocity(dippedRpm * 2.0 * Math.PI / 60.0);
+      pendingDipRpm = 0.0;
+    }
 
     double velocityRpm = sim.getAngularVelocityRPM();
 
@@ -156,7 +167,8 @@ public class ShooterIOSim implements ShooterIO {
    * exercised with no hopper model at all: tests and a sim keyboard binding call it at whatever
    * cadence they want to replay.
    *
-   * <p><b>Outputs:</b> removes {@code kShotDipRpm * kSimShotDipMargin} RPM from the wheel at once.
+   * <p><b>Outputs:</b> queues a dip of {@code kShotDipRpm * kSimShotDipMargin} RPM, reported in
+   * full on the next update.
    */
   public void injectShot() {
     injectShot(Constants.Shooter.kShotDipRpm.get() * Constants.Shooter.kSimShotDipMargin);
@@ -169,17 +181,26 @@ public class ShooterIOSim implements ShooterIO {
    * threshold must NOT count, and proving that needs a way to make one.
    *
    * @param dipRpm speed removed in one step, in RPM; the wheel never goes below zero
-   *     <p><b>Outputs:</b> sets the simulated wheel speed. The controller sees the drop on the next
-   *     {@link #updateInputs(ShooterIOInputs)} and recovers from it exactly as it would from a real
-   *     piece.
+   *     <p><b>Outputs:</b> queues the dip. It is applied at the END of the next {@link
+   *     #updateInputs(ShooterIOInputs)}, after the model has advanced, so the speed reported that
+   *     loop is the full dip; the controller recovers from it on the loops that follow.
    */
   public void injectShot(double dipRpm) {
     // A speed step rather than an energy model. A piece passing through takes a bite out of the
     // wheel's kinetic energy over a few milliseconds, far shorter than a 20 ms loop, so at loop
     // resolution it IS a step; modelling the contact would add parameters nobody can measure yet
     // without changing what the detector sees.
-    double newRpm = Math.max(0.0, sim.getAngularVelocityRPM() - dipRpm);
-    sim.setAngularVelocity(newRpm * 2.0 * Math.PI / 60.0);
+    //
+    // Queued rather than applied immediately, and that is the whole difference between a margin
+    // and a hope. Applied immediately, the next update runs the closed loop against the lowered
+    // speed for a full period before the detector samples it, and this model recovers about 180
+    // RPM in that period -- so a 300 RPM injection was seen as a 188 RPM drop, barely over the 150
+    // RPM threshold, and raising kP would have quietly stopped the simulation counting shots. A
+    // real piece arrives at a random moment within the loop, so the drop a real detector sees
+    // varies between the full dip and the dip minus a loop of recovery; the sim now sits at the
+    // top of that range, which makes kSimShotDipMargin mean exactly what it says. Accumulated,
+    // so two injections before one update are two pieces in one loop, not one.
+    pendingDipRpm += dipRpm;
   }
 
   /** Zeroes the applied voltage and leaves closed loop. */

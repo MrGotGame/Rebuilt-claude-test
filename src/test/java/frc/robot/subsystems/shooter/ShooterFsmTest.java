@@ -68,6 +68,80 @@ public class ShooterFsmTest {
     shooter = new Shooter(io);
   }
 
+  /**
+   * Rebuilds the shooter over a scripted trace, holding a goal the trace already sits exactly at.
+   *
+   * @param rpm the steady speed, and the goal
+   * @return the script, for the case to queue a trace into
+   *     <p><b>Outputs:</b> leaves the shooter AT_SPEED with no shot counted.
+   */
+  private ScriptedShooterIO settleOverScript(double rpm) {
+    ScriptedShooterIO scripted = new ScriptedShooterIO(rpm);
+    rebuildOver(scripted);
+    shooter.setGoal(rpm);
+    step(20);
+    assertEquals(Shooter.SystemState.AT_SPEED, shooter.getSystemState());
+    assertEquals(0, shooter.getShotCount(), "a steady scripted wheel counted a shot");
+    return scripted;
+  }
+
+  /**
+   * A flywheel IO that reports a scripted speed trace instead of simulating a plant.
+   *
+   * <p>The shot detector's contract is about speed traces, so the direct test of each of its
+   * conditions is a trace chosen to reach that condition and no other. The simulated plant cannot
+   * always produce one: its controller recovers or brakes on its own schedule, and the first
+   * mutation run of this suite found three conditions it never isolated. Queued values are reported
+   * one per update, and the held value after that.
+   */
+  private static final class ScriptedShooterIO implements ShooterIO {
+    private final java.util.ArrayDeque<Double> queued = new java.util.ArrayDeque<>();
+    private double heldRpm;
+
+    /**
+     * Builds a script that reports one steady speed until told otherwise.
+     *
+     * @param heldRpm the speed reported when nothing is queued, in RPM
+     */
+    ScriptedShooterIO(double heldRpm) {
+      this.heldRpm = heldRpm;
+    }
+
+    /**
+     * Queues speeds to report, one per update, before returning to the held speed.
+     *
+     * @param rpms the speeds, in RPM, in order
+     *     <p><b>Outputs:</b> appends to the queue.
+     */
+    void then(double... rpms) {
+      for (double rpm : rpms) {
+        queued.add(rpm);
+      }
+    }
+
+    /**
+     * Changes the speed reported once the queue is empty.
+     *
+     * @param rpm the new held speed, in RPM
+     *     <p><b>Outputs:</b> sets the held speed.
+     */
+    void hold(double rpm) {
+      heldRpm = rpm;
+    }
+
+    /**
+     * Reports the next scripted speed, with both motors connected.
+     *
+     * @param inputs the struct to populate
+     */
+    @Override
+    public void updateInputs(ShooterIOInputs inputs) {
+      inputs.leaderConnected = true;
+      inputs.followerConnected = true;
+      inputs.velocityRpm = queued.isEmpty() ? heldRpm : queued.poll();
+    }
+  }
+
   /** Loops needed to outrun the spin-up timeout, with margin. */
   private int loopsPastSpinUpTimeout() {
     return (int) (Constants.Shooter.kSpinUpTimeoutSec.get() / LOOP_SEC) + 30;
@@ -255,12 +329,18 @@ public class ShooterFsmTest {
   }
 
   /**
-   * Nothing that slows or speeds the wheel on purpose counts as a shot.
+   * Nothing that slows or speeds the wheel on purpose counts as a shot, through the real closed
+   * loop.
    *
-   * <p>Each phase targets one of the detector's conditions: the spin-up is what the arming band
-   * rejects, a goal cut inside the arming band is what "ends below the goal" rejects, a goal cut
-   * outside it is the arming band again from above, and coasting is the "holding a goal" condition.
-   * The count is checked after every phase so a failure names the phase that caused it.
+   * <p>This is the INTEGRATION check: every everyday speed change, run through the simulated
+   * flywheel and its controller. It is not, on its own, a test of the individual conditions. The
+   * first mutation run showed why: this plant brakes a large goal cut at up to ~440 RPM a loop,
+   * which is rejected by the arming band AND by "ends below the goal" at once, so deleting either
+   * one alone changes nothing here; and it never brakes a small cut faster than ~110 RPM a loop, so
+   * the small cut never reaches the "ends below the goal" check at all. The per-condition cases
+   * below use a scripted trace instead. The drop-to-idle phase is the exception, and the reason
+   * this case earns its place: it is the only thing exercising "holding a goal". The count is
+   * checked after every phase so a failure names the phase that caused it.
    */
   @Test
   void deliberateSpeedChangesAreNotShots() {
@@ -320,23 +400,72 @@ public class ShooterFsmTest {
    * One piece's dip, spread over consecutive loops, counts once; the next piece counts again.
    *
    * <p>The refractory window is the only thing between a dip that spans two 20 ms loops and a
-   * double count, so this case removes it by construction: the second drop lands one loop after the
-   * first, inside {@code kShotRefractorySec}, and is large enough to count on its own.
+   * double count, so the second drop must be sharp enough to count on its own and land inside
+   * {@code kShotRefractorySec}. That trace has to be scripted: the first version of this case
+   * injected two pieces one loop apart into the simulated flywheel, whose controller recovered
+   * enough between them that the second drop fell under the threshold, and the case passed with the
+   * refractory window deleted.
    */
   @Test
   void refractoryWindowCountsOneDipOnce() {
-    spinUpAndSettle();
+    ScriptedShooterIO scripted = settleOverScript(3000.0);
 
-    sim.injectShot();
-    step(1);
-    sim.injectShot();
-    step(1);
+    scripted.then(2800.0, 2600.0, 2700.0, 2800.0, 2900.0);
+    step(2);
     assertEquals(1, shooter.getShotCount(), "one dip across two loops counted more than once");
 
-    step(10);
-    sim.injectShot();
-    step(10);
+    step(20);
+    scripted.then(2800.0);
+    step(5);
     assertEquals(2, shooter.getShotCount(), "a later, separate piece was not counted");
+  }
+
+  /**
+   * A small goal cut, braked toward, is not a shot: the drop is sharp and the wheel was armed, but
+   * it ends above the new goal.
+   *
+   * <p>The only condition standing between this trace and a count is "ends below the goal". The
+   * simulated plant never brakes a small cut this sharply, which is why this needs a script; a real
+   * flywheel with stiffer gains can. The positive control proves the scripted harness counts a real
+   * dip at the new goal.
+   */
+  @Test
+  void brakingTowardASlightlyLowerGoalIsNotAShot() {
+    ScriptedShooterIO scripted = settleOverScript(3000.0);
+
+    shooter.setGoal(2700.0);
+    scripted.hold(2700.0);
+    scripted.then(2800.0);
+    step(20);
+    assertEquals(0, shooter.getShotCount(), "braking to a lower goal, ending above it, counted");
+
+    scripted.then(2500.0);
+    step(5);
+    assertEquals(1, shooter.getShotCount(), "a real dip at the new goal was not counted");
+  }
+
+  /**
+   * Braking hard across a much lower goal is not a shot: the final drop is sharp and ends below the
+   * goal, but it started too far above it.
+   *
+   * <p>The only condition standing between the last drop of this trace and a count is the arming
+   * band. The simulated plant does brake a large cut this hard (~440 RPM a loop) but slows as it
+   * approaches the goal, so it never crosses it sharply; a real wheel with stiffer gains can. The
+   * positive control proves a real dip at the new goal still counts.
+   */
+  @Test
+  void brakingHardAcrossAMuchLowerGoalIsNotAShot() {
+    ScriptedShooterIO scripted = settleOverScript(3000.0);
+
+    shooter.setGoal(1800.0);
+    scripted.hold(1800.0);
+    scripted.then(2600.0, 2300.0, 1700.0);
+    step(20);
+    assertEquals(0, shooter.getShotCount(), "braking across a much lower goal counted");
+
+    scripted.then(1600.0);
+    step(5);
+    assertEquals(1, shooter.getShotCount(), "a real dip at the new goal was not counted");
   }
 
   /**
@@ -377,16 +506,24 @@ public class ShooterFsmTest {
    * wheel down, the tight band says "not ready" and would stop the indexer; the burst band says
    * "ready" and keeps the stream going. If both answered the same, the overload would be
    * decoration.
+   *
+   * <p>Scripted, and held long enough for the acceleration estimate to settle to zero, so the
+   * shortfall being judged is exactly midway between the two bands. The first version injected a
+   * dip into the simulated plant, and its answer depended on that plant's steady-state error (it
+   * settles ~53 RPM short of goal on the guessed kV) plus the projection term; it passed or failed
+   * on how the dip was delivered rather than on the property.
    */
   @Test
   void burstToleranceAcceptsARecoveringWheel() {
-    spinUpAndSettle();
+    double goal = 3000.0;
+    ScriptedShooterIO scripted = settleOverScript(goal);
     double horizon = Constants.getLoopPeriodSec() * 2.0;
     assertTrue(shooter.willBeAtSpeedIn(horizon), "a settled wheel must be ready");
 
-    sim.injectShot(
-        0.5 * (Constants.Shooter.kToleranceRpm.get() + Constants.Shooter.kBurstToleranceRpm.get()));
-    step(1);
+    double midway =
+        0.5 * (Constants.Shooter.kToleranceRpm.get() + Constants.Shooter.kBurstToleranceRpm.get());
+    scripted.hold(goal - midway);
+    step(20);
 
     assertFalse(
         shooter.willBeAtSpeedIn(horizon), "the normal band accepted a wheel still recovering");
