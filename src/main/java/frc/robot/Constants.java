@@ -358,6 +358,73 @@ public final class Constants {
         new LoggedTunableNumber("Intake/DeployedAngle", 0.0);
     public static final LoggedTunableNumber kEjectAngleRad =
         new LoggedTunableNumber("Intake/EjectAngle", 0.0);
+
+    /**
+     * The partial-raise angle the intake rocks up to while scoring. Added for M10b (plan section
+     * 2.4).
+     *
+     * <p>Between {@link #kDeployedAngleRad} and {@link #kStowedAngleRad}. Two properties of this
+     * robot make it the upper end of the rock: pieces stay in the hopper at this height (they can
+     * fall out of a stowed intake), and it is clear of the turret, outside {@link
+     * #kTurretConflictBandRad}. It is also the upper bound of the range in which {@code
+     * Intake.isRetainingPieces()} reports true, which autos wait on before their first path.
+     *
+     * <p>TODO: MEASURE. Raise the intake slowly over a full hopper until it just starts pushing the
+     * pile toward the indexer, and read Intake/Inputs/pivotPositionRad.
+     */
+    public static final LoggedTunableNumber kFeedAssistAngleRad =
+        new LoggedTunableNumber("Intake/FeedAssistAngle", 0.0);
+
+    /**
+     * Intake-roller speed while feed-assisting, RPM, inward. Added for M10b.
+     *
+     * <p>Inward so that pieces sitting at the mouth are pulled onto the hopper floor rather than
+     * pushed back out as the arm rises. Lower than {@link #kIntakeRollerRpm} because nothing new is
+     * being collected; it only has to keep what is already at the mouth moving the right way. TODO:
+     * tune on the robot.
+     */
+    public static final LoggedTunableNumber kFeedAssistRollerRpm =
+        new LoggedTunableNumber("Intake/FeedAssistRollerRpm", 1000.0);
+
+    /**
+     * Full period of the feed-assist rock between {@link #kDeployedAngleRad} and {@link
+     * #kFeedAssistAngleRad}, seconds. Added for M10b.
+     *
+     * <p>Rocking is the intended behaviour: it lets pieces flow off the intake onto the hopper
+     * floor and into the indexer better than a static raise. Zero holds the intake still at {@link
+     * #kFeedAssistAngleRad}, which is kept as a diagnostic and is also what the intake falls back
+     * to on its own when {@code PowerBudget} starts cutting LOW-priority current, since rocking is
+     * pure pivot current.
+     *
+     * <p>TODO: tune on the robot. Too short and the pivot never reaches either end before it
+     * reverses (watch Intake/AtGoal); too long and the flow stalls between strokes.
+     */
+    public static final LoggedTunableNumber kFeedAssistPeriodSec =
+        new LoggedTunableNumber("Intake/FeedAssistPeriod", 0.5);
+
+    /**
+     * Width of the turret-conflict band, radians, measured from {@link #kStowedAngleRad} toward
+     * {@link #kDeployedAngleRad}. Added for M10b.
+     *
+     * <p>While any part of the pivot's position or commanded motion lies inside this band, the arm
+     * is in the turret's sweep. On this robot that is roughly the top 15 degrees of travel: the
+     * STOWED intake conflicts with the turret, while the deployed and feed-assist positions, and
+     * everything between them, do not. That replaces the M10 interlock's assumption, which had it
+     * backwards and treated a deployed intake as the conflict.
+     *
+     * <p>A WIDTH FROM STOW rather than two absolute angles, for two reasons. The band's direction
+     * then follows whatever sign convention the pivot ends up with, and the placeholder below is
+     * already the real shape. Two absolute placeholders of 0.0 would describe an empty band and
+     * leave the interlock silently inert -- the identity-transform trap M8 hit, in a new costume.
+     *
+     * <p>TODO: MEASURE the exact edge from the Onshape model (tools/onshape_measurements.py reads
+     * named mate connectors; add one at the band edge) and confirm it on the robot with the turret
+     * parked just outside its conflict arc. Add margin rather than trimming it: too wide costs a
+     * fraction of a second of turret travel, too narrow costs the arm.
+     */
+    public static final LoggedTunableNumber kTurretConflictBandRad =
+        new LoggedTunableNumber("Intake/TurretConflictBand", Math.toRadians(15.0));
+
     public static final LoggedTunableNumber kPivotToleranceRad =
         new LoggedTunableNumber("Intake/PivotTolerance", 0.05);
 
@@ -592,6 +659,12 @@ public final class Constants {
      * was relied on to outlast that transient and did not. Ignoring the predicate until the wheel
      * has had time to settle removes the failure by construction rather than by timing margin.
      *
+     * <p>Survives the M10b hopper retrofit, which deletes the piece detector it was written for.
+     * The same spin-up transient would fool both of M10b's replacements -- high current at low
+     * speed reads as {@link #kLoadedCurrentAmps} "loaded" AND as {@link #kJamCurrentAmps} "jammed"
+     * -- so {@code isLoaded()} and jam detection also ignore the wheel for this long after every
+     * goal change.
+     *
      * <p>TODO: MEASURE -- read the spin-up duration from Indexer/Inputs and set this comfortably
      * above it.
      */
@@ -602,6 +675,74 @@ public final class Constants {
         new LoggedTunableNumber("Indexer/HasPieceDebounce", 0.06);
     public static final LoggedTunableNumber kShotDetectDebounceSec =
         new LoggedTunableNumber("Indexer/ShotDebounce", 0.08);
+
+    /**
+     * Stator current above which the feeding indexer counts as pushing against something, amps.
+     * Added for M10b (plan section 2.4).
+     *
+     * <p>"Loaded" is the hopper-era replacement for "has a piece". It is evaluated only while
+     * FEEDING forward, where it can mean something, and it gates nothing: it only stops {@code
+     * Superstructure.likelyEmpty()} from concluding the hopper is empty while the indexer is
+     * visibly still moving pieces. Both halves are required, as with the old detector, because a
+     * current spike alone fires on every acceleration.
+     *
+     * <p>Starts at the same values as {@link #kHasPieceCurrentAmps} and {@link
+     * #kHasPieceVelocityDropRpm}, which it supersedes; those are deleted in M10b's final step.
+     * TODO: tune from Indexer/Inputs while feeding a full hopper and then an empty one.
+     */
+    public static final LoggedTunableNumber kLoadedCurrentAmps =
+        new LoggedTunableNumber("Indexer/LoadedCurrent", 25.0);
+
+    /** Velocity shortfall below goal that, with {@link #kLoadedCurrentAmps}, means loaded, RPM. */
+    public static final LoggedTunableNumber kLoadedVelocityDropRpm =
+        new LoggedTunableNumber("Indexer/LoadedVelDrop", 400.0);
+
+    /** Debounce on the loaded predicate, both edges, seconds. Added for M10b. */
+    public static final LoggedTunableNumber kLoadedDebounceSec =
+        new LoggedTunableNumber("Indexer/LoadedDebounce", 0.06);
+
+    /**
+     * Stator current above which a feeding indexer that has also stopped turning is jammed, amps.
+     * Added for M10b (plan section 2.4).
+     *
+     * <p>With a whole hopper pressing on the indexer, a jam is a matter of when, not if. A jam is
+     * this current AND velocity below {@link #kJamVelocityRpm}, sustained for {@link
+     * #kJamDetectSec}. It must sit clearly above the loaded threshold: a loaded wheel is slowed, a
+     * jammed one is stopped, and the gap between the two is what keeps a full hopper from being
+     * mistaken for a jam. TODO: MEASURE by stalling the indexer on purpose and reading the current.
+     */
+    public static final LoggedTunableNumber kJamCurrentAmps =
+        new LoggedTunableNumber("Indexer/JamCurrent", 40.0);
+
+    /** Speed below which a high-current indexer counts as stopped for jam detection, RPM. */
+    public static final LoggedTunableNumber kJamVelocityRpm =
+        new LoggedTunableNumber("Indexer/JamVelocity", 200.0);
+
+    /**
+     * How long the jam condition must hold before the indexer reverses, seconds. Long enough that a
+     * piece briefly catching on its way through is not treated as a jam. TODO: tune on the robot.
+     */
+    public static final LoggedTunableNumber kJamDetectSec =
+        new LoggedTunableNumber("Indexer/JamDetect", 0.15);
+
+    /** Reverse speed of an unjam pulse, RPM. Negative: backwards, away from the flywheel. */
+    public static final LoggedTunableNumber kUnjamRpm =
+        new LoggedTunableNumber("Indexer/UnjamRpm", -1500.0);
+
+    /** Duration of one unjam pulse, seconds. TODO: tune on the robot. */
+    public static final LoggedTunableNumber kUnjamSec =
+        new LoggedTunableNumber("Indexer/Unjam", 0.2);
+
+    /**
+     * Unjam pulses allowed within one FEED request before the indexer gives up, latches JAMMED and
+     * raises an alert. Added for M10b.
+     *
+     * <p>Bounded because a jam that three reversals cannot clear will not be cleared by a fourth,
+     * and an indexer cycling forever presents as "the robot is shooting slowly" rather than as the
+     * fault it is. The operator's EJECT is the recovery from there. A plain int rather than a
+     * tunable because it is a policy, not a measurement.
+     */
+    public static final int kMaxUnjamAttempts = 3;
 
     /**
      * How long an EJECT request runs before the machine parks itself back in IDLE, seconds.
@@ -821,6 +962,60 @@ public final class Constants {
         new LoggedTunableNumber("Shooter/SpinUpTimeout", 3.0);
 
     /**
+     * The wider at-speed tolerance used once a burst is already feeding, RPM. Added for M10b (plan
+     * section 2.4).
+     *
+     * <p>Every piece knocks the wheel down. Judged against {@link #kToleranceRpm}, the readiness
+     * gate would close after each piece and reopen as the wheel recovered, stopping and restarting
+     * the indexer several times a second. Once the feed has opened within a scoring state, the gate
+     * judges the wheel against this band instead, until any OTHER gate term closes it. The first
+     * piece of every burst still meets the tight band.
+     *
+     * <p>TODO: tune during M11 against the hit rate of pieces 2..N in a burst. Too wide and the
+     * late pieces fall short; too narrow and the burst stutters.
+     */
+    public static final LoggedTunableNumber kBurstToleranceRpm =
+        new LoggedTunableNumber("Shooter/BurstToleranceRpm", 300.0);
+
+    /**
+     * Loop-to-loop speed drop that counts as one piece passing through the wheels, RPM. Added for
+     * M10b (plan section 2.4).
+     *
+     * <p>With a hopper and no piece sensor, the flywheel is the most reliable piece detector on the
+     * robot: every scored piece passes through it and takes a sharp bite out of wheel speed. A drop
+     * this large, while the wheel was within {@link #kShotArmToleranceRpm} of its goal, is a shot.
+     *
+     * <p>TODO: MEASURE from a logged burst. The dip must sit well above loop-to-loop noise at speed
+     * and well below the dip a real piece causes. The 8-piece preload is a known count, so firing
+     * it is the easiest check.
+     */
+    public static final LoggedTunableNumber kShotDipRpm =
+        new LoggedTunableNumber("Shooter/ShotDipRpm", 150.0);
+
+    /**
+     * How close to its goal the wheel must be for a speed drop to count as a shot, RPM. Added for
+     * M10b.
+     *
+     * <p>The arming condition is what stops a lowered goal or a spin-up transient from registering
+     * as a shot. Wider than {@link #kBurstToleranceRpm}, because in a fast burst the wheel may
+     * still be recovering from the previous piece when the next one arrives, and that piece must
+     * count.
+     */
+    public static final LoggedTunableNumber kShotArmToleranceRpm =
+        new LoggedTunableNumber("Shooter/ShotArmTolerance", 400.0);
+
+    /**
+     * After a shot is counted, further speed drops are ignored for this long, seconds. Added for
+     * M10b.
+     *
+     * <p>Stops one piece's dip, which can span more than one 20 ms loop, from counting twice. TODO:
+     * MEASURE the dip width in a logged burst first. If back-to-back pieces merge into one dip,
+     * shrinking this is the wrong fix; count dips in the high-rate velocity samples instead.
+     */
+    public static final LoggedTunableNumber kShotRefractorySec =
+        new LoggedTunableNumber("Shooter/ShotRefractory", 0.04);
+
+    /**
      * Speed commanded by the tuning-mode bench harness in {@code RobotContainer}.
      *
      * <p>This exists so the M4 checkpoint can be run end to end from AdvantageScope with no code
@@ -964,6 +1159,24 @@ public final class Constants {
      */
     public static final LoggedTunableNumber kPassRpm =
         new LoggedTunableNumber("Superstructure/PassRpm", 0.0);
+
+    /**
+     * Gate-open, unloaded feeding with no shot detected before {@code likelyEmpty()} turns true,
+     * seconds. Added for M10b (plan section 2.4).
+     *
+     * <p>With no piece sensor, "the hopper is empty" can only be a belief: the robot has been
+     * trying to fire for this long and nothing has come out. Autos use it to end a scoring leg
+     * early, and the driver controller rumbles on it; it NEVER gates a teleop shot. Only time spent
+     * with the readiness gate open and the indexer feeding unloaded counts. Time with the gate
+     * closed says nothing about the hopper, and counting it would end an auto's scoring leg while
+     * the hopper is still full.
+     *
+     * <p>TODO: MEASURE. It must be longer than the longest gap between Shooter/ShotDetected pulses
+     * in a real burst, or an auto will drive off with pieces aboard. Read the gap distribution off
+     * a logged burst and add margin.
+     */
+    public static final LoggedTunableNumber kEmptyConfirmSec =
+        new LoggedTunableNumber("Superstructure/EmptyConfirm", 0.75);
 
     /**
      * How long the floor roller keeps feeding after a piece has been detected, seconds.
@@ -1180,10 +1393,35 @@ public final class Constants {
   public static final class Auto {
     private Auto() {}
 
+    /**
+     * Upper bound on one autonomous scoring leg, seconds.
+     *
+     * <p>Raised from 2.0 for M10b (plan section 2.4). It was a one-piece timeout; with a hopper it
+     * is a max-burst bound, long enough to empty a FULL hopper of 50 pieces. {@code
+     * Superstructure.likelyEmpty()} is what normally ends the leg early; this only has to stop a
+     * gate that never opens, or a hopper that never seems to empty, from holding the auto for the
+     * rest of the period.
+     *
+     * <p>TODO: MEASURE the time to fire 50 pieces at {@link Indexer#kFeedRpm} and add margin. The
+     * placeholder assumes roughly 8 pieces per second.
+     */
     public static final LoggedTunableNumber kScoreTimeoutSec =
-        new LoggedTunableNumber("Auto/ScoreTimeout", 2.0);
+        new LoggedTunableNumber("Auto/ScoreTimeout", 8.0);
+
     public static final LoggedTunableNumber kIntakeSettleSec =
         new LoggedTunableNumber("Auto/IntakeSettle", 0.25);
+
+    /**
+     * How long an auto waits for the intake to reach a piece-retaining angle before it drives
+     * anyway, seconds. Added for M10b (plan section 2.4).
+     *
+     * <p>The robot must start with the intake STOWED, pieces can fall out of a stowed intake, and
+     * the first enable deploys it. So every routine opens by waiting for {@code
+     * Intake.isRetainingPieces()}. The bound exists so that a dead pivot costs the auto a second
+     * rather than the whole period. TODO: set just above the measured stow-to-feed-assist time.
+     */
+    public static final LoggedTunableNumber kIntakeRetainTimeoutSec =
+        new LoggedTunableNumber("Auto/IntakeRetainTimeout", 1.0);
 
     /** Warn in the queue line when the robot is placed further than this from the auto's start. */
     public static final LoggedTunableNumber kStartPoseWarnMeters =
