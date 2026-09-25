@@ -211,10 +211,16 @@ public class Turret extends SubsystemBase {
   }
 
   /**
-   * Installs the interlock that keeps the turret out of the deployed intake.
+   * Installs the interlock that keeps the turret out of the intake's way.
    *
-   * @param blocked supplier returning true while the intake occupies the conflict arc; the
-   *     superstructure injects {@code () -> !intake.isStowed()}
+   * <p>Since M10b step 5 (plan section 2.4) the superstructure injects {@code
+   * intake::isInTurretConflictBand}: true while the intake's pivot, or its commanded goal, lies in
+   * the few degrees of travel nearest stow. M10 injected {@code () -> !intake.isStowed()}, which
+   * had the conflict backwards on this robot -- it blocked the turret whenever the intake was down,
+   * where it cannot reach the turret, and let it in beside a stowed arm, which can.
+   *
+   * @param blocked supplier returning true while the intake occupies, or is moving into, the part
+   *     of its travel that lies in this turret's conflict arc
    *     <p><b>Outputs:</b> replaces the stored guard.
    */
   public void setIntakeArcGuard(BooleanSupplier blocked) {

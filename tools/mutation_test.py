@@ -34,7 +34,7 @@ of the intake/turret interlock, the readiness gate, FaultReporter's severity han
 and the two latent bugs M10 found in already-merged code. The second block is M10b's,
 growing one retrofit step at a time: step 2 added the flywheel shot detector, step 3
 the intake's resting and feed-assist states and its two geometric predicates, step 4
-the intake-camera gate. Several
+the intake-camera gate, step 5 both halves of the corrected interlock. Several
 M10 anchors name code that later M10b steps replace (the piece guard, the isStowed turret
 guard), and those entries must be rewritten against the new code in the step that
 changes it, not deleted. Adding a milestone means adding its
@@ -105,7 +105,7 @@ MUTATIONS = [
      "    intake.setDeployGuard(() -> !turretInIntakeConflictArc());",
      "    intake.setDeployGuard(() -> true);"),
     ("turret intake-arc guard never blocks", SS,
-     "    turret.setIntakeArcGuard(() -> !intake.isStowed());",
+     "    turret.setIntakeArcGuard(intake::isInTurretConflictBand);",
      "    turret.setIntakeArcGuard(() -> false);"),
     ("forced scoring holds instead of feeding", SS,
      "    indexer.setWantedState(Indexer.WantedState.FEED);\n    floorRoller.setWantedState(FloorRoller.WantedState.FEED);",
@@ -177,14 +177,14 @@ MUTATIONS = [
     # loop's goal again -- and every predicate is attacked on its fail-closed branch as well as its
     # main one, because a predicate that fails open near the turret is the expensive kind of wrong.
     ("DEPLOY_ONLY never settles into DEPLOYED", IN,
-     "        yield atAngle(deployed) ? SystemState.DEPLOYED : SystemState.DEPLOYING;",
-     "        yield SystemState.DEPLOYING;"),
+     "          deployed, atAngle(deployed) ? SystemState.DEPLOYED : SystemState.DEPLOYING);",
+     "          deployed, SystemState.DEPLOYING);"),
     ("arrival judged against the previous loop's goal again", IN,
-     "        yield atAngle(deployed) ? SystemState.INTAKING : SystemState.DEPLOYING;",
-     "        yield atGoal() ? SystemState.INTAKING : SystemState.DEPLOYING;"),
-    ("FEED_ASSIST escapes the M10 deploy guard", IN,
-     "      case FEED_ASSIST -> {\n        if (!deployAllowed.getAsBoolean()) {\n          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;\n        }",
-     "      case FEED_ASSIST -> {"),
+     "          deployed, atAngle(deployed) ? SystemState.INTAKING : SystemState.DEPLOYING);",
+     "          deployed, atGoal() ? SystemState.INTAKING : SystemState.DEPLOYING);"),
+    ("intake guard refuses nothing, even a stow beside the turret", IN,
+     "    if (entersBand && !deployAllowed.getAsBoolean()) {",
+     "    if (false) {"),
     ("feed-assist roller does not run", IN,
      "    io.setRollerVelocity(Constants.Intake.kFeedAssistRollerRpm.get());",
      "    io.setRollerVelocity(0.0);"),
@@ -227,6 +227,27 @@ MUTATIONS = [
     ("camera gate tests position instead of state", IN,
      "    return systemState == SystemState.INTAKING || systemState == SystemState.DEPLOYED;",
      "    return atAngle(geometry.deployedRad().getAsDouble());"),
+
+    # ---- M10b step 5: the interlock correction, both halves. The turret half reverted to M10's
+    # backwards rule, which the new negative case -- a DEPLOYED intake must not block the turret --
+    # exists to catch. The intake half made to refuse leaving the band, made to fall back to
+    # stowing as M10's did, and its wait broken two ways: a hold that does not hold, and a hold
+    # angle that was never latched.
+    ("turret guard reverted to M10's backwards rule", SS,
+     "    turret.setIntakeArcGuard(intake::isInTurretConflictBand);",
+     "    turret.setIntakeArcGuard(() -> !intake.isStowed());"),
+    ("intake guard also refuses moves out of the band", IN,
+     "    boolean entersBand =\n        !inTurretConflictBand(inputs.pivotPositionRad, stowed, deployed, width)\n            && inTurretConflictBand(targetRad, stowed, deployed, width);",
+     "    boolean entersBand = true;"),
+    ("a refused stow falls back to stowing, as M10's guard did", IN,
+     "    if (entersBand && !deployAllowed.getAsBoolean()) {\n      return SystemState.WAITING_FOR_TURRET;",
+     "    if (entersBand && !deployAllowed.getAsBoolean()) {\n      return SystemState.STOWING;"),
+    ("the wait drives on to stow instead of holding", IN,
+     "    pivotGoalRad = waitHoldRad;",
+     "    pivotGoalRad = geometry.stowedRad().getAsDouble();"),
+    ("the wait's hold angle is never latched", IN,
+     "      case WAITING_FOR_TURRET -> waitHoldRad = inputs.pivotPositionRad;",
+     "      case WAITING_FOR_TURRET -> {}"),
 ]
 
 

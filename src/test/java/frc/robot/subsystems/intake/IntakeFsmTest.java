@@ -198,22 +198,102 @@ public class IntakeFsmTest {
   }
 
   /**
-   * FEED_ASSIST swings the arm out of stow just as DEPLOY does, so the M10 guard covers it too.
+   * With no guard installed, the intake will not stow -- the one move that can meet the turret --
+   * and waits clear of the band instead; every move out of or clear of the band still proceeds.
    *
-   * <p>Pinned while the M10 interlock stands. M10b step 5 replaces the guard with the pivot-band
-   * rule, under which the rock -- clear of the band at both ends -- no longer waits on the turret,
-   * and this case is rewritten there.
+   * <p>Replaces M10's {@code deployIsRefusedWhileNoGuardIsInstalled}. Under the M10 interlock an
+   * absent guard refused every move out of stow, on the assumption that the deployed intake was the
+   * conflict. On this robot the stowed intake is (plan section 2.4), so the refusal moved to the
+   * other end of travel.
    */
   @Test
-  void feedAssistIsRefusedByTheGuardToo() {
+  void stowIsRefusedWhileNoGuardIsInstalled() {
+    rebuildIdeal();
+
+    intake.setWantedState(Intake.WantedState.DEPLOY_ONLY);
+    step(5);
+    assertEquals(
+        Intake.SystemState.DEPLOYED,
+        intake.getSystemState(),
+        "leaving the band must not need a guard: it moves away from the turret");
+
+    intake.setWantedState(Intake.WantedState.STOW);
+    for (int i = 0; i < 50; i++) {
+      step(1);
+      assertEquals(Intake.SystemState.WAITING_FOR_TURRET, intake.getSystemState());
+      assertFalse(intake.isInTurretConflictBand(), "stowed into the band with no guard installed");
+    }
+  }
+
+  /**
+   * With the guard SHUT, every request that leaves the band or stays clear of it still proceeds.
+   *
+   * <p>Replaces M10's {@code ejectIsAlsoRefusedByTheGuard} and step 3's {@code
+   * feedAssistIsRefusedByTheGuardToo}, which pinned the M10 rule. The first request starts from
+   * STOWED, inside the band: a guarded move out of the band would strand the arm exactly where it
+   * is most in the way, and the turret's half of the interlock already keeps the turret out of its
+   * arc while the arm is there.
+   */
+  @Test
+  void movesOutOfOrClearOfTheBandIgnoreTheGuard() {
     rebuildIdeal();
     intake.setDeployGuard(() -> false);
 
-    intake.setWantedState(Intake.WantedState.FEED_ASSIST);
-    step(30);
+    Intake.WantedState[] requests = {
+      Intake.WantedState.DEPLOY_AND_INTAKE,
+      Intake.WantedState.EJECT,
+      Intake.WantedState.FEED_ASSIST,
+      Intake.WantedState.DEPLOY_ONLY
+    };
+    Intake.SystemState[] expected = {
+      Intake.SystemState.INTAKING,
+      Intake.SystemState.EJECTING,
+      Intake.SystemState.FEED_ASSISTING,
+      Intake.SystemState.DEPLOYED
+    };
+    for (int i = 0; i < requests.length; i++) {
+      intake.setWantedState(requests[i]);
+      step(5);
+      assertEquals(
+          expected[i],
+          intake.getSystemState(),
+          requests[i] + " was refused by a shut guard, but never enters the band");
+    }
+  }
 
-    assertNotEquals(
-        Intake.SystemState.FEED_ASSISTING, intake.getSystemState(), "rocked past a closed guard");
+  /**
+   * A stow refused by a shut guard waits where it was refused, clear of the band, and completes on
+   * its own the moment the guard opens.
+   *
+   * <p>M10's guard resolved a refusal to STOWING, which on this robot is the dangerous direction.
+   * The wait must hold the arm still -- its goal is part of what the turret reads, so a goal inside
+   * the band would block the turret it is waiting on -- and must not strand the stow once the
+   * turret has moved.
+   */
+  @Test
+  void aRefusedStowWaitsClearOfTheBandThenCompletes() {
+    rebuildIdeal();
+    boolean[] turretClear = {true};
+    intake.setDeployGuard(() -> turretClear[0]);
+    intake.setWantedState(Intake.WantedState.DEPLOY_ONLY);
+    step(5);
+
+    turretClear[0] = false;
+    intake.setWantedState(Intake.WantedState.STOW);
+    for (int i = 0; i < 30; i++) {
+      step(1);
+      assertEquals(Intake.SystemState.WAITING_FOR_TURRET, intake.getSystemState());
+      assertEquals(DEPLOYED, ideal.lastGoalRad(), "the waiting arm did not hold where it was");
+      assertEquals(0.0, ideal.lastRollerRpm(), "a refused stow must not run the roller");
+      assertFalse(intake.isInTurretConflictBand(), "the wait put the arm or its goal in the band");
+    }
+
+    turretClear[0] = true;
+    step(5);
+    assertEquals(
+        Intake.SystemState.STOWED,
+        intake.getSystemState(),
+        "the stow did not complete once the guard opened");
   }
 
   /**
@@ -399,39 +479,6 @@ public class IntakeFsmTest {
     assertTrue(intake.isHomed(), "the pivot never homed against a healthy simulated arm");
     assertNotEquals(
         Intake.SystemState.FAULTED, intake.getSystemState(), "healthy homing must not fault");
-  }
-
-  /**
-   * The deploy guard refuses by default, so nothing swings out until a real guard is installed.
-   *
-   * <p>This is the shipped behaviour of the robot today: {@code Superstructure} injects the real
-   * interlock and is a skeleton until M10, so {@code kDeployAllowedWithoutGuard} is false and every
-   * request that would put the arm outside stow resolves to STOWING instead.
-   */
-  @Test
-  void deployIsRefusedWhileNoGuardIsInstalled() {
-    step(loopsPastHomingTimeout());
-    intake.setWantedState(Intake.WantedState.DEPLOY_AND_INTAKE);
-    step(30);
-
-    assertNotEquals(
-        Intake.SystemState.DEPLOYING, intake.getSystemState(), "deployed with no guard installed");
-    assertNotEquals(
-        Intake.SystemState.INTAKING, intake.getSystemState(), "deployed with no guard installed");
-  }
-
-  /** EJECT is covered by the guard too, not just the two requests named DEPLOY. */
-  @Test
-  void ejectIsAlsoRefusedByTheGuard() {
-    step(loopsPastHomingTimeout());
-    intake.setDeployGuard(() -> false);
-    intake.setWantedState(Intake.WantedState.EJECT);
-    step(30);
-
-    // The eject angle puts the arm outside stow just as the deploy angle does, so a guard that
-    // covered only DEPLOY would leave the collision reachable through a different button.
-    assertNotEquals(
-        Intake.SystemState.EJECTING, intake.getSystemState(), "ejected past a closed guard");
   }
 
   /** With the guard open, every remaining SystemState is reachable. Clause 2 of the checkpoint. */

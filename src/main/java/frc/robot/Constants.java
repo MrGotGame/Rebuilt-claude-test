@@ -552,16 +552,18 @@ public final class Constants {
      * What {@code Intake} assumes about the turret interlock when no deploy guard has been
      * installed. Added for M5.
      *
-     * <p>{@code Superstructure} injects the real guard (see plan section 4.11), and {@code
-     * Superstructure} is a skeleton until M10. Until then this is the answer the intake gets, and
-     * it is FALSE: with nothing tracking where the turret is, the honest answer to "is it safe to
-     * swing the intake out" is "unknown", and unknown must not mean yes for the one interaction the
-     * plan calls the most likely way to destroy this robot.
+     * <p>{@code Superstructure} injects the real guard (see plan section 4.11). Without one, this
+     * is the answer the intake gets, and it is FALSE: with nothing tracking where the turret is,
+     * the honest answer to "is the turret clear of its arc" is "unknown", and unknown must not mean
+     * yes for the one interaction the plan calls the most likely way to destroy this robot.
      *
-     * <p>The visible consequence in the interim is that DEPLOY_AND_INTAKE, DEPLOY_ONLY and EJECT
-     * all resolve to STOWING, which {@code Intake/DeployAllowed} and the "no deploy guard
-     * installed" alert both make obvious rather than mysterious. Flip this to true ONLY to bench
-     * test the pivot with the turret physically removed or known parked, and flip it back.
+     * <p>Since M10b step 5 the guard is consulted only for a motion INTO the turret-conflict band,
+     * because only the stowed intake can meet the turret (plan section 2.4). So the visible
+     * consequence of an absent guard is that a STOW waits in WAITING_FOR_TURRET, clear of the band,
+     * which {@code Intake/DeployAllowed} and the "no intake/turret guard installed" alert both make
+     * obvious rather than mysterious; deploying, intaking, rocking and ejecting all proceed. Flip
+     * this to true ONLY to bench test the pivot with the turret physically removed or known parked,
+     * and flip it back.
      */
     public static final boolean kDeployAllowedWithoutGuard = false;
 

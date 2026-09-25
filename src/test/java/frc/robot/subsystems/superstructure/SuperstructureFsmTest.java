@@ -29,6 +29,7 @@ import frc.robot.subsystems.floorroller.FloorRollerIOSim;
 import frc.robot.subsystems.indexer.Indexer;
 import frc.robot.subsystems.indexer.IndexerIO;
 import frc.robot.subsystems.indexer.IndexerIOSim;
+import frc.robot.subsystems.intake.IdealPivotIO;
 import frc.robot.subsystems.intake.Intake;
 import frc.robot.subsystems.intake.IntakeIO;
 import frc.robot.subsystems.intake.IntakeIOSim;
@@ -107,6 +108,16 @@ public class SuperstructureFsmTest {
   private RecordingVisionIO intakeCameraIO;
   private Vision vision;
   private Superstructure superstructure;
+
+  /**
+   * Geometry for the intake {@link #buildRobot} constructs, or null for the robot's own.
+   *
+   * <p>Added for M10b step 5. The robot's own geometry is still all 0.0 placeholders, on which the
+   * turret-conflict band fails closed -- so the turret can never enter its arc, and every interlock
+   * assertion would pass whether the interlock worked or not. The interlock cases set this to
+   * {@code IdealPivotIO.GEOMETRY}; every other case leaves it null and builds exactly as before.
+   */
+  private Intake.PivotGeometry intakeGeometry = null;
 
   /** A camera stand-in that remembers every pipeline it was switched to. */
   private static final class RecordingVisionIO implements VisionIO {
@@ -201,7 +212,7 @@ public class SuperstructureFsmTest {
             new ModuleIO() {},
             new ModuleIO() {});
 
-    intake = new Intake(intakeIo);
+    intake = intakeGeometry == null ? new Intake(intakeIo) : new Intake(intakeIo, intakeGeometry);
     floorRoller = new FloorRoller(floorRollerIo);
     indexerSim = indexerIo instanceof IndexerIOSim sim ? sim : null;
     indexer = new Indexer(indexerIo);
@@ -574,96 +585,98 @@ public class SuperstructureFsmTest {
         "HOME must clear the fault and retry");
   }
 
-  /** The intake and turret must not be able to occupy each other's space. */
+  /**
+   * The intake and turret must not be able to occupy each other's space -- and, since M10b step 5,
+   * the space in question is the STOWED intake, not the deployed one.
+   *
+   * <p>Rewritten for the pivot-band interlock (plan section 2.4). On this robot the arm is in the
+   * turret's sweep only in the few degrees of travel nearest stow, so each half now guards motion
+   * into or beside that band, and there is a third direction the M10 version could not have: a
+   * DEPLOYED intake must NOT block the turret. That negative case is what stops the interlock ever
+   * being "fixed" back into a blanket refusal, which would keep the turret out of its arc for most
+   * of a match now that the intake rests deployed.
+   *
+   * <p>Built on the ideal pivot and the realistic test geometry, because the robot's own geometry
+   * is all 0.0 placeholders on which the band fails closed: the turret could never enter its arc,
+   * and both directions would pass whether the interlock worked or not.
+   */
   @Test
   void intakeAndTurretInterlockHoldsBothWays() {
-    homeAndSettle();
-
     double arcMin = Constants.Turret.kIntakeConflictMinRad.get();
     double arcMax = Constants.Turret.kIntakeConflictMaxRad.get();
     double insideArc = 0.5 * (arcMin + arcMax);
+    intakeGeometry = IdealPivotIO.GEOMETRY;
 
-    // ---- Direction 1: the intake must refuse to deploy into a turret that is in the arc.
+    // ---- Direction 1: the intake must not move INTO the band while the turret is in its arc.
     //
-    // The turret is a stand-in that reports itself parked inside the arc and ignores commands --
-    // which is the checkpoint's manual test written down: park the turret at 180 degrees, then ask
-    // for the intake. A turret driven there with TurretIOSim was tried first and is not usable
-    // here: the placeholder pivot gains leave the intake ringing about its stow setpoint, so
-    // Intake.isStowed() flickers, the turret's own guard fires mid-sweep and it stops short of the
-    // arc. That is the interlock working, but it tests the other direction, and it would make this
-    // case depend on gains M6 has not measured yet.
-    //
-    // The order matters, and the first version of this case got it wrong. Requesting the intake and
-    // the turret together is not a test of this direction at all: the intake is free to deploy
-    // while the turret is still at stow, so it does, and the refusal that follows belongs to
-    // direction 2. The turret has to be established in the arc first.
-    double parkedInArc = insideArc;
+    // The turret is a stand-in whose reported angle the case moves by hand, for the reason the M10
+    // version recorded: a turret driven there for real is stopped short by its own guard, which
+    // tests the other direction. The intake is first taken OUT of the band -- deploying is always
+    // allowed -- then the turret is put in the arc, and only then is the intake asked back in.
+    double[] turretAt = {0.0};
     buildRobot(
         new ShootingSolver(),
-        new IntakeIOSim(),
+        new IdealPivotIO(),
         new IndexerIOSim(),
         new TurretIO() {
           @Override
           public void updateInputs(TurretIOInputs inputs) {
             inputs.motorConnected = true;
             inputs.absEncoderConnected = true;
-            inputs.positionRad = parkedInArc;
-            inputs.absolutePositionRad = parkedInArc;
+            inputs.positionRad = turretAt[0];
+            inputs.absolutePositionRad = turretAt[0];
           }
         },
         new ShooterIOSim(),
         new FloorRollerIOSim());
     homeAndSettle();
+    assertTrue(intake.isInTurretConflictBand(), "the stowed intake should be in the turret's way");
 
+    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
+    step(10);
+    assertFalse(
+        intake.isInTurretConflictBand(),
+        "the intake never left the band, so the stow below would test nothing");
+
+    turretAt[0] = insideArc;
+    step(2);
     assertTrue(
         TurretUnwrapper.passesThroughArcWrapped(
             turret.getPositionRad(), turret.getPositionRad(), arcMin, arcMax),
         "the turret is not in the conflict arc, so nothing is being tested; it is at "
             + turret.getPositionRad());
 
-    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
-    for (int i = 0; i < 300; i++) {
-      step(1);
-      assertNotEquals(
-          Intake.SystemState.DEPLOYING,
-          intake.getSystemState(),
-          "the intake started deploying into a turret sitting in its arc");
-      assertNotEquals(
-          Intake.SystemState.INTAKING,
-          intake.getSystemState(),
-          "the intake deployed into a turret sitting in its arc");
-    }
-
-    // EJECT is covered by the same guard, not just the two requests named DEPLOY. The eject angle
-    // puts the arm outside stow exactly as the deploy angle does, so a guard that covered only
-    // DEPLOY would leave the collision reachable through a different button.
-    superstructure.setWantedState(Superstructure.WantedState.EJECT);
+    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    boolean sawWaiting = false;
     for (int i = 0; i < 200; i++) {
       step(1);
-      assertNotEquals(
-          Intake.SystemState.EJECTING,
-          intake.getSystemState(),
-          "the intake reached the eject angle past a closed guard");
+      assertFalse(
+          intake.isInTurretConflictBand(),
+          "the intake moved, or was commanded, into the band beside a turret in its arc");
+      sawWaiting |= intake.getSystemState() == Intake.SystemState.WAITING_FOR_TURRET;
     }
+    assertTrue(sawWaiting, "the refused stow never reported WAITING_FOR_TURRET");
 
-    // ---- Direction 2: the turret must refuse to sweep through a deployed intake.
-    //
-    // Rebuilt rather than continued, because direction 1 deliberately left the turret parked in the
-    // arc, and the intake cannot come out at all from there.
+    // Once the turret leaves, the stow the robot asked for completes on its own.
+    turretAt[0] = 0.0;
+    step(20);
+    assertEquals(
+        Intake.SystemState.STOWED,
+        intake.getSystemState(),
+        "the stow did not resume once the turret cleared its arc");
+
+    // ---- Direction 2: the turret must not enter its arc while the intake is in the band.
     buildRobot(
         new ShootingSolver(),
-        new IntakeIOSim(),
+        new IdealPivotIO(),
         new IndexerIOSim(),
         new TurretIOSim(),
         new ShooterIOSim(),
         new FloorRollerIOSim());
     homeAndSettle();
-
-    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
-    step(120);
-    assertFalse(
-        intake.isStowed(),
-        "the intake never left stow, so the turret guard was never put under pressure");
+    assertTrue(
+        intake.isInTurretConflictBand(),
+        "the intake is not in the band, so the turret guard is not under pressure");
 
     boolean sawRefusal = false;
     for (int i = 0; i < 300; i++) {
@@ -673,13 +686,30 @@ public class SuperstructureFsmTest {
       double commanded = turret.getCommandedPositionRad();
       assertFalse(
           TurretUnwrapper.passesThroughArcWrapped(commanded, commanded, arcMin, arcMax),
-          "the turret was commanded into the deployed intake, at " + commanded);
+          "the turret was commanded into its arc beside a stowed intake, at " + commanded);
       sawRefusal |= turret.getSystemState() == Turret.SystemState.OUT_OF_RANGE;
     }
     assertTrue(
         sawRefusal,
         "the turret never reported OUT_OF_RANGE, so it may have been held back by something other"
             + " than the interlock");
+
+    // ---- Direction 3, the negative case: a DEPLOYED intake does not block the turret.
+    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
+    step(10);
+    assertFalse(intake.isInTurretConflictBand(), "the intake never left the band");
+
+    boolean reachedArc = false;
+    for (int i = 0; i < 300 && !reachedArc; i++) {
+      step(1);
+      turret.setGoal(Rotation2d.fromRadians(insideArc), 0.0);
+      double commanded = turret.getCommandedPositionRad();
+      reachedArc = TurretUnwrapper.passesThroughArcWrapped(commanded, commanded, arcMin, arcMax);
+    }
+    assertTrue(
+        reachedArc,
+        "the turret was kept out of its arc while the intake was deployed -- the M10 interlock's"
+            + " mistake, which would block it for most of a match now that the intake rests down");
   }
 
   /** Entry and exit actions must fire exactly once per transition. */
@@ -962,15 +992,20 @@ public class SuperstructureFsmTest {
    * always reach. The guard was real code that no test could reach, which is the same thing as no
    * guard at all until somebody deploys the intake at the wrong moment.
    *
-   * <p>The block is produced the way it happens on a field: a piece is collected, which leaves the
-   * intake out, and the shot that follows wants the turret pointed straight backwards -- through
-   * the arc the intake is standing in.
+   * <p>The block is produced the way it happens on the M10 superstructure: a piece is collected,
+   * after which INDEXING stows the intake -- into the turret-conflict band -- and the shot that
+   * follows wants the turret pointed straight backwards, through its arc. Until M10b step 5 the
+   * block came from the intake being left OUT; on this robot a deployed intake cannot reach the
+   * turret, so that was the old interlock's mistake, and this case now needs the real geometry to
+   * mean anything: on the 0.0 placeholders the band fails closed and the turret is blocked
+   * regardless. (Step 7 stops INDEXING stowing the intake, and revisits this case.)
    */
   @Test
   void aBlockedTurretDivertsScoringToWaitingForTurret() {
+    intakeGeometry = IdealPivotIO.GEOMETRY;
     buildRobot(
         usableSolver(),
-        new IntakeIOSim(),
+        new IdealPivotIO(),
         new IndexerIOSim(),
         new TurretIOSim(),
         new ShooterIOSim(),
@@ -981,7 +1016,10 @@ public class SuperstructureFsmTest {
     placeRobotAt(3.0, 0.0);
     homeAndSettle();
     acquirePiece();
-    assertFalse(intake.isStowed(), "this case needs the intake still out after the pickup");
+    step(10);
+    assertTrue(
+        intake.isInTurretConflictBand(),
+        "this case needs the intake in the turret's way, stowed by INDEXING after the pickup");
 
     superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
     boolean sawWaiting = false;

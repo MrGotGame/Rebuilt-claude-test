@@ -259,16 +259,26 @@ public class Superstructure extends SubsystemBase {
 
     // THE interlock, both directions, in the one place the plan allows it to exist.
     //
-    // They run in opposite directions and both are load-bearing. The first keeps the intake from
-    // swinging out into a turret that is sitting in, or about to sweep through, the arc the intake
-    // occupies. The second keeps the turret from sweeping through an intake that is already out.
-    // Enforcing only one of them leaves the collision reachable from the other side.
+    // They run in opposite directions and both are load-bearing. The conflict is the arm lying in
+    // the turret-conflict band -- the few degrees of travel nearest STOW -- while the turret is in,
+    // or sweeping through, its conflict arc. The first guard keeps the intake from moving INTO the
+    // band (in practice, stowing) while the turret is in the arc; the second keeps the turret out
+    // of
+    // the arc while the arm is in the band or commanded into it. Enforcing only one of them leaves
+    // the collision reachable from the other side.
+    //
+    // M10b step 5 (plan section 2.4) changed both halves together. M10 had the conflict backwards:
+    // it guarded the intake DEPLOYING and blocked the turret whenever the intake was anything but
+    // stowed. On this robot the deployed intake cannot reach the turret and the stowed one can, so
+    // M10's interlock kept the turret out of its arc for the entire time the intake was down --
+    // which, with the intake now resting deployed, is most of a match -- while letting it into the
+    // arc beside a stowed arm.
     //
     // Both are suppliers, evaluated fresh every loop by the mechanism that consumes them. A pushed
     // boolean would answer a question about where the other mechanism used to be, and would go
     // stale silently the first time a code path forgot to push.
     intake.setDeployGuard(() -> !turretInIntakeConflictArc());
-    turret.setIntakeArcGuard(() -> !intake.isStowed());
+    turret.setIntakeArcGuard(intake::isInTurretConflictBand);
 
     // Entry actions for the state the machine BOOTS into. periodic() only fires onEnter on a
     // transition, and systemState is initialised to HOMING at field level, so without this call the
@@ -642,10 +652,13 @@ public class Superstructure extends SubsystemBase {
     // shooter IDLE, and turret STOW -- stowing the turret is what keeps it out of the intake's arc
     // while the intake is down.")
     //
-    // The turret request is not decoration. The intake's deploy guard asks whether the turret is in
-    // or sweeping through the conflict arc, so commanding the turret to stow is what OPENS that
-    // guard; leave the turret aiming and the intake would simply refuse to come down, presenting as
-    // an intake button that does nothing.
+    // The turret stow is NO LONGER needed by the interlock. Under M10's rule, stowing the turret
+    // was
+    // what opened the intake's deploy guard; since M10b step 5, deploying moves the arm OUT of the
+    // turret-conflict band and is never refused. It stays for now only because an intaking robot
+    // has nothing for the turret to aim at yet, and a turret with no request would hold whatever it
+    // was last told. Step 7's orthogonal intake region removes it, when the turret keeps aiming
+    // while the robot intakes.
     turret.setWantedState(Turret.WantedState.STOW);
     intake.setWantedState(Intake.WantedState.DEPLOY_AND_INTAKE);
     floorRoller.setWantedState(FloorRoller.WantedState.INTAKE);
@@ -680,9 +693,9 @@ public class Superstructure extends SubsystemBase {
   private void ejecting() {
     // IMPLEMENTATION (was TODO: "intake EJECT, floorRoller EJECT, indexer EJECT, shooter COAST.")
     //
-    // The turret is stowed for the same reason it is during INTAKING: the eject angle puts the arm
-    // outside stow, so the intake's deploy guard applies to EJECT exactly as it does to DEPLOY, and
-    // an aiming turret would hold that guard shut and make the eject button do nothing.
+    // The turret is stowed for the same reason it still is during INTAKING: not for the interlock,
+    // which since M10b step 5 never refuses a move out of the band, but because clearing a jam
+    // gives the turret nothing to aim at.
     turret.setWantedState(Turret.WantedState.STOW);
     intake.setWantedState(Intake.WantedState.EJECT);
     floorRoller.setWantedState(FloorRoller.WantedState.EJECT);

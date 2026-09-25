@@ -25,8 +25,12 @@ import org.littletonrobotics.junction.Logger;
  * ThroughBore is unplugged, and it has a timeout so that a jammed intake enters {@link
  * SystemState#FAULTED} instead of stalling a motor for the rest of the match.
  *
- * <p>Second, a deploy guard: the intake refuses to deploy while the turret is inside its conflict
- * arc. That interaction is the single most likely way to destroy this robot.
+ * <p>Second, its half of the intake/turret interlock: the intake refuses to move INTO the
+ * turret-conflict band -- the few degrees of travel nearest stow, where the arm lies in the
+ * turret's sweep -- while the turret is inside its conflict arc. That interaction is the single
+ * most likely way to destroy this robot. (Until M10b step 5 this refused every motion OUT of stow
+ * instead, because it assumed the deployed intake was the conflict; on this robot the stowed one
+ * is.)
  *
  * <p>M10b (plan section 2.4) made the robot a hopper robot, which adds two resting behaviours: the
  * intake rests DEPLOYED once it has been down, because raising it lets pieces fall out, and while
@@ -61,6 +65,11 @@ public class Intake extends SubsystemBase {
     INTAKING,
     /** Rocking between the deploy and feed-assist angles. Added for M10b. */
     FEED_ASSISTING,
+    /**
+     * Holding clear of the turret-conflict band because the turret is in its arc, instead of
+     * stowing into it. Added for M10b step 5.
+     */
+    WAITING_FOR_TURRET,
     EJECTING,
     HOMING,
     CHARACTERIZING,
@@ -144,13 +153,13 @@ public class Intake extends SubsystemBase {
   /**
    * Fires while nobody has installed the real interlock.
    *
-   * <p>A warning rather than an error, because this is the expected state of the robot until M10
-   * implements the superstructure. It exists so that "the intake will not deploy" reads as a
-   * deliberate refusal on the dashboard rather than as a broken mechanism.
+   * <p>A warning rather than an error: on the robot the superstructure always installs one, so this
+   * fires only on a bench. It exists so that "the intake will not stow" reads as a deliberate
+   * refusal on the dashboard rather than as a broken mechanism.
    */
   private final Alert noDeployGuardAlert =
       new Alert(
-          "No intake deploy guard installed; the intake will refuse to deploy until Superstructure"
+          "No intake/turret guard installed; the intake will refuse to stow until Superstructure"
               + " provides one.",
           AlertType.kWarning);
 
@@ -160,7 +169,8 @@ public class Intake extends SubsystemBase {
   private double characterizationVolts = 0.0;
 
   /**
-   * The interim answer to "is it safe to swing the intake out".
+   * The answer to "is the turret clear of its arc", consulted only for a motion into the
+   * turret-conflict band -- in practice a stow.
    *
    * <p>Deliberately seeded from {@code Constants.Intake.kDeployAllowedWithoutGuard}, which is
    * false, rather than from {@code () -> true}. With nothing tracking where the turret is, the
@@ -194,6 +204,13 @@ public class Intake extends SubsystemBase {
 
   /** Rocking may run only while LOW-priority current is not being cut. Refreshed every loop. */
   private double lowPriorityCurrentScalar = 1.0;
+
+  /**
+   * Where the pivot was when a motion into the band was refused, held for as long as the refusal
+   * lasts. Latched on entry to {@link SystemState#WAITING_FOR_TURRET} rather than read live, so the
+   * hold does not creep with the arm under gravity.
+   */
+  private double waitHoldRad = 0.0;
 
   /**
    * Builds the intake around a hardware implementation, with the robot's own geometry.
@@ -233,10 +250,14 @@ public class Intake extends SubsystemBase {
   }
 
   /**
-   * Installs the interlock that prevents deploying into the turret.
+   * Installs the intake's half of the interlock: what stops the arm moving into the turret's way.
    *
-   * @param deployAllowed supplier returning false while the turret is inside its conflict arc;
-   *     stored, not evaluated, at call time
+   * <p>The name is kept from M10, where this guarded deploying. Since M10b step 5 it is consulted
+   * only for a motion INTO the turret-conflict band, which in practice means a stow; see {@code
+   * guardedMove}.
+   *
+   * @param deployAllowed supplier returning false while the turret is inside, or sweeping through,
+   *     its conflict arc; stored, not evaluated, at call time
    *     <p><b>Outputs:</b> replaces the stored guard.
    */
   public void setDeployGuard(BooleanSupplier deployAllowed) {
@@ -399,49 +420,68 @@ public class Intake extends SubsystemBase {
     // say.
     double stowed = geometry.stowedRad().getAsDouble();
     double deployed = geometry.deployedRad().getAsDouble();
+
+    // THE INTAKE HALF OF THE INTERLOCK (M10b step 5, plan section 2.4). Every request that moves
+    // the arm is passed through guardedMove(), which refuses only a motion INTO the
+    // turret-conflict band -- in practice a stow -- while the guard is shut. M10's rule was the
+    // reverse: it refused every motion OUT of stow, because it assumed the deployed intake was the
+    // thing in the turret's way. On this robot the stowed intake is.
     return switch (wantedState) {
       case IDLE -> SystemState.IDLE;
-      case STOW -> atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
+      case STOW -> guardedMove(stowed, atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING);
+      case DEPLOY_AND_INTAKE -> guardedMove(
+          deployed, atAngle(deployed) ? SystemState.INTAKING : SystemState.DEPLOYING);
 
-        // The guard covers every request that puts the arm outside the stow position, not just the
-        // two named DEPLOY. EJECT swings to the eject angle and FEED_ASSIST rocks through the
-        // deploy angle, both just as capable of meeting the turret as the deploy angle is -- under
-        // the M10 interlock this guard still implements. (M10b step 5 replaces it with the
-        // pivot-band rule, in the same commit as the turret half, so the two cannot disagree.)
-      case DEPLOY_AND_INTAKE -> {
-        if (!deployAllowed.getAsBoolean()) {
-          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
-        }
-        yield atAngle(deployed) ? SystemState.INTAKING : SystemState.DEPLOYING;
-      }
-      case DEPLOY_ONLY -> {
-        if (!deployAllowed.getAsBoolean()) {
-          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
-        }
         // Settles into a real DEPLOYED state rather than lingering in DEPLOYING forever, which is
         // what it did before M10b. With the intake now resting deployed for most of a match, a
-        // state that permanently claimed "in transit" would switch off every consumer that needs
-        // to know the arm has arrived.
-        yield atAngle(deployed) ? SystemState.DEPLOYED : SystemState.DEPLOYING;
-      }
-      case FEED_ASSIST -> {
-        if (!deployAllowed.getAsBoolean()) {
-          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
-        }
-        // No arrival test: the rock is always moving, so there is no angle to have arrived at.
-        yield SystemState.FEED_ASSISTING;
-      }
-      case EJECT -> {
-        if (!deployAllowed.getAsBoolean()) {
-          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
-        }
-        yield SystemState.EJECTING;
-      }
+        // state that permanently claimed "in transit" would switch off every consumer that needs to
+        // know the arm has arrived.
+      case DEPLOY_ONLY -> guardedMove(
+          deployed, atAngle(deployed) ? SystemState.DEPLOYED : SystemState.DEPLOYING);
+
+        // No arrival test: the rock is always moving, so there is no angle to have arrived at. It
+        // is guarded against its raised end, the one nearer the band.
+      case FEED_ASSIST -> guardedMove(
+          geometry.feedAssistRad().getAsDouble(), SystemState.FEED_ASSISTING);
+      case EJECT -> guardedMove(geometry.ejectRad().getAsDouble(), SystemState.EJECTING);
 
         // Unreachable: both are handled above, before the homing gate. Listed so that adding a
         // WantedState later is a compile error here rather than a silent fall-through.
       case HOME, CHARACTERIZE -> systemState;
     };
+  }
+
+  /**
+   * Lets a pivot motion proceed unless it would carry the arm into the turret's way while the
+   * turret is there.
+   *
+   * <p>Refused only when all three hold: the guard is shut (the turret is in, or sweeping through,
+   * its conflict arc), the arm is currently CLEAR of the band, and the target is IN it. The middle
+   * condition is what makes leaving the band always allowed. The band lies at the stow end of
+   * travel, so a motion that starts inside it can only be heading out, away from the turret -- and
+   * the turret half of the interlock already keeps the turret out of its arc while the arm is in
+   * the band, so there is nothing for such a motion to meet. Refusing it would only strand the arm
+   * where it is most in the way.
+   *
+   * <p>A refused motion does not fall back to stowing, which is what M10's guard did: on this robot
+   * stowing is the dangerous direction. It waits instead, holding where it was refused, and
+   * proceeds on the first loop the guard opens.
+   *
+   * @param targetRad the angle the requested state drives the pivot to, in radians
+   * @param whenAllowed the state to enter if the motion may proceed
+   * @return {@code whenAllowed}, or {@link SystemState#WAITING_FOR_TURRET}
+   */
+  private SystemState guardedMove(double targetRad, SystemState whenAllowed) {
+    double stowed = geometry.stowedRad().getAsDouble();
+    double deployed = geometry.deployedRad().getAsDouble();
+    double width = geometry.turretConflictBandRad().getAsDouble();
+    boolean entersBand =
+        !inTurretConflictBand(inputs.pivotPositionRad, stowed, deployed, width)
+            && inTurretConflictBand(targetRad, stowed, deployed, width);
+    if (entersBand && !deployAllowed.getAsBoolean()) {
+      return SystemState.WAITING_FOR_TURRET;
+    }
+    return whenAllowed;
   }
 
   /**
@@ -468,6 +508,7 @@ public class Intake extends SubsystemBase {
         // position command then off by that error, with nothing reporting a fault.
         io.setPivotSoftLimitsEnabled(false);
       }
+      case WAITING_FOR_TURRET -> waitHoldRad = inputs.pivotPositionRad;
       case CHARACTERIZING -> {
         characterizationVolts = 0.0;
 
@@ -520,6 +561,7 @@ public class Intake extends SubsystemBase {
       case DEPLOYED -> deployed();
       case INTAKING -> intaking();
       case FEED_ASSISTING -> feedAssisting();
+      case WAITING_FOR_TURRET -> waitingForTurret();
       case EJECTING -> ejecting();
       case HOMING -> homing();
       case CHARACTERIZING -> characterizing();
@@ -609,6 +651,22 @@ public class Intake extends SubsystemBase {
             geometry.feedAssistRad().getAsDouble());
     io.setPivotPosition(pivotGoalRad);
     io.setRollerVelocity(Constants.Intake.kFeedAssistRollerRpm.get());
+  }
+
+  /**
+   * Holds the arm where a motion into the band was refused, roller stopped, until the turret leaves
+   * its arc.
+   *
+   * <p><b>Outputs:</b> commands the pivot to the angle latched on entry and stops the roller.
+   */
+  private void waitingForTurret() {
+    // Added for M10b step 5. The latched angle is clear of the band by construction -- a motion is
+    // only refused while the arm is outside it -- so the goal this publishes keeps
+    // isInTurretConflictBand() false, and the turret stays free to finish what it is doing. The
+    // roller stops because a refused stow is not a request to collect.
+    pivotGoalRad = waitHoldRad;
+    io.setPivotPosition(pivotGoalRad);
+    io.setRollerVelocity(0.0);
   }
 
   /**
