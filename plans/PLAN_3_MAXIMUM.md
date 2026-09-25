@@ -5440,7 +5440,8 @@ public class AutoRoutines {
   }
 
   public Command waitUntilIntakeRetaining() {
-    // TODO: Commands.waitUntil(intake::isRetainingPieces).withTimeout(tunable, ~1 s). EVERY routine
+    // TODO: Commands.waitUntil(intake::isRetainingPieces)
+    //   .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()). EVERY routine
     // starts with this before its first path: the robot starts with the intake STOWED (a rule),
     // Superstructure.onEnable() deploys it at autonomousInit, and pieces fall out of a stowed
     // intake if the robot moves first. The timeout exists so a dead pivot costs a second, not
@@ -6573,6 +6574,10 @@ what a person can navigate, and 400 would be unusable.
         new LoggedTunableNumber("Auto/ScoreTimeout", 8.0);
     public static final LoggedTunableNumber kIntakeSettleSec =
         new LoggedTunableNumber("Auto/IntakeSettle", 0.25);
+
+    /** Bound on every routine's opening wait for the intake to leave stow (section 2.4). */
+    public static final LoggedTunableNumber kIntakeRetainTimeoutSec =
+        new LoggedTunableNumber("Auto/IntakeRetainTimeout", 1.0);
     public static final LoggedTunableNumber kStartPoseWarnMeters =
         new LoggedTunableNumber("Auto/StartPoseWarn", 0.15);
     public static final LoggedTunableNumber kPathfindMaxVel =
