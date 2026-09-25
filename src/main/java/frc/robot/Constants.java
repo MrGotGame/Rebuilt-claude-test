@@ -1292,8 +1292,10 @@ public final class Constants {
      * turret, the fusion is GATED: observations are only accepted when the intake was in its
      * intaking position at the moment of capture, which is the one pose this constant describes.
      * See {@code Vision}'s INTAKE_NOT_DEPLOYED rejection. The cost is that the camera contributes
-     * nothing while stowed, ejecting or in transit; the benefit is that what it does contribute is
-     * correct rather than approximately correct.
+     * nothing while stowed, ejecting, rocking to feed the hopper, or in transit; the benefit is
+     * that what it does contribute is correct rather than approximately correct. Since M10b the
+     * intake RESTS at this pose (DEPLOYED) for most of a match, so the gate admits that state as
+     * well as INTAKING -- see {@code Intake.isAtIntakingAngle()}.
      *
      * <p>MEASURED from CAD in that pose, which is how the assembly happened to be saved. The camera
      * points straight backwards and level, laterally centred to within 0.3 mm -- a good pose for

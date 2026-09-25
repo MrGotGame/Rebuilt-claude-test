@@ -122,7 +122,7 @@ public class RobotContainer {
                 new QuestNavIOReal(),
                 turret::getPositionRad,
                 turret::getVelocityRadPerSec,
-                intake::isIntaking);
+                intake::isAtIntakingAngle);
         break;
 
       case SIM:
@@ -149,7 +149,7 @@ public class RobotContainer {
                 new QuestNavIOSim(() -> RobotState.getInstance().getEstimatedPose()),
                 turret::getPositionRad,
                 turret::getVelocityRadPerSec,
-                intake::isIntaking);
+                intake::isAtIntakingAngle);
         break;
 
       default:
@@ -175,7 +175,7 @@ public class RobotContainer {
                 new QuestNavIO() {},
                 turret::getPositionRad,
                 turret::getVelocityRadPerSec,
-                intake::isIntaking);
+                intake::isAtIntakingAngle);
         break;
     }
 

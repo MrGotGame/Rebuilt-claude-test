@@ -16,6 +16,8 @@ import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.Constants;
 import frc.robot.RobotState;
 import frc.robot.subsystems.drive.Drive;
+import frc.robot.subsystems.intake.IdealPivotIO;
+import frc.robot.subsystems.intake.Intake;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -168,8 +170,8 @@ public class IntakeCameraGateTest {
    * <b>The gate judges the frame's own moment, not the present one.</b>
    *
    * <p>The case this rule exists for, and the one a live check would fail. The intake arrives at
-   * its setpoint and {@code isIntaking()} goes true, but the frames still in flight were exposed
-   * during the swing, somewhere along a 0.4 m arc, and would be fused against the settled
+   * its setpoint and {@code isAtIntakingAngle()} goes true, but the frames still in flight were
+   * exposed during the swing, somewhere along a 0.4 m arc, and would be fused against the settled
    * transform. Reading the supplier directly instead of the history would accept every one of them,
    * and they would look entirely ordinary doing it.
    */
@@ -273,6 +275,97 @@ public class IntakeCameraGateTest {
         "a frame captured before the intake history began was fused anyway, which means absent"
             + " history is being read as 'in position' rather than as 'cannot know'");
     assertTrue(rejections() > 0, "the frame was dropped, but not attributed to the intake gate");
+  }
+
+  /**
+   * A real intake RESTING deployed feeds the camera; the same intake rocking to feed the hopper
+   * does not; and it resumes once the intake rests again.
+   *
+   * <p>M10b step 4. Every other case here drives the gate with a bare boolean, which tests Vision's
+   * half of the gate but not which intake states open it. This wires a real {@link Intake} in
+   * through {@link Intake#isAtIntakingAngle()}, exactly as {@code RobotContainer} does, over the
+   * ideal pivot and the realistic test geometry. The resting phase is the one that matters most:
+   * down-stays-down means the intake spends most of a match in DEPLOYED, and until this step the
+   * gate read {@code isIntaking()}, so all of that time would have been silently lost to the
+   * camera.
+   */
+  @Test
+  void aRealIntakeRestingDeployedIsFusedButNotWhileRocking() {
+    IdealPivotIO pivot = new IdealPivotIO();
+    Intake intake = new Intake(pivot, IdealPivotIO.GEOMETRY);
+    intake.setDeployGuard(() -> true);
+
+    CommandScheduler.getInstance().unregisterSubsystem(vision);
+    VisionIOSim camera = new VisionIOSim(Constants.Vision.kIntakeCameraName, () -> TRUTH);
+    camera.setNoise(0.0);
+    camera.setSolveQuality(3, 2.0, 0.0);
+    vision =
+        new Vision(
+            new VisionIO() {},
+            camera,
+            new QuestNavIO() {},
+            () -> 0.0,
+            () -> 0.0,
+            intake::isAtIntakingAngle,
+            NONE,
+            NONE,
+            NONE);
+
+    try {
+      // Home (the robot starts stowed), then come to rest deployed, then let the frames exposed on
+      // the way down drain out of the latency window before counting anything.
+      stepWith(intake, 40);
+      intake.setWantedState(Intake.WantedState.DEPLOY_ONLY);
+      stepWith(intake, 10);
+      assertEquals(Intake.SystemState.DEPLOYED, intake.getSystemState());
+
+      int acceptedAtRest = vision.getAcceptedCount();
+      stepWith(intake, 10);
+      assertTrue(
+          vision.getAcceptedCount() > acceptedAtRest,
+          "the camera contributed nothing while the intake rested deployed -- the gate is still"
+              + " reading isIntaking(), and this is most of a match");
+
+      // Rocking: flush the resting frames still in flight, then nothing may be fused.
+      intake.setWantedState(Intake.WantedState.FEED_ASSIST);
+      stepWith(intake, 10);
+      int acceptedWhileRocking = vision.getAcceptedCount();
+      int rejectedWhileRocking = rejections();
+      stepWith(intake, 20);
+      assertEquals(
+          acceptedWhileRocking,
+          vision.getAcceptedCount(),
+          "a frame was fused while the intake rocked, transformed by a mounting that described"
+              + " where the camera was only half of the time");
+      assertTrue(rejections() > rejectedWhileRocking, "the gate never fired during the rock");
+
+      // At rest again, the camera comes back -- a gate that never reopens looks identical to a
+      // working one by its rejection counter.
+      intake.setWantedState(Intake.WantedState.DEPLOY_ONLY);
+      stepWith(intake, 10);
+      int acceptedBackAtRest = vision.getAcceptedCount();
+      stepWith(intake, 10);
+      assertTrue(
+          vision.getAcceptedCount() > acceptedBackAtRest,
+          "the camera never resumed once the intake came back to rest");
+    } finally {
+      CommandScheduler.getInstance().unregisterSubsystem(intake);
+    }
+  }
+
+  /**
+   * Steps a real intake and the vision subsystem together, intake first, as they are registered on
+   * the robot.
+   *
+   * @param intake the intake to step alongside vision
+   * @param loops how many 20 ms iterations to run
+   *     <p><b>Outputs:</b> runs both periodics and the odometry feed that many times.
+   */
+  private void stepWith(Intake intake, int loops) {
+    for (int i = 0; i < loops; i++) {
+      intake.periodic();
+      step(1);
+    }
   }
 
   /**

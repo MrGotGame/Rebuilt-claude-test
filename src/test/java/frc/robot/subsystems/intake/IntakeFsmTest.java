@@ -75,29 +75,13 @@ public class IntakeFsmTest {
 
   // ---------------------------------------------------------------- M10b: the hopper intake ----
 
-  /** Stow angle of the test geometry, radians. */
-  private static final double STOWED = -1.2;
-
-  /** Deploy angle of the test geometry, radians. */
-  private static final double DEPLOYED = 0.3;
-
-  /** Feed-assist angle of the test geometry: between the two, clear of the band. */
-  private static final double FEED_ASSIST = -0.2;
-
-  /** Eject angle of the test geometry, radians. */
-  private static final double EJECT = 0.5;
-
-  /** Band width of the test geometry: the plan's 15 degrees nearest stow. */
-  private static final double BAND = Math.toRadians(15.0);
-
-  /**
-   * A real, non-degenerate geometry. Every angle constant is still a 0.0 placeholder, which puts
-   * stow, deploy and feed-assist at one point: the band has no direction and the rock no amplitude,
-   * and every assertion about either would pass for free. The M8 lesson, again.
-   */
-  private static final Intake.PivotGeometry GEOMETRY =
-      new Intake.PivotGeometry(
-          () -> STOWED, () -> DEPLOYED, () -> EJECT, () -> FEED_ASSIST, () -> BAND);
+  // The test geometry lives with the ideal pivot in IdealPivotIO, shared with the vision gate
+  // tests; these aliases keep the cases below readable.
+  private static final double STOWED = IdealPivotIO.STOWED;
+  private static final double DEPLOYED = IdealPivotIO.DEPLOYED;
+  private static final double FEED_ASSIST = IdealPivotIO.FEED_ASSIST;
+  private static final double BAND = IdealPivotIO.BAND;
+  private static final Intake.PivotGeometry GEOMETRY = IdealPivotIO.GEOMETRY;
 
   /** The ideal pivot under {@link #intake} once {@link #rebuildIdeal()} has run. */
   private IdealPivotIO ideal;
@@ -123,92 +107,6 @@ public class IntakeFsmTest {
   }
 
   /**
-   * A pivot that goes exactly where it is told, and stalls when driven open loop.
-   *
-   * <p>The simulated arm is the right tool for homing and gravity, but with the placeholder gains
-   * it rings for seconds and never settles at a goal, so any case about WHICH state the machine
-   * reports once the arm arrives would be testing the gains. This reports the commanded angle on
-   * the next update, and the stall current homing looks for whenever it is driven open loop. It
-   * also records what it was last commanded, which is what the rocking cases assert on.
-   */
-  private static final class IdealPivotIO implements IntakeIO {
-    private double positionRad = 0.0;
-    private double goalRad = 0.0;
-    private boolean closedLoop = false;
-    private double openLoopVolts = 0.0;
-    double lastRollerRpm = 0.0;
-
-    /**
-     * Reports the pivot where it was last sent, stalled against a stop while driven open loop.
-     *
-     * @param inputs the struct to populate
-     */
-    @Override
-    public void updateInputs(IntakeIOInputs inputs) {
-      if (closedLoop) {
-        positionRad = goalRad;
-      }
-      inputs.pivotConnected = true;
-      inputs.rollerConnected = true;
-      inputs.absEncoderConnected = true;
-      inputs.pivotPositionRad = positionRad;
-      inputs.pivotVelocityRadPerSec = 0.0;
-      inputs.pivotStatorCurrentAmps = !closedLoop && openLoopVolts != 0.0 ? 40.0 : 0.0;
-    }
-
-    /**
-     * Records a closed-loop goal.
-     *
-     * @param positionRad the goal, in radians
-     */
-    @Override
-    public void setPivotPosition(double positionRad) {
-      closedLoop = true;
-      goalRad = positionRad;
-    }
-
-    /**
-     * Records an open-loop drive.
-     *
-     * @param volts the voltage
-     */
-    @Override
-    public void setPivotOpenLoop(double volts) {
-      closedLoop = false;
-      openLoopVolts = volts;
-    }
-
-    /**
-     * Records the roller speed.
-     *
-     * @param velocityRpm the speed, in RPM
-     */
-    @Override
-    public void setRollerVelocity(double velocityRpm) {
-      lastRollerRpm = velocityRpm;
-    }
-
-    /**
-     * Moves the sensor, as a real seed does.
-     *
-     * @param positionRad the seeded angle, in radians
-     */
-    @Override
-    public void seedPivotPosition(double positionRad) {
-      this.positionRad = positionRad;
-    }
-
-    /**
-     * The goal most recently commanded.
-     *
-     * @return the goal, in radians
-     */
-    double lastGoalRad() {
-      return goalRad;
-    }
-  }
-
-  /**
    * DEPLOY_ONLY arrives and STAYS in a real DEPLOYED state with the roller stopped.
    *
    * <p>Before M10b it resolved to DEPLOYING forever, a state that permanently claimed "in transit".
@@ -227,7 +125,8 @@ public class IntakeFsmTest {
     for (int i = 0; i < 50; i++) {
       step(1);
       assertEquals(Intake.SystemState.DEPLOYED, intake.getSystemState(), "left DEPLOYED at " + i);
-      assertEquals(0.0, ideal.lastRollerRpm, "a resting deployed intake must not spin its roller");
+      assertEquals(
+          0.0, ideal.lastRollerRpm(), "a resting deployed intake must not spin its roller");
     }
   }
 
@@ -282,7 +181,7 @@ public class IntakeFsmTest {
     for (int i = 0; i < loops; i++) {
       step(1);
       assertEquals(Intake.SystemState.FEED_ASSISTING, intake.getSystemState());
-      assertEquals(Constants.Intake.kFeedAssistRollerRpm.get(), ideal.lastRollerRpm);
+      assertEquals(Constants.Intake.kFeedAssistRollerRpm.get(), ideal.lastRollerRpm());
       double goal = ideal.lastGoalRad();
       assertTrue(
           goal == FEED_ASSIST || goal == DEPLOYED, "rocked to an angle outside its two ends");
@@ -346,7 +245,7 @@ public class IntakeFsmTest {
     // One loop: the stow goal is commanded, but the ideal pivot has not reported arriving yet.
     intake.setWantedState(Intake.WantedState.STOW);
     step(1);
-    assertNotEquals(STOWED, ideal.positionRad, "the arm should not have arrived yet");
+    assertNotEquals(STOWED, ideal.positionRad(), "the arm should not have arrived yet");
     assertTrue(
         intake.isInTurretConflictBand(),
         "a stow on its way into the band must block the turret before the arm arrives");
@@ -430,6 +329,65 @@ public class IntakeFsmTest {
         "with rocking disallowed, it must hold the raised angle");
   }
 
+  /**
+   * The intake-camera gate admits exactly the two states that hold the deploy angle -- INTAKING and
+   * the resting DEPLOYED -- and nothing that merely passes near it.
+   *
+   * <p>Asserted as an invariant over a tour of every state the ideal pivot can reach, on the
+   * pattern of {@code isIntakingIsTrueForExactlyTheIntakingState}. The tour must also be shown to
+   * have visited each trap, or the invariant was never put under pressure. The subtlest is the
+   * rock: FEED_ASSISTING sits exactly at the deploy angle for half of every period, so a gate that
+   * tested position instead of state would admit it there -- with the arm about to swing away
+   * inside a camera frame's latency.
+   */
+  @Test
+  void atIntakingAngleIsTrueForExactlyTheRestingAndIntakingStates() {
+    rebuildIdeal();
+    intake.setDeployGuard(() -> true);
+
+    Intake.WantedState[] tour = {
+      Intake.WantedState.DEPLOY_ONLY,
+      Intake.WantedState.DEPLOY_AND_INTAKE,
+      Intake.WantedState.FEED_ASSIST,
+      Intake.WantedState.EJECT,
+      Intake.WantedState.DEPLOY_ONLY,
+      Intake.WantedState.STOW,
+      Intake.WantedState.IDLE,
+    };
+    java.util.EnumSet<Intake.SystemState> seen = java.util.EnumSet.noneOf(Intake.SystemState.class);
+    boolean sawRockAtTheDeployAngle = false;
+    for (Intake.WantedState wanted : tour) {
+      intake.setWantedState(wanted);
+      for (int i = 0; i < 40; i++) {
+        step(1);
+        Intake.SystemState state = intake.getSystemState();
+        seen.add(state);
+        sawRockAtTheDeployAngle |=
+            state == Intake.SystemState.FEED_ASSISTING && ideal.positionRad() == DEPLOYED;
+        assertEquals(
+            state == Intake.SystemState.INTAKING || state == Intake.SystemState.DEPLOYED,
+            intake.isAtIntakingAngle(),
+            "the camera gate disagreed with the state machine while in " + state);
+      }
+    }
+
+    for (Intake.SystemState trap :
+        new Intake.SystemState[] {
+          Intake.SystemState.DEPLOYING,
+          Intake.SystemState.EJECTING,
+          Intake.SystemState.FEED_ASSISTING,
+          Intake.SystemState.STOWING,
+          Intake.SystemState.STOWED,
+          Intake.SystemState.DEPLOYED,
+          Intake.SystemState.INTAKING
+        }) {
+      assertTrue(seen.contains(trap), "the tour never visited " + trap + ", so it went untested");
+    }
+    assertTrue(
+        sawRockAtTheDeployAngle,
+        "the rock never reached the deploy angle, so the position trap went untested");
+  }
+
   /** The machine boots into HOMING and homes itself without being asked. */
   @Test
   void bootsIntoHomingAndReachesStowed() {
@@ -509,8 +467,10 @@ public class IntakeFsmTest {
    * {@code isIntaking()} is true for exactly one state, and it is not any of the deployed-looking
    * ones.
    *
-   * <p>Vision fuses the intake camera only while this is true, because the camera rides the pivot
-   * about 0.4 m from its axis and {@code kRobotToIntakeCamera} describes exactly one pose. Two
+   * <p>Until M10b step 4, Vision fused the intake camera only while this was true; it now reads
+   * {@code isAtIntakingAngle()}, which also admits the resting DEPLOYED state and has its own
+   * invariant case. This one still holds, and its reasoning carries straight over: the camera rides
+   * the pivot about 0.4 m from its axis and {@code kRobotToIntakeCamera} describes one pose. Two
    * states are easy to admit by mistake and both would be wrong: DEPLOYING has the arm mid-travel,
    * somewhere along that arc; EJECTING has it deployed but to {@code kEjectAngleRad}, a DIFFERENT
    * angle, which is the more dangerous of the two because the intake really is "out" and the error

@@ -216,7 +216,7 @@ public class SuperstructureFsmTest {
             new QuestNavIO() {},
             turret::getPositionRad,
             turret::getVelocityRadPerSec,
-            intake::isIntaking);
+            intake::isAtIntakingAngle);
 
     superstructure =
         new Superstructure(drive, intake, floorRoller, indexer, turret, shooter, vision, solver);

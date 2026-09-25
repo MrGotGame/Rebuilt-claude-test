@@ -33,7 +33,8 @@ block targets M10: the superstructure's guards, its entry and exit actions, both
 of the intake/turret interlock, the readiness gate, FaultReporter's severity handling,
 and the two latent bugs M10 found in already-merged code. The second block is M10b's,
 growing one retrofit step at a time: step 2 added the flywheel shot detector, step 3
-the intake's resting and feed-assist states and its two geometric predicates. Several
+the intake's resting and feed-assist states and its two geometric predicates, step 4
+the intake-camera gate. Several
 M10 anchors name code that later M10b steps replace (the piece guard, the isStowed turret
 guard), and those entries must be rewritten against the new code in the step that
 changes it, not deleted. Adding a milestone means adding its
@@ -208,6 +209,24 @@ MUTATIONS = [
     ("retaining pieces trusts an unhomed encoder", IN,
      "    return isHomed\n        && withinRetainingRange(",
      "    return withinRetainingRange("),
+
+    # ---- M10b step 4: the intake-camera gate. Each of its ways to be wrong: narrowed back to the
+    # M10 gate (the silent failure -- the camera switched off while resting), widened to the rock or
+    # to transit, and turned into a position test, which the rock's pass through the deploy angle
+    # exists to catch. The RobotContainer wiring itself is NOT mutated: nothing constructs
+    # RobotContainer in a test, so a mutation there could not be killed and would only be noise.
+    ("camera gate narrowed back to INTAKING only", IN,
+     "    return systemState == SystemState.INTAKING || systemState == SystemState.DEPLOYED;",
+     "    return systemState == SystemState.INTAKING;"),
+    ("camera gate admits the feed-assist rock", IN,
+     "    return systemState == SystemState.INTAKING || systemState == SystemState.DEPLOYED;",
+     "    return systemState == SystemState.INTAKING\n        || systemState == SystemState.DEPLOYED\n        || systemState == SystemState.FEED_ASSISTING;"),
+    ("camera gate admits transit", IN,
+     "    return systemState == SystemState.INTAKING || systemState == SystemState.DEPLOYED;",
+     "    return systemState == SystemState.INTAKING\n        || systemState == SystemState.DEPLOYED\n        || systemState == SystemState.DEPLOYING;"),
+    ("camera gate tests position instead of state", IN,
+     "    return systemState == SystemState.INTAKING || systemState == SystemState.DEPLOYED;",
+     "    return atAngle(geometry.deployedRad().getAsDouble());"),
 ]
 
 

@@ -914,25 +914,52 @@ public class Intake extends SubsystemBase {
   }
 
   /**
-   * Whether the intake is settled at its intaking position.
+   * Whether the intake is at its intaking position with the roller running.
    *
-   * <p>Consumed by {@code Vision}, which fuses the intake camera's observations only while this is
-   * true. That camera rides the pivot about 0.4 m from its axis, so {@code kRobotToIntakeCamera}
-   * describes exactly one pose -- this one -- and is wrong everywhere else.
+   * <p>Until M10b this was the intake-camera gate. It no longer is: the intake now also RESTS at
+   * that same angle, in {@link SystemState#DEPLOYED}, and a gate reading only this would switch the
+   * camera off for most of a match with nothing failing. {@code Vision} reads {@link
+   * #isAtIntakingAngle()} instead. This stays as the logged answer to "is the roller collecting".
    *
    * @return true when the state machine is in {@link SystemState#INTAKING}
    */
   @AutoLogOutput(key = "Intake/IsIntaking")
   public boolean isIntaking() {
-    // The STATE, not a position test, for the same reason isStowed is: INTAKING is only reachable
-    // through atGoal(), which requires isHomed, so a true here cannot come from an untrusted
-    // encoder reading. DEPLOYING is deliberately excluded -- the pivot is still in transit and the
-    // camera is somewhere along a 0.4 m arc.
-    //
-    // EJECTING is excluded too, and that one is easy to miss: the intake is also deployed in that
-    // state, but to kEjectAngleRad, a DIFFERENT pivot angle. Accepting it would fuse camera poses
-    // computed with the wrong transform -- plausible, on the field, and wrong.
     return systemState == SystemState.INTAKING;
+  }
+
+  /**
+   * Whether the pivot has arrived at, and is holding, the one angle the intake camera's mounting
+   * describes.
+   *
+   * <p>Consumed by {@code Vision}, which fuses the intake camera's observations only while this is
+   * true (M10b step 4, plan section 2.4). That camera rides the pivot about 0.4 m from its axis, so
+   * {@code kRobotToIntakeCamera} describes exactly one pose -- the deploy angle -- and is wrong
+   * everywhere else.
+   *
+   * <p>Two states hold that angle, and both are admitted: {@link SystemState#INTAKING} and {@link
+   * SystemState#DEPLOYED}. The second is why this exists. Down-stays-down means the intake rests
+   * DEPLOYED for most of a match, and a gate that admitted only INTAKING would switch the camera
+   * off for all of it, silently -- the camera simply contributes nothing, and nothing reports it.
+   *
+   * @return true when the state machine is in INTAKING or DEPLOYED
+   */
+  @AutoLogOutput(key = "Intake/AtIntakingAngle")
+  public boolean isAtIntakingAngle() {
+    // The STATE, not a position test, for the same reason isStowed is: both states are reachable
+    // only through an arrival check that requires isHomed, so a true here cannot come from an
+    // untrusted encoder reading -- and since step 3, that arrival is judged against the deploy
+    // angle itself, not against whatever the previous loop commanded.
+    //
+    // Everything else that puts the arm near the deploy angle is excluded on purpose:
+    //  - DEPLOYING: the pivot is in transit, and the camera is somewhere along a 0.4 m arc.
+    //  - EJECTING: deployed, but to kEjectAngleRad, a DIFFERENT pivot angle. Accepting it would
+    // fuse
+    //    poses computed with the wrong transform -- plausible, on the field, and wrong.
+    //  - FEED_ASSISTING: the rock passes through the deploy angle every period, but it is moving
+    //    through it, and half the time it is up at the feed-assist angle. It is EJECTING's trap
+    //    again, arriving from the other direction: out, near the right angle, and wrong.
+    return systemState == SystemState.INTAKING || systemState == SystemState.DEPLOYED;
   }
 
   /**
