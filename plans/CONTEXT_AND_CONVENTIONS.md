@@ -200,7 +200,7 @@ hardware.
 | `feature-shooting-parameters` | M3 | Branched off `claude-test`, independent. `ShotParameters`, `ShootingSolver`, `TurretUnwrapper`, `GeomUtil`. 24 tests pass, mutation score 13/13. |
 | `feature-flywheel` | M4 | Branched off `claude-test`, independent. `ShooterIOTalonFX`, `ShooterIOSim`, `Shooter` FSM, plus a NetworkTables bench harness. Builds. **Simulation checkpoint complete, negative cases included**; hardware outstanding. 7 FSM tests, mutation score 4/4. Carries `PhoenixUtil`, `PowerBudget`, `LoggedTunableNumber` and `LoggedTunableGains` byte-identical from `feature-drive`. |
 | `feature-floor-roller` | M5 | Branched off `claude-test`. Simplest mechanism; FSM has no guards and no `FAULTED` state deliberately, because it has no limits, no homing and no goal it can fail to reach. 5 tests, mutation 3/3. |
-| `feature-indexer` | M5 | Branched off `claude-test`. Piece detection, shot counting, and `IndexerIOSim.setSimulatedPiecePresent` so those paths are reachable with no hardware. 6 tests, mutation 3/3. |
+| `feature-indexer` | M5 | Branched off `claude-test`. Piece detection, shot counting, and `IndexerIOSim.setSimulatedPiecePresent` so those paths are reachable with no hardware. 6 tests, mutation 3/3. **Implements the single-piece model the plan has since replaced (§2.4); M10b supersedes it on a new branch.** |
 | `feature-intake` | M5 | Branched off `claude-test`. Pivot plus roller, homing, and the deploy guard. 8 tests; the suite found three real bugs, all fixed. |
 | `feature-turret` | M5 | Branched off **`feature-drive`**, because `Turret.periodic()` needs `RobotState`. Carries `TurretUnwrapper` byte-identical from `feature-shooting-parameters` — do not edit it there. 4 FSM tests plus the 12 inherited unwrapper cases; found and fixed the dead-motor homing bug. |
 | `integration-m1_m9` | — | Everything through M9 combined, and the base M10 was cut from. A merge target only; never commit onto it. |
@@ -250,23 +250,30 @@ whole vision and shooting stack rests on that last one.
    nothing to commit — acting on the old instruction would mean regenerating it again from Tuner X,
    which is a decision rather than a chore, and whoever reverted it may have had a reason worth
    knowing first.
-3. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
+3. **Review the hopper replan, then build M10b.** Plan §2.4 replaces the single-piece model that
+   `feature-indexer` and `feature-superstructure` implement: no piece sensors, the intake rests
+   deployed, and intake and scoring can run at once. Its review questions were answered on
+   2026-09-25 (50-piece hopper, stowed intake conflicts with the turret, rocking feed-assist,
+   8-piece preload starting stowed, floor roller leads the indexer). What is left for the robot is
+   the exact conflict-band edge from CAD and the rocking period. M10b is a new feature branch cut
+   from `feature-superstructure`; the old branches stay as the record.
+4. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
    layer, FSM shape and logging should be read and agreed before anything is built on top.
-4. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done:
+5. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done:
    - M2's pose gate — drive a 3 m square, confirm `getPoseAt(now - 0.1)` lags correctly. **Blocks
      M7, M8, M10 and M12.**
    - Per mechanism: closed-loop motion on the robot, and every device raising an alert when
      unplugged.
    - **Sign conventions that only hardware can settle:** `kPivotKg` and the homing direction on the
-     intake, the velocity-feedforward sign on the turret, beam-break polarity on the indexer, and
+     intake, the velocity-feedforward sign on the turret, and
      `kFollowerOpposesLeader` on the flywheel — that last one is still a guess, and wrong means the
      pair fights itself at 80 A per motor.
-5. **M6 characterization.** Several placeholder gains are visibly wrong in simulation: the intake
+6. **M6 characterization.** Several placeholder gains are visibly wrong in simulation: the intake
    pivot rings for about eight seconds before settling because `kPivotKg` and `kPivotKd` are both
    0.0, and the flywheel's `kV` under-predicts so `kP` is compensating for a feedforward error
    rather than doing its own job. Measure before tuning either.
-6. **The constants rename** (section 2), ideally as its own mechanical branch.
-7. **Integration branches**, merging `feature-drive` → `claude-test` first, then
+7. **The constants rename** (section 2), ideally as its own mechanical branch.
+8. **Integration branches**, merging `feature-drive` → `claude-test` first, then
    `feature-robot-state` (fast-forwards, being stacked on drive), then
    `feature-shooting-parameters`, then the M5 mechanisms, with `feature-flywheel` and
    `feature-turret` last — they carry the most byte-identical copied files, which collapse to no
