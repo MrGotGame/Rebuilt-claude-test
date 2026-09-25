@@ -26,13 +26,17 @@ public class ShooterFsmTest {
 
   private Shooter shooter;
 
+  /** The simulated IO under {@link #shooter}, kept so cases can inject game pieces into it. */
+  private ShooterIOSim sim;
+
   /** Builds a shooter over simulated IO with the HAL initialised and the clock paused. */
   @BeforeEach
   void setUp() {
     assertTrue(HAL.initialize(500, 0), "HAL failed to initialise");
     Constants.disableHal = true;
     SimHooks.pauseTiming();
-    shooter = new Shooter(new ShooterIOSim());
+    sim = new ShooterIOSim();
+    shooter = new Shooter(sim);
   }
 
   /** Releases the HAL and unregisters the subsystem so cases cannot leak into each other. */
@@ -67,6 +71,23 @@ public class ShooterFsmTest {
   /** Loops needed to outrun the spin-up timeout, with margin. */
   private int loopsPastSpinUpTimeout() {
     return (int) (Constants.Shooter.kSpinUpTimeoutSec.get() / LOOP_SEC) + 30;
+  }
+
+  /**
+   * Spins the wheel up to the bench speed and lets it settle, asserting that it got there.
+   *
+   * <p><b>Outputs:</b> leaves the shooter AT_SPEED, with no shot counted on the way. Every
+   * shot-detection case starts here, so a detector that counts spin-ups fails at this line rather
+   * than further down, where the cause would be less obvious.
+   */
+  private void spinUpAndSettle() {
+    shooter.setGoal(Constants.Shooter.kBenchTestRpm.get());
+    step(300);
+    assertEquals(
+        Shooter.SystemState.AT_SPEED,
+        shooter.getSystemState(),
+        "never converged; measured " + shooter.getVelocityRpm());
+    assertEquals(0, shooter.getShotCount(), "the spin-up itself was counted as a shot");
   }
 
   /** IDLE holds the idle speed, but does not claim to be at speed with no shot commanded. */
@@ -209,6 +230,169 @@ public class ShooterFsmTest {
     shooter.setWantedState(Shooter.WantedState.IDLE);
     step(5);
     assertEquals(Shooter.SystemState.IDLE, shooter.getSystemState(), "IDLE must clear the fault");
+  }
+
+  /**
+   * A burst of pieces counts one shot per piece.
+   *
+   * <p>M10b moved shot counting from the indexer to the flywheel (plan section 2.4) precisely
+   * because the old counter watched for the indexer emptying, and a hopper feeding back to back
+   * never empties between pieces, so a whole burst would have counted as one. Eight pieces is the
+   * preload, fired at ten per second, a cadence at which the wheel is still recovering from each
+   * piece when the next arrives.
+   */
+  @Test
+  void countsOneShotPerPieceInABurst() {
+    spinUpAndSettle();
+
+    for (int piece = 0; piece < 8; piece++) {
+      sim.injectShot();
+      step(5);
+    }
+    step(50);
+
+    assertEquals(8, shooter.getShotCount(), "a burst of 8 pieces must count 8 shots");
+  }
+
+  /**
+   * Nothing that slows or speeds the wheel on purpose counts as a shot.
+   *
+   * <p>Each phase targets one of the detector's conditions: the spin-up is what the arming band
+   * rejects, a goal cut inside the arming band is what "ends below the goal" rejects, a goal cut
+   * outside it is the arming band again from above, and coasting is the "holding a goal" condition.
+   * The count is checked after every phase so a failure names the phase that caused it.
+   */
+  @Test
+  void deliberateSpeedChangesAreNotShots() {
+    spinUpAndSettle();
+    double bench = Constants.Shooter.kBenchTestRpm.get();
+    double armBand = Constants.Shooter.kShotArmToleranceRpm.get();
+
+    shooter.setGoal(bench - 0.75 * armBand);
+    step(150);
+    assertEquals(0, shooter.getShotCount(), "a small goal cut, inside the arming band, counted");
+
+    shooter.setGoal(bench);
+    step(150);
+    assertEquals(0, shooter.getShotCount(), "raising the goal back counted");
+
+    shooter.setGoal(bench - 3.0 * armBand);
+    step(150);
+    assertEquals(0, shooter.getShotCount(), "a large goal cut counted");
+
+    // Dropping to IDLE is the everyday case: every scoring state ends this way. The goal still
+    // holds the last shooting speed, so the wheel starts inside the arming band, and the idle hold
+    // then brakes it hard toward kIdleRpm -- a sharp drop, ending below the goal. Only the
+    // "holding a goal" condition rejects it.
+    shooter.setGoal(bench);
+    step(150);
+    shooter.setWantedState(Shooter.WantedState.IDLE);
+    step(150);
+    assertEquals(0, shooter.getShotCount(), "dropping to idle counted");
+
+    shooter.setGoal(bench);
+    step(150);
+    shooter.setWantedState(Shooter.WantedState.COAST);
+    step(150);
+    assertEquals(0, shooter.getShotCount(), "coasting down counted");
+  }
+
+  /**
+   * A dip smaller than the threshold is not a piece, and the harness can tell the difference.
+   *
+   * <p>The second half is what keeps the first half honest. Without it, a detector that never
+   * counts anything would pass the "sub-threshold dip does not count" assertion for free.
+   */
+  @Test
+  void subThresholdDipIsNotAShot() {
+    spinUpAndSettle();
+
+    sim.injectShot(0.5 * Constants.Shooter.kShotDipRpm.get());
+    step(50);
+    assertEquals(0, shooter.getShotCount(), "a dip half the threshold was counted");
+
+    sim.injectShot();
+    step(50);
+    assertEquals(1, shooter.getShotCount(), "a full-size dip was not counted");
+  }
+
+  /**
+   * One piece's dip, spread over consecutive loops, counts once; the next piece counts again.
+   *
+   * <p>The refractory window is the only thing between a dip that spans two 20 ms loops and a
+   * double count, so this case removes it by construction: the second drop lands one loop after the
+   * first, inside {@code kShotRefractorySec}, and is large enough to count on its own.
+   */
+  @Test
+  void refractoryWindowCountsOneDipOnce() {
+    spinUpAndSettle();
+
+    sim.injectShot();
+    step(1);
+    sim.injectShot();
+    step(1);
+    assertEquals(1, shooter.getShotCount(), "one dip across two loops counted more than once");
+
+    step(10);
+    sim.injectShot();
+    step(10);
+    assertEquals(2, shooter.getShotCount(), "a later, separate piece was not counted");
+  }
+
+  /**
+   * Time since the last shot is infinite before any shot, tracks the clock after one, and a reset
+   * forgets both the time and the count.
+   *
+   * <p>Infinity rather than zero or the timer's raw value matters to the one live consumer: the
+   * superstructure's "probably empty" belief reads a long time since the last shot as evidence of
+   * an empty hopper, and a timer that had silently been running since boot would be exactly that
+   * evidence, invented.
+   */
+  @Test
+  void secondsSinceLastShotTracksTheClockAndResets() {
+    assertEquals(Double.POSITIVE_INFINITY, shooter.getSecondsSinceLastShot(), "before any shot");
+
+    spinUpAndSettle();
+    sim.injectShot();
+    step(1);
+    assertEquals(1, shooter.getShotCount());
+    step(10);
+    // Eleven, not ten: the shot was stamped inside step(1)'s periodic, before that loop's clock
+    // step, so the clock has advanced once in step(1) and ten more times since.
+    assertEquals(
+        11 * LOOP_SEC, shooter.getSecondsSinceLastShot(), 0.5 * LOOP_SEC, "clock since the shot");
+
+    shooter.resetShotCount();
+    assertEquals(0, shooter.getShotCount(), "reset must zero the count");
+    assertEquals(
+        Double.POSITIVE_INFINITY,
+        shooter.getSecondsSinceLastShot(),
+        "reset must forget the last shot, not report the time since it");
+  }
+
+  /**
+   * The burst band accepts a recovering wheel that the normal band rejects.
+   *
+   * <p>This is the property the superstructure's burst latch depends on. After one piece knocks the
+   * wheel down, the tight band says "not ready" and would stop the indexer; the burst band says
+   * "ready" and keeps the stream going. If both answered the same, the overload would be
+   * decoration.
+   */
+  @Test
+  void burstToleranceAcceptsARecoveringWheel() {
+    spinUpAndSettle();
+    double horizon = Constants.getLoopPeriodSec() * 2.0;
+    assertTrue(shooter.willBeAtSpeedIn(horizon), "a settled wheel must be ready");
+
+    sim.injectShot(
+        0.5 * (Constants.Shooter.kToleranceRpm.get() + Constants.Shooter.kBurstToleranceRpm.get()));
+    step(1);
+
+    assertFalse(
+        shooter.willBeAtSpeedIn(horizon), "the normal band accepted a wheel still recovering");
+    assertTrue(
+        shooter.willBeAtSpeedIn(horizon, Constants.Shooter.kBurstToleranceRpm.get()),
+        "the burst band rejected a wheel recovering within it");
   }
 
   /** setGoal clamps into the configured maximum rather than passing an absurd speed through. */

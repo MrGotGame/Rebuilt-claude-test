@@ -1016,6 +1016,19 @@ public final class Constants {
         new LoggedTunableNumber("Shooter/ShotRefractory", 0.04);
 
     /**
+     * How far past {@link #kShotDipRpm} a simulated piece knocks the wheel, dimensionless. Added
+     * for M10b.
+     *
+     * <p>{@code ShooterIOSim.injectShot()} removes {@code kShotDipRpm * kSimShotDipMargin} RPM in a
+     * single step. Expressed as a multiple rather than as absolute RPM, for the same reason the
+     * single-piece indexer's {@code kSimPieceDetectionMargin} was: retuning the detector on the
+     * robot must not silently stop the simulated piece from being detected, which would present as
+     * "the sim stopped counting shots" long after the change that caused it. Below 1.0 the injected
+     * piece would be invisible to the detector by construction.
+     */
+    public static final double kSimShotDipMargin = 2.0;
+
+    /**
      * Speed commanded by the tuning-mode bench harness in {@code RobotContainer}.
      *
      * <p>This exists so the M4 checkpoint can be run end to end from AdvantageScope with no code

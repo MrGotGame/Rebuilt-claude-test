@@ -28,10 +28,14 @@ trusted, because each has cost this project real time:
     before concluding the tests are at fault. One M9 "survivor" was a defective mutation
     aimed at dead code, and M10 has one genuinely equivalent mutant, recorded below.
 
-THE MUTATION LIST IS PER MILESTONE AND SHOULD BE EXTENDED, NOT REPLACED. These target
-M10: the superstructure's guards, its entry and exit actions, both halves of the
-intake/turret interlock, the readiness gate, FaultReporter's severity handling, and the
-two latent bugs M10 found in already-merged code. Adding a milestone means adding its
+THE MUTATION LIST IS PER MILESTONE AND SHOULD BE EXTENDED, NOT REPLACED. The first
+block targets M10: the superstructure's guards, its entry and exit actions, both halves
+of the intake/turret interlock, the readiness gate, FaultReporter's severity handling,
+and the two latent bugs M10 found in already-merged code. The second block is M10b's,
+growing one retrofit step at a time; step 2 added the flywheel shot detector. Several
+M10 anchors name code that later M10b steps replace (the piece guard, the isStowed turret
+guard), and those entries must be rewritten against the new code in the step that
+changes it, not deleted. Adding a milestone means adding its
 defects to the list and re-running the whole thing, so an old mutation cannot quietly
 stop being caught.
 
@@ -51,6 +55,7 @@ SS = "src/main/java/frc/robot/subsystems/superstructure/Superstructure.java"
 TU = "src/main/java/frc/robot/shooting/TurretUnwrapper.java"
 FR = "src/main/java/frc/robot/util/FaultReporter.java"
 IN = "src/main/java/frc/robot/subsystems/intake/Intake.java"
+SH = "src/main/java/frc/robot/subsystems/shooter/Shooter.java"
 
 MUTATIONS = [
     ("piece-and-fault guard deleted", SS,
@@ -133,6 +138,37 @@ MUTATIONS = [
     ("intake home-latch fix reverted", IN,
      "      homeRequested = false;\n\n      if (homingSucceeded) {",
      "      if (homingSucceeded) {"),
+
+    # ---- M10b step 2: the flywheel shot detector (plan section 2.4). Each of the detector's four
+    # conditions, its refractory window, its ordering against the acceleration update, and the
+    # accessors the superstructure's "probably empty" belief will be built on.
+    ("shot detector counts in any state", SH,
+     "    boolean holdingGoal =\n        (systemState == SystemState.SPINNING_UP || systemState == SystemState.AT_SPEED)\n            && goalRpm > 0.0;",
+     "    boolean holdingGoal = goalRpm > 0.0;"),
+    ("shot detector never needs arming", SH,
+     "    boolean armed =\n        Math.abs(lastVelocityRpm - goalRpm) < Constants.Shooter.kShotArmToleranceRpm.get();",
+     "    boolean armed = true;"),
+    ("shot detector ignores the dip threshold", SH,
+     "    boolean sharpDrop = dropRpm > Constants.Shooter.kShotDipRpm.get();",
+     "    boolean sharpDrop = dropRpm > 0.0;"),
+    ("shot detector drops the ends-below-goal check", SH,
+     "    boolean endedBelowGoal = inputs.velocityRpm < goalRpm;",
+     "    boolean endedBelowGoal = true;"),
+    ("shot detector refractory window deleted", SH,
+     "    boolean outsideRefractory =\n        !hasShotSinceReset || sinceLastShot.hasElapsed(Constants.Shooter.kShotRefractorySec.get());",
+     "    boolean outsideRefractory = true;"),
+    ("shot detection runs after the acceleration update", SH,
+     "    detectShot();\n    updateAccelerationEstimate();",
+     "    updateAccelerationEstimate();\n    detectShot();"),
+    ("time since last shot reads the raw timer before any shot", SH,
+     "    return hasShotSinceReset ? sinceLastShot.get() : Double.POSITIVE_INFINITY;",
+     "    return sinceLastShot.get();"),
+    ("reset keeps the last-shot time", SH,
+     "    shotCount = 0;\n    hasShotSinceReset = false;",
+     "    shotCount = 0;"),
+    ("burst overload ignores the tolerance it was given", SH,
+     "    return Math.abs(projectedRpm - goalRpm) < toleranceRpm && goalRpm > 0.0;",
+     "    return Math.abs(projectedRpm - goalRpm) < Constants.Shooter.kToleranceRpm.get()\n        && goalRpm > 0.0;"),
 ]
 
 

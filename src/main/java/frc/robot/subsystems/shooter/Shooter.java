@@ -25,6 +25,12 @@ import org.littletonrobotics.junction.Logger;
  *
  * <p>It also holds an idle RPM between shots. Spinning up from idle rather than from zero roughly
  * halves recovery time, which is worth about one extra shot per scoring cycle.
+ *
+ * <p>And it <b>counts shots</b>, which it took over from the indexer in M10b (plan section 2.4).
+ * The robot carries a hopper and has no piece sensor, so the flywheel is the most reliable piece
+ * detector it has: every piece that scores passes through the wheels and takes a sharp bite out of
+ * their speed. {@link #getSecondsSinceLastShot()} is the live signal the superstructure's "probably
+ * empty" belief is built on; {@link #getShotCount()} is the post-match diagnostic.
  */
 public class Shooter extends SubsystemBase {
   /** What the operator or superstructure has asked the flywheel to do. */
@@ -86,6 +92,19 @@ public class Shooter extends SubsystemBase {
   private double accelRpmPerSec = 0.0;
   private double characterizationVolts = 0.0;
 
+  /** Pieces fired since boot or the last {@link #resetShotCount()}. Fires, not scores. */
+  private int shotCount = 0;
+
+  /**
+   * Time since the last detected shot. Only meaningful once {@link #hasShotSinceReset} is true;
+   * before that there is no last shot, and {@link #getSecondsSinceLastShot()} says so with infinity
+   * rather than with however long the timer happens to have been running.
+   */
+  private final Timer sinceLastShot = new Timer();
+
+  /** Whether any shot has been detected since boot or the last {@link #resetShotCount()}. */
+  private boolean hasShotSinceReset = false;
+
   /**
    * Builds the shooter around a hardware implementation.
    *
@@ -121,6 +140,10 @@ public class Shooter extends SubsystemBase {
     io.updateInputs(inputs);
     Logger.processInputs("Shooter/Inputs", inputs);
 
+    // Shot detection reads lastVelocityRpm, the PREVIOUS loop's speed, so it must run before the
+    // acceleration update overwrites it. It also reads systemState and goalRpm as they stood last
+    // loop -- the state the wheel was in when the piece arrived, which is the one that matters.
+    detectShot();
     updateAccelerationEstimate();
 
     // Gains are pushed before the state machine runs, so a gain edited on the dashboard takes
@@ -192,6 +215,61 @@ public class Shooter extends SubsystemBase {
     leaderDisconnectedAlert.set(!inputs.leaderConnected);
     followerDisconnectedAlert.set(!inputs.followerConnected);
     spinUpFailedAlert.set(systemState == SystemState.FAULTED);
+  }
+
+  /**
+   * Counts a shot when the wheel's speed drops the way a piece passing through it makes it drop.
+   *
+   * <p>Four conditions, each of which exists to reject one specific thing that also slows a
+   * flywheel:
+   *
+   * <ol>
+   *   <li><b>The wheel is being held at a goal</b> ({@code SPINNING_UP} or {@code AT_SPEED}, goal
+   *       above zero). A coasting, idling, faulted or characterizing wheel is not shooting.
+   *   <li><b>It was already near that goal</b>, within {@code kShotArmToleranceRpm}, on the loop
+   *       before. This is the arming condition, and it rejects a spin-up (the wheel is far below
+   *       its goal) and a large goal reduction (far above it). The band is wide because in a fast
+   *       burst the wheel is still recovering from one piece when the next arrives, and that piece
+   *       must count too.
+   *   <li><b>The drop is sharp</b>: more than {@code kShotDipRpm} in a single loop. Closed-loop
+   *       noise and a deliberate slowdown are both far gentler than a piece.
+   *   <li><b>It ends below the goal.</b> This rejects the case the arming band lets through: a
+   *       small goal reduction, where a wheel that starts just above its new goal is braked toward
+   *       it. That slowdown ends at or above the goal; a piece drags the wheel below it.
+   * </ol>
+   *
+   * <p>After a shot, further drops are ignored for {@code kShotRefractorySec}, because one piece's
+   * dip can span more than one 20 ms loop and must count once.
+   *
+   * <p><b>Outputs:</b> may increment {@code shotCount} and restart {@code sinceLastShot}; logs
+   * {@code Shooter/ShotDetected} and {@code Shooter/LoopDropRpm}.
+   */
+  private void detectShot() {
+    double dropRpm = lastVelocityRpm - inputs.velocityRpm;
+
+    boolean holdingGoal =
+        (systemState == SystemState.SPINNING_UP || systemState == SystemState.AT_SPEED)
+            && goalRpm > 0.0;
+    boolean armed =
+        Math.abs(lastVelocityRpm - goalRpm) < Constants.Shooter.kShotArmToleranceRpm.get();
+    boolean sharpDrop = dropRpm > Constants.Shooter.kShotDipRpm.get();
+    boolean endedBelowGoal = inputs.velocityRpm < goalRpm;
+    boolean outsideRefractory =
+        !hasShotSinceReset || sinceLastShot.hasElapsed(Constants.Shooter.kShotRefractorySec.get());
+
+    boolean shotDetected = holdingGoal && armed && sharpDrop && endedBelowGoal && outsideRefractory;
+    if (shotDetected) {
+      shotCount++;
+      hasShotSinceReset = true;
+      sinceLastShot.restart();
+    }
+
+    // The per-loop drop is logged every loop, not only when it counts, because it is the series
+    // kShotDipRpm is tuned against: graph it through a logged burst and the threshold belongs well
+    // above the noise floor and well below the smallest real dip. Without it, tuning the detector
+    // means differentiating a velocity trace by eye.
+    Logger.recordOutput("Shooter/ShotDetected", shotDetected);
+    Logger.recordOutput("Shooter/LoopDropRpm", dropRpm);
   }
 
   /**
@@ -369,12 +447,30 @@ public class Shooter extends SubsystemBase {
 
   /**
    * Whether the flywheel will be at speed a short time from now, projecting the current spin-up
-   * slope forward.
+   * slope forward, judged against the normal {@code kToleranceRpm} band.
    *
    * @param horizonSec how far ahead to project, in seconds
    * @return true if the projected speed lands inside the tolerance band
    */
   public boolean willBeAtSpeedIn(double horizonSec) {
+    return willBeAtSpeedIn(horizonSec, Constants.Shooter.kToleranceRpm.get());
+  }
+
+  /**
+   * Whether the flywheel will be at speed a short time from now, judged against a caller-chosen
+   * tolerance band.
+   *
+   * <p>Added for M10b (plan section 2.4). Once a burst is already feeding, every piece knocks the
+   * wheel down, and judging each recovery against the tight {@code kToleranceRpm} band would stop
+   * and restart the indexer between pieces. The superstructure passes {@code kBurstToleranceRpm}
+   * instead while its burst latch is set. The band is a parameter rather than a mode on this class
+   * because the latch is a cross-mechanism decision the flywheel cannot see.
+   *
+   * @param horizonSec how far ahead to project, in seconds
+   * @param toleranceRpm half-width of the acceptance band around the goal, in RPM
+   * @return true if the projected speed lands inside the band around a non-zero goal
+   */
+  public boolean willBeAtSpeedIn(double horizonSec, double toleranceRpm) {
     // IMPLEMENTATION (was TODO: "Project inputs.velocityRpm + accelRpmPerSec * horizonSec and test
     // it against the tolerance band around goalRpm.")
     //
@@ -396,8 +492,50 @@ public class Shooter extends SubsystemBase {
     // the shot-on-the-move cadence needs the last few milliseconds back, the fix is to saturate the
     // projection at the goal rather than to widen the band.
     double projectedRpm = inputs.velocityRpm + accelRpmPerSec * horizonSec;
-    return Math.abs(projectedRpm - goalRpm) < Constants.Shooter.kToleranceRpm.get()
-        && goalRpm > 0.0;
+    return Math.abs(projectedRpm - goalRpm) < toleranceRpm && goalRpm > 0.0;
+  }
+
+  /**
+   * Pieces fired since boot or the last {@link #resetShotCount()}.
+   *
+   * <p>Fires, not scores: nothing on this robot can see whether a piece went in. A post-match
+   * diagnostic, compared against the scoring table to tell an aiming problem from a feeding one.
+   * The 8-piece preload is a known count, so the first burst of every match is also a free check of
+   * the detector itself. It may undercount a very fast burst, which is tolerable by design because
+   * nothing live depends on the count.
+   *
+   * @return the number of detected shots
+   */
+  @AutoLogOutput(key = "Shooter/ShotCount")
+  public int getShotCount() {
+    return shotCount;
+  }
+
+  /**
+   * How long ago the last shot was detected.
+   *
+   * <p>The live signal the superstructure's "probably empty" belief is built on: time since the
+   * last shot, not the count, which is why an undercount in a fast burst does not matter.
+   *
+   * @return seconds since the last detected shot, or {@link Double#POSITIVE_INFINITY} if there has
+   *     been none since boot or the last reset
+   */
+  public double getSecondsSinceLastShot() {
+    return hasShotSinceReset ? sinceLastShot.get() : Double.POSITIVE_INFINITY;
+  }
+
+  /**
+   * Forgets every shot counted so far. Called from {@code autonomousInit} so each match's count
+   * starts clean and does not include practice or queue-line spin-ups.
+   *
+   * <p><b>Outputs:</b> zeroes the shot count and clears the last-shot time, so {@link
+   * #getSecondsSinceLastShot()} reads infinity until the next shot.
+   */
+  public void resetShotCount() {
+    shotCount = 0;
+    hasShotSinceReset = false;
+    sinceLastShot.stop();
+    sinceLastShot.reset();
   }
 
   /**

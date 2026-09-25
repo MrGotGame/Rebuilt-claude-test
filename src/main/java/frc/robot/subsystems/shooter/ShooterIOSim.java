@@ -148,6 +148,40 @@ public class ShooterIOSim implements ShooterIO {
     controller.setPID(gains.kP, gains.kI, gains.kD);
   }
 
+  /**
+   * Simulates one game piece passing through the wheels, at the standard simulated size.
+   *
+   * <p>Added for M10b (plan section 2.4). Game pieces are not simulated without maple-sim, so this
+   * is how the shot detector, burst hysteresis and the superstructure's "probably empty" belief are
+   * exercised with no hopper model at all: tests and a sim keyboard binding call it at whatever
+   * cadence they want to replay.
+   *
+   * <p><b>Outputs:</b> removes {@code kShotDipRpm * kSimShotDipMargin} RPM from the wheel at once.
+   */
+  public void injectShot() {
+    injectShot(Constants.Shooter.kShotDipRpm.get() * Constants.Shooter.kSimShotDipMargin);
+  }
+
+  /**
+   * Simulates one game piece passing through the wheels, taking a chosen amount of speed.
+   *
+   * <p>The explicit-size form exists for the negative cases: a dip smaller than the detection
+   * threshold must NOT count, and proving that needs a way to make one.
+   *
+   * @param dipRpm speed removed in one step, in RPM; the wheel never goes below zero
+   *     <p><b>Outputs:</b> sets the simulated wheel speed. The controller sees the drop on the next
+   *     {@link #updateInputs(ShooterIOInputs)} and recovers from it exactly as it would from a real
+   *     piece.
+   */
+  public void injectShot(double dipRpm) {
+    // A speed step rather than an energy model. A piece passing through takes a bite out of the
+    // wheel's kinetic energy over a few milliseconds, far shorter than a 20 ms loop, so at loop
+    // resolution it IS a step; modelling the contact would add parameters nobody can measure yet
+    // without changing what the detector sees.
+    double newRpm = Math.max(0.0, sim.getAngularVelocityRPM() - dipRpm);
+    sim.setAngularVelocity(newRpm * 2.0 * Math.PI / 60.0);
+  }
+
   /** Zeroes the applied voltage and leaves closed loop. */
   @Override
   public void stop() {
