@@ -40,7 +40,7 @@ a turret. Every layer below exists to make shoot-on-the-move actually land:
 | Turret velocity feedforward from chassis yaw rate | The turret holds the target while the driver spins the robot; without it the turret lags and `readyToShoot` never latches during a rotate-and-shoot. |
 | Explicit turret unwrap with finite travel limits | A turret with hard stops *will* try to cross them. Unwrap logic converts "impossible aim" into "rotate the drivetrain" instead of a snapped belt. |
 | Dual-source fusion (MegaTag2 + QuestNav) with per-source covariance | QuestNav gives centimeter-class, 100 Hz relative pose with no tag in view; MegaTag2 gives absolute field truth. Fused, you keep aiming when your only tag is occluded by a defender. |
-| Superstructure FSM with typed goals | One place decides "is it legal to spin the flywheel while the intake is deployed." Ad-hoc command compositions cannot enforce that. |
+| Superstructure FSM with typed goals | One place decides "is it legal to swing the intake arm through the turret's sweep right now." Ad-hoc command compositions cannot enforce that. |
 | Tunable constants everywhere | Shot maps get retuned between every match on a practice field. Redeploying takes 45 s; a tunable takes 0 s. |
 | `Alert` fault system + power budget | A disconnected CANcoder discovered in the pits is a fixed robot; discovered on the field it is a lost match. |
 
@@ -128,7 +128,7 @@ Four properties this buys you, all of which are requirements for this tier:
 * **State timeouts.** `stateTimer` is reset on every transition, so `handleStateTransition()` can
   say "if I have been `HOMING` for more than `kHomingTimeoutSec`, go to `FAULTED`."
 * **Guarded transitions.** `handleStateTransition()` is a `switch (wantedState)` whose arms contain
-  guards (`isHomed`, `hasPiece`, `Superstructure.allowsDeploy()`). Illegal requests silently
+  guards (`isHomed`, `lastShot.isUsable()`, `Superstructure.allowsDeploy()`). Illegal requests silently
   resolve to a safe state instead of throwing.
 * **Illegal transitions unrepresentable where reasonable.** The cross-mechanism illegal
   combinations (intake deployed *and* turret swept through the intake's arc) live in exactly one
@@ -164,8 +164,10 @@ Vision.periodic()
 
 Superstructure.periodic()
   ├─ handleStateTransition():  SCORE_ON_MOVE -> SystemState.SCORING_ON_THE_MOVE
-  │      (guard: indexer.hasPiece() && RobotState.getInstance().getPoseConfidence() > kMinConfidence,
-  │       else -> SystemState.SPINNING_UP)
+  │      (guards: no critical fault, else SPINNING_UP; usable shot solution, else WAITING_FOR_TURRET.
+  │       There is deliberately no "has a piece" guard — see §2.4)
+  ├─ resolveIntakeMode():  intake not held, posture DEPLOYED -> IntakeMode.FEED_ASSIST once the
+  │       feed gate opens (intake held -> INTAKING instead: shoot, move and intake at once)
   ├─ onEnter(SCORING_ON_THE_MOVE): shotSolver.reset(); shootTimer.restart();
   └─ applyState() -> scoringOnTheMove():
         Pose2d       p  = RobotState.getInstance().getEstimatedPose();
@@ -175,7 +177,8 @@ Superstructure.periodic()
         turret.setGoal(shot.turretFieldAngle(), shot.turretAngularVelocityRadPerSec());
         shooter.setGoal(shot.flywheelRpm());
         if (isReadyToScore(shot)) indexer.setWantedState(Indexer.WantedState.FEED);
-        else                      indexer.setWantedState(Indexer.WantedState.HOLD);
+        else                      indexer.setWantedState(Indexer.WantedState.IDLE);
+        // FEED streams the whole hopper; the burst latch keeps it open between pieces (§2.4).
 
 Turret.periodic()   (next loop)
   ├─ handleStateTransition(): wantedState == AIM (set by Turret.setGoal) -> SystemState.AIMING
@@ -212,9 +215,10 @@ The same trace for the flywheel ends at
  ┌───────────────────────────────────────────────────────────────────────────────────────┐
  │ Superstructure extends SubsystemBase                                                  │
  │   periodic(): handleStateTransition() -> onExit/onEnter -> applyState() -> log        │
- │   SystemState: IDLE  HOMING  INTAKING  INDEXING  SPINNING_UP                          │
- │                SCORING_ON_THE_MOVE  SCORING_STATIONARY  PASSING  EJECTING  CLIMB_SAFE │
- │                CHARACTERIZING  FAULTED                                                │
+ │   SystemState: IDLE  HOMING  RESTING  SPINNING_UP  WAITING_FOR_TURRET  EJECTING       │
+ │                SCORING_ON_THE_MOVE  SCORING_STATIONARY  SCORING_FORCED  PASSING       │
+ │                CHARACTERIZING  FAULTED   (+ CLIMB_SAFE hole)                          │
+ │   IntakeMode (orthogonal, §2.4): STOWED  DEPLOYED  INTAKING  FEED_ASSIST              │
  └───┬───────────┬───────────┬────────────┬────────────┬────────────┬────────────────────┘
      │           │           │            │            │            │
      ▼           ▼           ▼            ▼            ▼            ▼
@@ -260,6 +264,286 @@ The same trace for the flywheel ends at
               └──────────────────────────────────────────┘
 ```
 
+### 2.4 Game pieces: a hopper, not a slot
+
+> **Replanned 2026-09-24.** This section supersedes the single-piece model the original M5 and M10
+> specifications were written against. `feature-indexer` and `feature-superstructure` implement
+> the *old* model; milestone **M10b** (§10.2) retrofits them. Wherever the rest of this document
+> disagrees with this section, this section wins. Every other section has been updated to match it.
+
+**The rule that forced the change.** REBUILT lets a robot carry as many game pieces as it can
+physically hold. The original plan modelled the robot as a one-piece slot: `Indexer.hasPiece()` was
+a single debounced boolean, and three transitions pivoted on it — `INTAKING → INDEXING` the moment
+the first piece arrived, every `SCORE_*` request diverting to `SPINNING_UP` without one, and
+`scoreUntilEmptyCommand()` ending when it fell. With a hopper, every one of those is wrong:
+
+| Single-piece assumption | What actually happens with a hopper |
+| --- | --- |
+| Intaking ends when the first piece is detected | The driver wants to keep collecting. Ending on the first piece leaves the rest on the carpet. |
+| "Has a piece" is a meaningful yes/no | The hopper holds anywhere from zero to a full load. A current-and-velocity reading at the indexer can only see the piece touching the indexer wheel, not the hopper behind it. |
+| One piece per feed; a shot is the falling edge of `hasPiece` | Pieces stream back to back. The indexer is never unloaded between them, so there is no falling edge, and the old counter would count a whole burst as one shot. |
+| Stowing the intake after a pickup is safe | Raising the intake lets pieces fall back out of the robot. |
+
+#### Sensing decision: no dedicated piece sensors
+
+The robot has no beam break, time-of-flight or other piece sensor, and this replan does not add one.
+The consequence has to be stated plainly, because it drives everything else: **the robot cannot know
+how many pieces it holds, and cannot reliably know that it holds any.** So the design stops asking.
+Three signals remain, in decreasing order of trust:
+
+1. **Shots fired — `Shooter`.** A piece passing through the flywheel takes a sharp, measurable bite
+   out of wheel speed. That is the most reliable piece signal on the robot: the energy a piece
+   removes is large compared with loop noise, and it happens at the one place every scored piece
+   must pass. **Shot counting moves from `Indexer` to `Shooter`.**
+2. **Indexer load — `Indexer.isLoaded()`.** The existing current-and-velocity predicate, now
+   evaluated *only while feeding*. It answers "is the indexer pushing against something right now",
+   which is what jam detection needs, and it corroborates signal 3. It is logged but gates nothing.
+3. **`Superstructure.likelyEmpty()` — a belief, not a measurement.** True once the robot has spent
+   `kEmptyConfirmSec` of *gate-open, unloaded* feeding with no shot detected. Autos use it to end a
+   scoring leg early and the driver controller rumbles on it. **It never gates a teleop shot.**
+
+The time only accumulates while the feed gate is open *and* the indexer is feeding unloaded. Time
+spent with the gate closed (waiting on the turret, say) says nothing about the hopper, and counting
+it would end an auto's scoring leg while the hopper is still full. That distinction is the first
+thing M10b's mutation run should attack.
+
+#### Nothing is gated on having a piece any more
+
+The readiness gate loses its piece term and becomes **seven** terms (§6.5). A scoring request enters
+its scoring state whether or not the hopper has anything in it. Feeding an empty hopper just spins
+the indexer for nothing, which costs a few watts. The old reason for the term was "feed would … desync
+the shot counter", and that reason goes away now that the counter watches the flywheel, not the indexer.
+
+This is also what makes shoot-while-intaking fall out naturally. If the driver holds the score
+trigger with an empty robot and then drives into pieces, they are fired as they arrive. No state
+needs to notice that the hopper went from empty to not-empty.
+
+#### Intake posture: down stays down
+
+* **Holding INTAKE** deploys the intake and runs the roller. **Releasing it stops the roller and
+  leaves the intake deployed** (`Intake.WantedState.DEPLOY_ONLY`), because raising it dumps the
+  hopper.
+* **The intake stows only when explicitly asked**: a new `Superstructure.WantedState.STOW` on an
+  operator button, plus `HOME`. Stowing mid-match is allowed but logged as a warning, because
+  **pieces can fall out of the robot while the intake is stowed**. At the partial-raise height
+  they stay in.
+* The Superstructure remembers the choice in an `intakePosture` field (`STOWED` / `DEPLOYED`), and
+  `DEFAULT` honours it instead of stowing. The old `STOWED` system state is renamed **`RESTING`**,
+  because the name would otherwise describe an intake that is usually down.
+* **Start of match.** The starting-configuration rules require the robot to start with the intake
+  STOWED, carrying **8 preloaded pieces**. Because a stowed intake lets pieces fall out, the intake
+  must be **deployed before the robot moves**:
+  * `Superstructure.onEnable()` is called from `autonomousInit` and `teleopInit`. If the posture is
+    still `STOWED` and the robot is not `HOMING` or `FAULTED`, it switches the posture to
+    `DEPLOYED`. So the first enable deploys the intake with no button press.
+  * `Intake.isRetainingPieces()` is true once the pivot is anywhere between `kDeployedAngleRad`
+    and `kFeedAssistAngleRad`, inclusive. That is the range in which pieces stay aboard.
+  * **Every auto routine starts with `waitUntilIntakeRetaining()`** before its first path, bounded
+    by a short timeout so a dead pivot cannot eat the whole auto. Teleop does not hold the driver
+    back: the intake is already down from auto in a real match. If the robot is moving while
+    `!isRetainingPieces()`, `Superstructure/StowedWhileMoving` is logged and a warning alert is
+    raised.
+* **New intake position `FEED_ASSIST`:** while scoring, the intake **rocks** between
+  `kDeployedAngleRad` and `kFeedAssistAngleRad` once every `kFeedAssistPeriodSec`. Rocking lets
+  pieces flow off the intake onto the hopper floor and into the indexer better than a static
+  raise. Setting the period to `0` holds the raised position still, which is kept only as a
+  diagnostic and as the fallback when power is short. The roller runs inward at
+  `kFeedAssistRollerRpm`, so pieces at the mouth are pulled in rather than pushed out. Both ends of
+  the rock are outside the turret-conflict band, so feed-assist never waits on the turret.
+* FEED_ASSIST applies only while scoring **and not intaking**. Intaking takes priority, because the
+  mouth has to be all the way down to collect.
+* **Side effect on vision.** The intake camera is only fused while the intake is settled at its
+  intaking angle (the gating decision recorded in `PROJECT_OVERVIEW.md`). Down-stays-down means that
+  camera can now contribute for most of the match, not just during pickups — **but only if the gate
+  admits the new resting `DEPLOYED` state**, which holds the same pivot angle as `INTAKING`. The
+  implemented gate, `Intake.isIntaking()`, accepts `INTAKING` alone, so M10b widens it to
+  `isAtIntakingAngle()` (`INTAKING` or `DEPLOYED`). FEED_ASSIST drops it out
+  while scoring, which is acceptable because the turret camera is the one that matters for aim. The
+  gate must treat `FEED_ASSISTING` like `EJECTING`: out at a different angle, so **not** fusable.
+
+#### Intake and scoring are independent requests
+
+The driver must be able to **shoot, move and intake at once**. Those are two independent intents, so
+they are modelled as **orthogonal regions** of the Superstructure rather than as a product of enum
+values:
+
+* `Superstructure.WantedState` keeps the *shooter-side* intent: `IDLE`, `DEFAULT`, `STOW`, `HOME`,
+  `EJECT`, `SPIN_UP`, `SCORE_ON_MOVE`, `SCORE_STATIONARY`, `SCORE_FORCED`, `PASS`,
+  `AUTO_SCORE_ON_MOVE`, `CHARACTERIZE`. **`INTAKE` leaves this enum.**
+* A second mutator, `setIntakeRequested(boolean)` (with `intakeWhileHeldCommand()` as its
+  command adapter), carries the *intake* intent.
+* Each loop, after the shooter-side `SystemState` is resolved, `resolveIntakeMode()` picks one
+  `IntakeMode` — `STOWED`, `DEPLOYED`, `INTAKING` or `FEED_ASSIST` — from the system state, the
+  intake request, the posture and the interlock. `HOMING`, `EJECTING`, `CHARACTERIZING` and
+  `FAULTED` override it, as they always have. `Superstructure/IntakeMode` is logged alongside
+  `Superstructure/SystemState`, so the state timeline stays readable.
+* **`INTAKING` and `INDEXING` are removed as system states** (14 → 12). `INDEXING` was the seating
+  pass that parked one piece in front of the flywheel; with a hopper there is nothing to park.
+
+This keeps the two rules that matter: the Superstructure is still the only class that commands more
+than one subsystem, and the interlock still lives in exactly one place. What it relaxes is "exactly
+one mutator" to "two mutators, both on the Superstructure". The rejected alternative is
+`INTAKE_AND_SCORE_ON_MOVE` and friends. That doubles the scoring states from four to eight, and
+every future scoring state would need an intake twin that somebody will forget to write.
+
+How the regions combine. `posture` means `DEPLOY_ONLY` or `STOW`, whichever the operator last chose.
+"Gate" means `isReadyToScore()`, including the burst latch described below.
+
+| Situation | Intake held? | Intake | Floor roller | Indexer |
+| --- | --- | --- | --- | --- |
+| `HOMING` / `FAULTED` / `CHARACTERIZING` / `EJECTING` | ignored | override (as before) | override | override |
+| No shot requested (`RESTING`, or `SPIN_UP` pre-spin) | no | posture | `IDLE` | `IDLE` |
+| same | yes | `DEPLOY_AND_INTAKE` | `IDLE` | `IDLE` |
+| Shot requested (`SCORE_*`, `AUTO_SCORE_ON_MOVE`, `PASS`), gate closed | no | posture | **`FEED`** | `IDLE` |
+| same, gate closed | yes | `DEPLOY_AND_INTAKE` | **`FEED`** | `IDLE` |
+| Shot requested, gate **open** | no | `FEED_ASSIST` if posture is deployed, else `STOW` | `FEED` | `FEED` |
+| Shot requested, gate **open** | yes | `DEPLOY_AND_INTAKE` | `FEED` | `FEED` |
+
+"Shot requested" means the shooter-side **wanted** state, not the system state. The floor roller
+therefore also runs while a score request has been diverted to `SPINNING_UP` or
+`WAITING_FOR_TURRET`.
+
+**The floor roller leads and the indexer is the gate.** The floor roller exists only to feed the
+indexer. It does not run while intaking: the intake roller alone puts pieces into the hopper. It
+starts the moment a shot is *requested*, before the shooter is ready, so the pile is already packed
+against the indexer. The indexer stays stopped in brake mode as the physical block between the
+hopper and the flywheel until the gate opens. Then the first piece is already in contact and
+leaves at once, rather than after the floor roller has had to move the pile. The floor roller
+stalls against the stopped indexer while it waits. Its stator limit and `LOW` power priority cover
+that, and `FloorRoller/Inputs/statorCurrentAmps` shows what it costs. `SPIN_UP` on its own, as a
+pre-spin while driving to a shooting position, does not start the floor roller, because nothing
+has asked to shoot yet. As a result, `FloorRoller.WantedState.INTAKE` has no caller; M10b deletes
+it rather than leaving a dead state.
+
+#### The interlock, corrected
+
+The original interlock assumed the *deployed* intake sits in the turret's sweep. The turret's
+guard was literally `() -> intake.isStowed()`. **That is backwards for this robot: a deployed intake
+cannot conflict with the turret.** The conflict is the arm *passing through* the turret's sweep, so
+it is a band of **pivot angles**, not a deployed/stowed boolean:
+
+* New constant `Constants.Intake.kTurretConflictBandRad`: the width of the pivot band, measured
+  **from `kStowedAngleRad` toward `kDeployedAngleRad`**, over which any part of the intake lies
+  inside the turret's conflict arc. The band is roughly the **top ~15° of the intake's travel**, so
+  the *stowed* intake conflicts with the turret. The deployed and feed-assist positions, and
+  everything between them, do not. It is expressed as a width from stow rather than two absolute
+  angles for two reasons: the band's direction then follows the pivot's sign convention
+  automatically, and its placeholder (15°) is already the real shape. Two absolute placeholders of
+  `0.0` would describe an empty band and leave the interlock inert. `TODO: MEASURE the exact edge
+  from the Onshape model (tools/onshape_measurements.py reads named mate connectors; add one at the
+  band edge) and confirm on the robot.`
+* **What the driver experiences.** While the intake is stowed, which in practice is only at match
+  start or after an explicit `STOW`, the turret may not enter its conflict arc. Since the first
+  enable deploys the intake (see above), this costs a fraction of a second at the start of auto and
+  nothing afterwards.
+* **Turret guard:** the turret may not enter or sweep through its conflict arc while the pivot is
+  inside the band **or its commanded motion crosses the band**.
+* **Intake guard:** the pivot may not move into or through the band while the turret is inside its
+  conflict arc.
+* **While scoring, the turret wins.** The feed-assist rock stays well below the band, so on this
+  robot this rule never fires. It is kept as a guard against a mis-tuned `kFeedAssistAngleRad`. If
+  the angle is ever configured inside the band and the shot needs the arc, the intake stays at
+  `DEPLOYED` instead of feed-assisting, `Superstructure/FeedAssistBlocked` is logged, and a
+  warning alert names the misconfiguration.
+* **Intaking no longer stows the turret.** The old `intaking()` stowed the turret *only* to open the
+  deploy guard. Now the turret keeps aiming while the intake comes down, unless the deploy path
+  crosses the band while the turret is in the arc. In that case the deploy waits, which takes a
+  fraction of a second.
+* M10's hard-won lesson carries over unchanged. The turret half of the guard still uses
+  `TurretUnwrapper.passesThroughArcWrapped`, because the turret's travel is wider than a full
+  circle. The intake half is a plain interval test, because the pivot's travel is not.
+
+#### Continuous feeding and flywheel recovery
+
+* **Burst hysteresis.** Each piece knocks the flywheel down, so gate term 3 (`willBeAtSpeedIn`)
+  would flicker between pieces and start and stop the indexer every few loops. Instead, once the
+  feed has opened within the current scoring state, term 3 is evaluated against a wider
+  `Constants.Shooter.kBurstToleranceRpm`. That holds until *any other* term closes the gate or the
+  state changes. The other six terms are never relaxed.
+* **Cadence is a tunable.** `Indexer.kFeedRpm` sets pieces per second. Pieces 2..N leave a
+  recovering wheel, so **M11's shot tables must be measured firing bursts at the intended cadence,
+  not single pieces.** A table built from single pieces over-predicts every shot after the first.
+* **Shot counting at cadence.** At a 50 Hz loop, back-to-back pieces can fall inside one
+  refractory window and undercount. `TODO: measure the dip width in a logged burst before tuning
+  kShotRefractorySec; if pieces merge, count dips in the timestamped high-rate velocity samples
+  instead of at loop rate.` An undercount
+  is tolerable by design: the count is a post-match diagnostic, and `likelyEmpty()` depends on *time
+  since the last shot*, not on the count.
+
+#### Jams
+
+With many pieces, a jam is a matter of when, not if. The indexer treats a stall while feeding as a
+jam: stator current above `kJamCurrentAmps` **and** velocity below `kJamVelocityRpm` for
+`kJamDetectSec`. It responds by entering `UNJAMMING`, which reverses at `kUnjamRpm` for `kUnjamSec`
+and then resumes feeding. After `kMaxUnjamAttempts` within one feed request it gives up, stops in
+`JAMMED` and raises an alert. The operator's `EJECT` is the recovery from there. While the indexer
+is unjamming, the Superstructure reverses the floor roller too, and the `likelyEmpty` clock pauses.
+
+#### Power
+
+Shooting, moving and intaking at once is the robot's worst current case: drive (`CRITICAL`),
+flywheel recovery and turret (`HIGH`), indexer (`MEDIUM`), and the intake pivot, intake roller and
+floor roller (`LOW`). `PowerBudget` already sheds load in that order, so combined mode degrades the
+intake first. That is the right order: a slower intake loses a piece, but a sagging flywheel misses
+every piece in the burst. Two additions:
+
+* FEED_ASSIST's rocking falls back to holding the raised position whenever the `LOW` scalar is
+  below 1. Rocking is the preferred behaviour, but it is pure pivot current, so it is the first
+  luxury to go. Holding still keeps pieces aboard, just with a slower flow.
+* M14's checkpoint gains a scripted combined-mode run, driving a figure-eight while intaking and
+  firing continuously. It is logged against `Power/FilteredVoltage`.
+
+#### What this replan deletes
+
+* **Indexer:** `hasPiece()`; the `INDEX`/`HOLD` wanted states and `INDEXING`/`HOLDING` system
+  states; the latched-sample replay and settle window that existed only to answer `hasPiece` while
+  stopped; the shot counter; the beam-break path, its alert, `Constants.Indexer.kHasBeamBreak`,
+  `Constants.Dio.kIndexerBeamBreak`; `IndexerIOSim.setSimulatedPiecePresent`.
+* **Superstructure:** `WantedState.INTAKE`; `SystemState.INTAKING` and `INDEXING`;
+  `Constants.Superstructure.kIndexFeedSec`; the piece guard in `scoringTransition`; gate term 4.
+* **Autos:** the `WaitForPiece` marker and `waitForPieceCommand`, and `bailoutIfEmpty`. With no
+  sensor, a missed pickup cannot be detected. The cost of not knowing is small in a
+  shoot-on-the-move auto, because a scoring leg over an empty hopper costs no stop.
+
+#### Answers to the review questions (2026-09-25)
+
+1. **Capacity is 50 pieces, and overfilling does not jam.** So no "hopper full" signal is needed,
+   and intaking needs no capacity limit. `kScoreTimeoutSec` is sized to empty 50 pieces.
+2. **The stowed position conflicts with the turret, over roughly the top 15° of intake travel.**
+   The feed-assist position does not conflict at all. See "The interlock, corrected".
+3. **Rock back and forth.** It lets pieces flow off the intake onto the hopper floor and into the
+   indexer.
+4. **The robot starts with 8 pieces and the intake STOWED**, as the starting-configuration rules
+   require. Pieces can fall out while stowed but stay in at partial raise, so the intake deploys on
+   the first enable and autos wait for it before moving. The 8-piece preload also gives a free
+   calibration of the shot detector (§10.2 M11).
+5. **The floor roller runs only to feed the indexer, and it leads.** It starts when a shot is
+   requested, and the stopped indexer blocks pieces until the shooter is ready. It does not run
+   while intaking.
+
+Still open, for the robot rather than for review: the exact band edge and the rocking period.
+
+#### Where each change lands
+
+| Section | Change |
+| --- | --- |
+| §2.1–2.3 | Guard examples, the worked trace and the state list no longer mention `hasPiece`, `INTAKING` or `INDEXING`. |
+| §3 | File-tree notes for the indexer and shooter. |
+| §4.1 `Constants` | `Dio.kIndexerBeamBreak` deleted; new intake, indexer, shooter and superstructure constants. |
+| §4.4 Intake | `FEED_ASSIST`, a resting `DEPLOYED` state, and the pivot-band guard. |
+| §4.6 Indexer | Rewritten: `IDLE`/`FEEDING`/`UNJAMMING`/`JAMMED`/`EJECTING`/`CHARACTERIZING`, jam handling, `isLoaded()`. |
+| §4.8 Shooter | Shot detection and the count; `willBeAtSpeedIn` gains a tolerance overload for burst hysteresis. |
+| §4.11 Superstructure | Orthogonal intake region, `RESTING`, `STOW`, `likelyEmpty()`, seven-term gate. |
+| §4.12 Autos | Marker vocabulary; `driveIntakeAndShoot`; `bailoutIfEmpty` and `waitForPieceCommand` removed. |
+| §4.14 Tests | Piece-gate tests replaced; hopper, burst, jam and interlock-band tests added. |
+| §5.3 | `Auto.kScoreTimeoutSec` becomes a max-burst bound. |
+| §5.6 | Beam-break row deleted from the device table. |
+| §6.5 | Term 4 removed; burst hysteresis documented. |
+| §8.2, §8.3, §8.5 | Marker table and the auto notes. |
+| §9.2 | Simulation now injects flywheel shots and indexer load instead of a present piece. |
+| §10.2 | New **M10b**; M11, M13 and M14 checkpoints amended. |
+| §11 | The multi-piece omission row is replaced; two new failure modes. |
+
 ---
 
 ## 3. Complete File Tree
@@ -302,7 +586,7 @@ AdvantageKit_TalonFXSwerveTemplate/
 │   │   │   ├── GyroIONavX.java                         [DELETE] Pigeon2 is the gyro
 │   │   │   └── PhoenixOdometryThread.java              [KEEP]
 │   │   ├── intake/
-│   │   │   ├── Intake.java                             [NEW]    Pivot + roller FSM, homing, stow guard
+│   │   │   ├── Intake.java                             [NEW]    Pivot + roller FSM, homing, pivot-band guard, feed assist
 │   │   │   ├── IntakeIO.java                           [NEW]    @AutoLog inputs for pivot, roller, absolute encoder
 │   │   │   ├── IntakeIOTalonFX.java                    [NEW]    Kraken X44 pivot + X60 roller + DIO ThroughBore
 │   │   │   └── IntakeIOSim.java                        [NEW]    SingleJointedArmSim + DCMotorSim
@@ -312,9 +596,9 @@ AdvantageKit_TalonFXSwerveTemplate/
 │   │   │   ├── FloorRollerIOTalonFX.java               [NEW]    Kraken X60
 │   │   │   └── FloorRollerIOSim.java                   [NEW]
 │   │   ├── indexer/
-│   │   │   ├── Indexer.java                            [NEW]    FSM + piece detection + shot-count bookkeeping
+│   │   │   ├── Indexer.java                            [NEW]    Feed/unjam FSM + load diagnostic (no piece count, §2.4)
 │   │   │   ├── IndexerIO.java                          [NEW]
-│   │   │   ├── IndexerIOTalonFX.java                   [NEW]    Kraken X60 (+ optional beam break)
+│   │   │   ├── IndexerIOTalonFX.java                   [NEW]    Kraken X60 (no piece sensor)
 │   │   │   └── IndexerIOSim.java                       [NEW]
 │   │   ├── turret/
 │   │   │   ├── Turret.java                             [NEW]    FSM, unwrap, homing, velocity FF, RobotState publish
@@ -322,7 +606,7 @@ AdvantageKit_TalonFXSwerveTemplate/
 │   │   │   ├── TurretIOTalonFX.java                    [NEW]    Kraken X44 + DIO ThroughBore on gearbox output
 │   │   │   └── TurretIOSim.java                        [NEW]    DCMotorSim with soft limits
 │   │   ├── shooter/
-│   │   │   ├── Shooter.java                            [NEW]    Flywheel FSM, spin-up prediction, at-speed gate
+│   │   │   ├── Shooter.java                            [NEW]    Flywheel FSM, spin-up prediction, at-speed gate, shot counter
 │   │   │   ├── ShooterIO.java                          [NEW]
 │   │   │   ├── ShooterIOTalonFX.java                   [NEW]    2x Kraken X60, leader/follower
 │   │   │   └── ShooterIOSim.java                       [NEW]    FlywheelSim
@@ -468,7 +752,7 @@ public final class Constants {
 
     public static final int kIntakePivotAbsEncoder = 0;
     public static final int kTurretAbsEncoder = 1;
-    public static final int kIndexerBeamBreak = 2; // TODO: optional; delete if not installed.
+    // No piece sensors: the robot carries a hopper and does not count pieces (section 2.4).
   }
 
   // -------------------------------------------------------------------------------- the field ----
@@ -573,6 +857,36 @@ public final class Constants {
         new LoggedTunableNumber("Intake/DeployedAngle", 0.0);
     public static final LoggedTunableNumber kEjectAngleRad =
         new LoggedTunableNumber("Intake/EjectAngle", 0.0);
+
+    /**
+     * Partial-raise angle used while scoring to push the hopper toward the indexer. Between
+     * kDeployedAngleRad and kStowedAngleRad. TODO: find on the robot; start just high enough to
+     * touch the pile.
+     */
+    public static final LoggedTunableNumber kFeedAssistAngleRad =
+        new LoggedTunableNumber("Intake/FeedAssistAngle", 0.0);
+
+    /** Roller speed while feed-assisting: inward, so pieces at the mouth are pulled in, not out. */
+    public static final LoggedTunableNumber kFeedAssistRollerRpm =
+        new LoggedTunableNumber("Intake/FeedAssistRollerRpm", 1000.0);
+
+    /**
+     * Full rocking period between the deployed and feed-assist angles. Rocking is the intended
+     * behaviour: it lets pieces flow off the intake onto the hopper floor and into the indexer. 0
+     * holds feed-assist still (diagnostic / low-power fallback). TODO: tune on the robot.
+     */
+    public static final LoggedTunableNumber kFeedAssistPeriodSec =
+        new LoggedTunableNumber("Intake/FeedAssistPeriod", 0.5);
+
+    /**
+     * Width of the turret-conflict band, measured from kStowedAngleRad toward kDeployedAngleRad:
+     * roughly the top 15 degrees of travel. The STOWED intake is inside it; the deployed and
+     * feed-assist positions are not. TODO: MEASURE the exact edge from Onshape (a mate connector at
+     * the band edge) and confirm on the robot.
+     */
+    public static final LoggedTunableNumber kTurretConflictBandRad =
+        new LoggedTunableNumber("Intake/TurretConflictBand", Math.toRadians(15.0));
+
     public static final LoggedTunableNumber kPivotToleranceRad =
         new LoggedTunableNumber("Intake/PivotTolerance", 0.05);
 
@@ -633,10 +947,8 @@ public final class Constants {
     public static final double kGearRatio = 1.0; // TODO: measure.
     public static final boolean kInverted = false;
     public static final double kStatorLimitAmps = 50.0;
-    public static final boolean kHasBeamBreak = false; // TODO: flip true if you install one.
 
-    public static final LoggedTunableNumber kIndexRpm =
-        new LoggedTunableNumber("Indexer/IndexRpm", 1200.0);
+    /** Sets the burst cadence (pieces per second). M11 measures the shot tables at this speed. */
     public static final LoggedTunableNumber kFeedRpm =
         new LoggedTunableNumber("Indexer/FeedRpm", 3500.0);
     public static final LoggedTunableNumber kEjectRpm =
@@ -644,16 +956,31 @@ public final class Constants {
     public static final LoggedTunableNumber kKp = new LoggedTunableNumber("Indexer/Kp", 0.1);
     public static final LoggedTunableNumber kKv = new LoggedTunableNumber("Indexer/Kv", 0.12);
 
-    /** Current-spike piece detection thresholds, used when kHasBeamBreak is false. TODO: tune on the robot. */
-    public static final LoggedTunableNumber kHasPieceCurrentAmps =
-        new LoggedTunableNumber("Indexer/HasPieceCurrent", 25.0);
+    /**
+     * "The indexer is pushing against something" while FEEDING: current above this AND velocity this
+     * far below goal. A diagnostic that corroborates Superstructure.likelyEmpty(); it gates nothing.
+     * TODO: tune from Indexer/Inputs while feeding a full hopper and an empty one.
+     */
+    public static final LoggedTunableNumber kLoadedCurrentAmps =
+        new LoggedTunableNumber("Indexer/LoadedCurrent", 25.0);
 
-    public static final LoggedTunableNumber kHasPieceVelocityDropRpm =
-        new LoggedTunableNumber("Indexer/HasPieceVelDrop", 400.0);
-    public static final LoggedTunableNumber kHasPieceDebounceSec =
-        new LoggedTunableNumber("Indexer/HasPieceDebounce", 0.06);
-    public static final LoggedTunableNumber kShotDetectDebounceSec =
-        new LoggedTunableNumber("Indexer/ShotDebounce", 0.08);
+    public static final LoggedTunableNumber kLoadedVelocityDropRpm =
+        new LoggedTunableNumber("Indexer/LoadedVelDrop", 400.0);
+    public static final LoggedTunableNumber kLoadedDebounceSec =
+        new LoggedTunableNumber("Indexer/LoadedDebounce", 0.06);
+
+    /** Jam = current above kJamCurrentAmps AND speed below kJamVelocityRpm for kJamDetectSec. */
+    public static final LoggedTunableNumber kJamCurrentAmps =
+        new LoggedTunableNumber("Indexer/JamCurrent", 40.0);
+
+    public static final LoggedTunableNumber kJamVelocityRpm =
+        new LoggedTunableNumber("Indexer/JamVelocity", 200.0);
+    public static final LoggedTunableNumber kJamDetectSec =
+        new LoggedTunableNumber("Indexer/JamDetect", 0.15);
+    public static final LoggedTunableNumber kUnjamRpm =
+        new LoggedTunableNumber("Indexer/UnjamRpm", -1500.0);
+    public static final LoggedTunableNumber kUnjamSec = new LoggedTunableNumber("Indexer/Unjam", 0.2);
+    public static final int kMaxUnjamAttempts = 3;
   }
 
   // ------------------------------------------------------------------------------- the turret ----
@@ -738,6 +1065,26 @@ public final class Constants {
     public static final LoggedTunableNumber kMaxRpm = new LoggedTunableNumber("Shooter/MaxRpm", 6000.0);
     public static final LoggedTunableNumber kSpinUpTimeoutSec =
         new LoggedTunableNumber("Shooter/SpinUpTimeout", 3.0);
+
+    /**
+     * Wider at-speed tolerance used while a burst is already feeding, so the gate does not flicker
+     * between pieces (section 2.4). TODO: tune against the hit rate of pieces 2..N in a burst.
+     */
+    public static final LoggedTunableNumber kBurstToleranceRpm =
+        new LoggedTunableNumber("Shooter/BurstToleranceRpm", 300.0);
+
+    /**
+     * Shot detection: a loop-to-loop speed drop larger than kShotDipRpm, while the wheel was within
+     * kShotArmToleranceRpm of its goal, is one piece through the wheels; then ignore further drops
+     * for kShotRefractorySec. TODO: measure the dip size and width from a logged burst before tuning.
+     */
+    public static final LoggedTunableNumber kShotDipRpm =
+        new LoggedTunableNumber("Shooter/ShotDipRpm", 150.0);
+
+    public static final LoggedTunableNumber kShotArmToleranceRpm =
+        new LoggedTunableNumber("Shooter/ShotArmTolerance", 400.0);
+    public static final LoggedTunableNumber kShotRefractorySec =
+        new LoggedTunableNumber("Shooter/ShotRefractory", 0.04);
 
     /** FlywheelSim moment of inertia, kg*m^2. TODO: from CAD (wheels + shafts). */
     public static final double kMoiKgM2 = 0.004;
@@ -1141,6 +1488,8 @@ public class Robot extends LoggedRobot {
   public void autonomousInit() {
     // TODO: robotContainer.setDriveBrakeMode(true); autoStartTimeSec = Timer.getFPGATimestamp();
     // autonomousCommand = robotContainer.getAutonomousCommand(); schedule it if non-null.
+    // Call superstructure.onEnable() first and shooter.resetShotCount(): the robot starts with the
+    // intake STOWED (a rule) and 8 pieces aboard, and onEnable deploys it so none fall out.
   }
 
   @Override
@@ -1156,7 +1505,10 @@ public class Robot extends LoggedRobot {
   @Override
   public void teleopInit() {
     // TODO: Cancel autonomousCommand if non-null, robotContainer.setDriveBrakeMode(true), and reset
-    // the superstructure to its DEFAULT wanted state so auto never leaks a goal into teleop.
+    // the superstructure to its DEFAULT wanted state with setIntakeRequested(false), so auto never
+    // leaks a goal into teleop, then superstructure.onEnable(). (The intake posture is deliberately
+    // NOT reset to stowed: an intake deployed in auto stays deployed, because the hopper is
+    // presumably not empty.)
   }
 
   @Override
@@ -1237,8 +1589,12 @@ public class RobotContainer {
   private void configureButtonBindings() {
     // TODO: drive.setDefaultCommand(DriveCommands.joystickDrive(...)) reading RobotState for
     // heading. Bind: rightBumper -> SCORE_ON_MOVE (whileTrue) / DEFAULT (onFalse);
-    // rightTrigger -> INTAKE; leftBumper -> SCORE_STATIONARY; leftTrigger -> PASS;
-    // X -> EJECT; Y -> HOME; B -> reset pose to the vision estimate (ignoringDisable(true));
+    // rightTrigger -> superstructure.intakeWhileHeldCommand() (independent of the scoring
+    // buttons, so intake + score + drive can all be held at once - section 2.4; release stops the
+    // roller and leaves the intake DOWN); leftBumper -> SCORE_STATIONARY; leftTrigger -> PASS;
+    // X -> EJECT; Y -> HOME; operator button -> STOW (the only thing that raises the intake);
+    // rumble the driver on superstructure.likelyEmpty() while scoring;
+    // B -> reset pose to the vision estimate (ignoringDisable(true));
     // POV up/down/left/right -> DriveCommands.snapToHeading(...);
     // A -> DriveToPoseCommand to the nearest scoring pose. Operator gets manual turret nudge,
     // manual flywheel RPM trim, and a "force shoot" override that bypasses readyToShoot gates.
@@ -2215,9 +2571,14 @@ The pivoting intake's state machine, written in the 2910 idiom. Two things make 
 "go to angle" wrapper. First, a real homing sequence: drive the pivot open-loop into its hard stop
 until velocity stays below a threshold for a settle time, then seed position — this is the fallback
 when the ThroughBore is unplugged, and it has a timeout so a jammed intake enters `FAULTED` instead
-of stalling a motor for the rest of the match. Second, a deploy guard: the intake refuses to deploy
+of stalling a motor for the rest of the match. Second, a pivot guard: the intake refuses to move into
+or through the turret-conflict pivot band (the `kTurretConflictBandRad` of travel nearest stow)
 while the turret is inside its conflict arc, which is the single most likely way to destroy this
-robot.
+robot. The *stowed* position is inside that band; the deployed and feed-assist positions are not, so
+once deployed the intake never blocks the turret (§2.4). The robot starts stowed (a rule) and the
+first enable deploys it, because pieces can fall out of a stowed intake. Third, because the robot carries a hopper, **the intake rests deployed**: releasing the
+intake button stops the roller but leaves the arm down, and a partial-raise `FEED_ASSIST` position
+pushes the hopper toward the indexer while scoring.
 
 ```java
 package frc.robot.subsystems.intake;
@@ -2232,7 +2593,8 @@ public class Intake extends SubsystemBase {
     IDLE,
     STOW,
     DEPLOY_AND_INTAKE,
-    DEPLOY_ONLY,
+    DEPLOY_ONLY, // deployed, roller stopped: the resting posture while holding pieces
+    FEED_ASSIST, // partial raise (optionally oscillating) to push the hopper into the indexer
     EJECT,
     HOME,
     CHARACTERIZE
@@ -2243,7 +2605,9 @@ public class Intake extends SubsystemBase {
     STOWING,
     STOWED,
     DEPLOYING,
+    DEPLOYED,
     INTAKING,
+    FEED_ASSISTING,
     EJECTING,
     HOMING,
     CHARACTERIZING,
@@ -2268,7 +2632,10 @@ public class Intake extends SubsystemBase {
 
   public void setDeployGuard(java.util.function.BooleanSupplier deployAllowed) {
     // TODO: Superstructure injects a supplier that returns false while the turret is inside its
-    // conflict arc. Stored, not evaluated, here.
+    // conflict arc. Stored, not evaluated, here. Consulted only for pivot motions whose path enters
+    // or crosses the turret-conflict pivot band (see crossesTurretConflictBand); a motion that stays
+    // outside the band - e.g. DEPLOYED <-> INTAKING, or a feed-assist angle below the band - never
+    // waits on the turret.
   }
 
   @Override
@@ -2281,8 +2648,11 @@ public class Intake extends SubsystemBase {
   private SystemState handleStateTransition() {
     // TODO: switch (wantedState): HOME -> HOMING (or FAULTED if stateTimer exceeds
     // kHomingTimeoutSec); anything else while !isHomed -> HOMING; STOW -> STOWING then STOWED when
-    // atGoal(); DEPLOY_AND_INTAKE -> DEPLOYING until atGoal() then INTAKING, but stay STOWED if
-    // !deployAllowed.getAsBoolean(); EJECT -> EJECTING; CHARACTERIZE -> CHARACTERIZING; IDLE -> IDLE.
+    // atGoal(); DEPLOY_AND_INTAKE -> DEPLOYING until atGoal() then INTAKING; DEPLOY_ONLY ->
+    // DEPLOYING until atGoal() then DEPLOYED; FEED_ASSIST -> FEED_ASSISTING (only from a deployed
+    // state - from STOWED it deploys first); EJECT -> EJECTING; CHARACTERIZE -> CHARACTERIZING;
+    // IDLE -> IDLE. Any transition whose pivot motion crossesTurretConflictBand(...) holds the
+    // current state while !deployAllowed.getAsBoolean(), rather than falling back to STOWED.
     return SystemState.IDLE;
   }
 
@@ -2309,6 +2679,20 @@ public class Intake extends SubsystemBase {
 
   private void intaking() {
     // TODO: io.setPivotPosition(kDeployedAngleRad); io.setRollerVelocity(kIntakeRollerRpm).
+  }
+
+  private void deployed() {
+    // TODO: io.setPivotPosition(kDeployedAngleRad); io.setRollerVelocity(0). The resting posture
+    // while carrying pieces - raising the arm would let them fall out.
+  }
+
+  private void feedAssisting() {
+    // TODO: Rock: alternate the pivot goal between kDeployedAngleRad and kFeedAssistAngleRad every
+    // half of kFeedAssistPeriodSec, timed from stateTimer. Hold kFeedAssistAngleRad still instead
+    // when the period is 0 or the LOW PowerBudget scalar is below 1.0. Roller at
+    // kFeedAssistRollerRpm (inward). Both ends are outside the conflict band on this robot; if a
+    // mis-tuned kFeedAssistAngleRad ever puts one inside it while the deploy guard is shut, hold the
+    // deployed end instead.
   }
 
   private void ejecting() {
@@ -2357,7 +2741,31 @@ public class Intake extends SubsystemBase {
 
   @AutoLogOutput(key = "Intake/IsStowed")
   public boolean isStowed() {
-    // TODO: systemState == STOWED. Turret asks this before sweeping through the conflict arc.
+    // TODO: systemState == STOWED. Logged for the driver; the turret interlock no longer uses it.
+    return false;
+  }
+
+  @AutoLogOutput(key = "Intake/InTurretConflictBand")
+  public boolean isInTurretConflictBand() {
+    // TODO: The pivot's measured angle OR its commanded goal lies within kTurretConflictBandRad of
+    // kStowedAngleRad (on the deployed side), or the path between them crosses that band. True
+    // while STOWED - that is the real conflict. The turret asks this before entering or sweeping
+    // through its conflict arc. Replaces the old "!isStowed()" test, which had it backwards: it
+    // treated a DEPLOYED intake as the conflict (section 2.4).
+    return false;
+  }
+
+  @AutoLogOutput(key = "Intake/RetainingPieces")
+  public boolean isRetainingPieces() {
+    // TODO: The pivot's measured angle lies between kDeployedAngleRad and kFeedAssistAngleRad,
+    // inclusive (plus kPivotToleranceRad). Pieces can fall out of a stowed intake but stay in
+    // anywhere in this range. Autos wait on this before their first path.
+    return false;
+  }
+
+  private boolean crossesTurretConflictBand(double fromRad, double toRad) {
+    // TODO: The closed interval [min(from,to), max(from,to)] intersects the band. Plain interval
+    // arithmetic: the pivot's travel is far less than a full turn, unlike the turret's.
     return false;
   }
 
@@ -2613,12 +3021,16 @@ public class FloorRoller extends SubsystemBase {
 
 ### 4.6 Indexer
 
+> **Replanned (§2.4).** The indexer no longer answers "do I have a game piece". The robot carries a
+> hopper and has no piece sensor, so the indexer's job is reduced to what it can actually do well:
+> feed a stream on request, notice when that stream jams, and report whether it is pushing against
+> anything. Shot counting has moved to `Shooter`. `feature-indexer` implements the superseded
+> single-piece version; M10b brings it in line.
+
 #### `src/main/java/frc/robot/subsystems/indexer/IndexerIO.java` [NEW]
 
-Same shape as the floor roller plus a beam-break input, which is optional hardware: with
-`Constants.Indexer.kHasBeamBreak == false` the subsystem falls back to detecting a game piece from a
-current spike plus a velocity dip. Having both paths behind one interface means the decision to add
-a sensor in week 5 is a one-line constant change, not a refactor.
+Same shape as the floor roller. There is no beam-break input: this robot has no piece sensor, and
+the interface does not pretend otherwise.
 
 ```java
 package frc.robot.subsystems.indexer;
@@ -2635,8 +3047,6 @@ public interface IndexerIO {
     public double statorCurrentAmps = 0.0;
     public double supplyCurrentAmps = 0.0;
     public double tempCelsius = 0.0;
-    public boolean beamBreakTripped = false;
-    public boolean beamBreakConnected = false;
   }
 
   public default void updateInputs(IndexerIOInputs inputs) {}
@@ -2669,11 +3079,9 @@ import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.units.measure.Current;
 import edu.wpi.first.units.measure.Temperature;
 import edu.wpi.first.units.measure.Voltage;
-import edu.wpi.first.wpilibj.DigitalInput;
 
 public class IndexerIOTalonFX implements IndexerIO {
   private final TalonFX motor;
-  private final DigitalInput beamBreak;
   private final VelocityVoltage velocityRequest = new VelocityVoltage(0.0);
   private final VoltageOut voltageRequest = new VoltageOut(0.0);
   private final StatusSignal<Angle> position;
@@ -2686,15 +3094,13 @@ public class IndexerIOTalonFX implements IndexerIO {
 
   public IndexerIOTalonFX() {
     // TODO: Same construction pattern as FloorRollerIOTalonFX using Constants.Can.kIndexerId, but
-    // use Brake neutral mode so a held piece does not roll back out. Construct the DigitalInput only
-    // when Constants.Indexer.kHasBeamBreak, otherwise leave it null and report beamBreakConnected
-    // false.
+    // use Brake neutral mode: a stopped indexer is the only thing between the hopper and the
+    // flywheel while the floor roller pushes the pile toward it.
   }
 
   @Override
   public void updateInputs(IndexerIOInputs inputs) {
-    // TODO: refreshAll, fill inputs, and set beamBreakTripped = !beamBreak.get() (most beam breaks
-    // are active-low; TODO verify your sensor's polarity on the bench before trusting it).
+    // TODO: refreshAll and fill inputs.
   }
 
   @Override
@@ -2737,7 +3143,8 @@ public class IndexerIOSim implements IndexerIO {
   private final DCMotorSim sim;
   private final PIDController controller = new PIDController(0.0, 0.0, 0.0);
   private boolean closedLoop = false;
-  private boolean simulatedPiecePresent = false;
+  private boolean simulatedLoad = false;
+  private boolean simulatedJam = false;
   private double appliedVolts = 0.0;
   private double ffVolts = 0.0;
 
@@ -2747,14 +3154,20 @@ public class IndexerIOSim implements IndexerIO {
 
   @Override
   public void updateInputs(IndexerIOInputs inputs) {
-    // TODO: Standard sim update. Additionally, when simulatedPiecePresent, add a synthetic current
-    // offset above kHasPieceCurrentAmps and a velocity droop so the piece-detection logic is
-    // exercised in sim exactly as it will be on the robot.
+    // TODO: Standard sim update. When simulatedLoad, add a current offset above kLoadedCurrentAmps
+    // and a velocity droop above kLoadedVelocityDropRpm while the motor is driven. When
+    // simulatedJam, clamp velocity near zero and report current above kJamCurrentAmps whenever
+    // the motor is driven FORWARD (a reverse pulse clears nothing by itself; the test clears the
+    // jam, which is what lets it prove UNJAMMING retries and then gives up).
   }
 
-  public void setSimulatedPiecePresent(boolean present) {
-    // TODO: Test hook called by the sim keyboard bindings (or by maple-sim's intake callback) so a
-    // student can drive the full intake-to-shoot cycle on a laptop.
+  public void setSimulatedLoad(boolean loaded) {
+    // TODO: Test hook: "the hopper is pressing pieces into the indexer". Replaces the old
+    // setSimulatedPiecePresent - there is no longer a piece to be present or absent.
+  }
+
+  public void setSimulatedJam(boolean jammed) {
+    // TODO: Test hook for the jam path.
   }
 
   @Override
@@ -2781,10 +3194,16 @@ public class IndexerIOSim implements IndexerIO {
 
 #### `src/main/java/frc/robot/subsystems/indexer/Indexer.java` [NEW]
 
-Owns the robot's answer to "do I have a game piece," which is the gate on every scoring state, and
-counts shots by detecting the velocity dip as each piece leaves. Both are debounced. The shot
-counter is genuinely useful: it gives you a per-match "pieces fired" number in the log to compare
-against the scoring table, which is how you find out whether a bad match was aim or intake.
+The gate between the hopper and the flywheel. It runs when the Superstructure says the shot is
+ready and stops when it is not; it does not decide either. What it *does* own is jam recovery,
+because only the indexer can see the stall that defines one, and a loaded-while-feeding diagnostic
+that the Superstructure uses to corroborate its "probably empty" belief.
+
+Deliberately **not** here any more: `hasPiece()`, a shot counter, `INDEX`/`HOLD`. The old
+fallback's hardest code — replaying the last loaded sample while stopped so a held piece was not
+"forgotten" — existed only because the question was being asked of a stopped wheel. The load
+predicate is now evaluated only while the wheel is being driven forward, so that whole class of
+bug cannot occur.
 
 ```java
 package frc.robot.subsystems.indexer;
@@ -2798,8 +3217,6 @@ import org.littletonrobotics.junction.AutoLogOutput;
 public class Indexer extends SubsystemBase {
   public enum WantedState {
     IDLE,
-    INDEX,
-    HOLD,
     FEED,
     EJECT,
     CHARACTERIZE
@@ -2807,9 +3224,9 @@ public class Indexer extends SubsystemBase {
 
   public enum SystemState {
     IDLE,
-    INDEXING,
-    HOLDING,
     FEEDING,
+    UNJAMMING,
+    JAMMED,
     EJECTING,
     CHARACTERIZING
   }
@@ -2817,47 +3234,53 @@ public class Indexer extends SubsystemBase {
   private final IndexerIO io;
   private final IndexerIOInputsAutoLogged inputs = new IndexerIOInputsAutoLogged();
   private final Timer stateTimer = new Timer();
-  private final Debouncer hasPieceDebouncer = new Debouncer(0.0, Debouncer.DebounceType.kBoth);
-  private final Debouncer shotDebouncer = new Debouncer(0.0, Debouncer.DebounceType.kRising);
+  private final Debouncer loadedDebouncer = new Debouncer(0.0, Debouncer.DebounceType.kBoth);
+  private final Debouncer jamDebouncer = new Debouncer(0.0, Debouncer.DebounceType.kRising);
 
   private WantedState wantedState = WantedState.IDLE;
   private SystemState systemState = SystemState.IDLE;
-  private boolean hasPiece = false;
-  private int shotCount = 0;
+  private boolean loaded = false;
+  private int unjamAttempts = 0;
   private double characterizationVolts = 0.0;
 
   public Indexer(IndexerIO io) {
-    // TODO: Store io, start stateTimer, register FaultReporter checks for the motor and, when
-    // kHasBeamBreak, the beam break.
+    // TODO: Store io, start stateTimer, register the motor with FaultReporter, and create a
+    // warning Alert for JAMMED ("Indexer jammed; EJECT to clear").
   }
 
   @Override
   public void periodic() {
-    // TODO: Standard five-step periodic. Between steps 1 and 2 call updatePieceDetection() so the
-    // transition logic sees a fresh hasPiece. Log hasPiece and shotCount.
+    // TODO: Standard five-step periodic. Between steps 1 and 2 call updateLoadAndJam() so the
+    // transition sees this loop's stall. Log loaded, unjamAttempts and goal/error RPM.
   }
 
-  private void updatePieceDetection() {
-    // TODO: If kHasBeamBreak and beamBreakConnected, hasPiece = hasPieceDebouncer.calculate(
-    // inputs.beamBreakTripped). Otherwise hasPiece = hasPieceDebouncer.calculate(
-    // inputs.statorCurrentAmps > kHasPieceCurrentAmps && velocity dropped more than
-    // kHasPieceVelocityDropRpm below setpoint). Detect a shot when systemState == FEEDING and
-    // hasPiece falls from true to false; increment shotCount through shotDebouncer.
+  private void updateLoadAndJam() {
+    // TODO: Push kLoadedDebounceSec / kJamDetectSec into the debouncers via ifChanged. Only while
+    // systemState == FEEDING (motor driven forward and past a short settle after the goal
+    // changed): loaded = loadedDebouncer.calculate(current > kLoadedCurrentAmps && goal - velocity
+    // > kLoadedVelocityDropRpm); jamDetected = jamDebouncer.calculate(current > kJamCurrentAmps &&
+    // velocity < kJamVelocityRpm). In every other state loaded = false - the question has no
+    // meaning for a stopped or reversing wheel, and answering it anyway is what made the old
+    // single-piece detector so intricate.
   }
 
   private SystemState handleStateTransition() {
-    // TODO: INDEX -> INDEXING until hasPiece(), then HOLDING; FEED -> FEEDING; EJECT -> EJECTING
-    // with a state timeout that returns to IDLE after a tunable eject duration; IDLE -> IDLE.
+    // TODO: FEED -> FEEDING; FEEDING + jamDetected -> UNJAMMING (unjamAttempts++); UNJAMMING after
+    // kUnjamSec -> FEEDING; a jam with unjamAttempts == kMaxUnjamAttempts -> JAMMED instead, which
+    // latches until the wanted state changes (the same "latch until intent changes" rule the eject
+    // timeout and Shooter's fault use). EJECT -> EJECTING; CHARACTERIZE -> CHARACTERIZING;
+    // IDLE -> IDLE. setWantedState resets unjamAttempts whenever the request changes.
     return SystemState.IDLE;
   }
 
   private void applyState() {
-    // TODO: switch dispatching io.setVelocity(kIndexRpm / 0 / kFeedRpm / kEjectRpm) or
+    // TODO: IDLE/JAMMED -> io.setVelocity(0) (brake holds the pile); FEEDING -> kFeedRpm;
+    // UNJAMMING -> kUnjamRpm; EJECTING -> kEjectRpm; CHARACTERIZING ->
     // io.setOpenLoop(characterizationVolts).
   }
 
   public void setWantedState(WantedState wanted) {
-    // TODO: Assign.
+    // TODO: Assign; reset unjamAttempts on change.
   }
 
   public Command setWantedStateCommand(WantedState wanted) {
@@ -2865,20 +3288,23 @@ public class Indexer extends SubsystemBase {
     return null;
   }
 
-  @AutoLogOutput(key = "Indexer/HasPiece")
-  public boolean hasPiece() {
-    // TODO: Getter. Superstructure gates SCORING states on this.
+  @AutoLogOutput(key = "Indexer/Loaded")
+  public boolean isLoaded() {
+    // TODO: Getter. True only while FEEDING and pushing against something. Superstructure's
+    // likelyEmpty() clock does not advance while this is true.
     return false;
   }
 
-  @AutoLogOutput(key = "Indexer/ShotCount")
-  public int getShotCount() {
-    // TODO: Getter.
-    return 0;
+  @AutoLogOutput(key = "Indexer/Unjamming")
+  public boolean isUnjamming() {
+    // TODO: systemState == UNJAMMING. Superstructure reverses the floor roller in step with it and
+    // pauses the likelyEmpty() clock.
+    return false;
   }
 
-  public void resetShotCount() {
-    // TODO: Zero it in autonomousInit so per-match counts are clean.
+  public boolean isJammed() {
+    // TODO: systemState == JAMMED.
+    return false;
   }
 
   public void setCharacterizationVolts(double volts) {
@@ -3123,7 +3549,9 @@ The most subtle subsystem in the project. It converts a *field-relative* aim azi
 *continuous, in-range, robot-relative* turret setpoint via `TurretUnwrapper`, applies a velocity
 feedforward equal to (target's angular rate) − (chassis yaw rate) so the turret tracks while the
 drivetrain spins, publishes its angle into `RobotState`'s interpolation buffer every loop for the
-moving-camera transform, and refuses to sweep through the intake's arc while the intake is deployed.
+moving-camera transform, and refuses to sweep through its intake-conflict arc while the intake's
+pivot is inside, or moving through, the turret-conflict pivot band (§2.4 — a *deployed* intake is
+outside that band, so the turret aims freely while the robot intakes).
 When the desired azimuth is unreachable it enters `OUT_OF_RANGE` and reports that to the
 Superstructure, which then asks the drivetrain to rotate — no jammed belts.
 
@@ -3179,7 +3607,8 @@ public class Turret extends SubsystemBase {
   }
 
   public void setIntakeArcGuard(BooleanSupplier blocked) {
-    // TODO: Superstructure injects () -> !intake.isStowed(); stored, evaluated each loop.
+    // TODO: Superstructure injects intake::isInTurretConflictBand; stored, evaluated each loop.
+    // (Originally () -> !intake.isStowed(), which wrongly treated a deployed intake as a conflict.)
   }
 
   @Override
@@ -3499,6 +3928,13 @@ public class ShooterIOSim implements ShooterIO {
     // TODO: controller.setPID(...).
   }
 
+  public void injectShot() {
+    // TODO: Test hook: one game piece passes through the wheels. Remove a tunable fraction of the
+    // wheel's kinetic energy in a single update (a speed step down), which is what the shot
+    // detector keys on. Called by tests and by a sim keyboard binding, so bursts of N pieces can be
+    // replayed at any cadence with no maple-sim.
+  }
+
   @Override
   public void stop() {
     // TODO: Zero.
@@ -3514,6 +3950,15 @@ waiting for the error to actually fall inside tolerance, `willBeAtSpeedIn(double
 the current velocity forward using the measured spin-up slope, so the Superstructure can start the
 feed a few tens of milliseconds early and keep the shot cadence up. It also holds an idle RPM
 between shots — spinning from idle instead of from zero roughly halves recovery time.
+
+It also **counts shots** (§2.4). With a hopper and no piece sensor, the flywheel is the most
+reliable piece detector on the robot: every piece that scores passes through it and takes a sharp
+bite out of wheel speed. A loop-to-loop drop larger than `kShotDipRpm`, while the wheel was already
+within `kShotArmToleranceRpm` of its goal, is one shot. After it, further drops are ignored for
+`kShotRefractorySec`. The arming condition is what stops a goal change or a spin-up from counting,
+and the refractory window is what stops one piece's dip from counting twice. The count is a
+post-match diagnostic. `getSecondsSinceLastShot()` is the live signal, because the Superstructure's
+`likelyEmpty()` depends on it.
 
 ```java
 package frc.robot.subsystems.shooter;
@@ -3553,6 +3998,8 @@ public class Shooter extends SubsystemBase {
   private double lastVelocityRpm = 0.0;
   private double accelRpmPerSec = 0.0;
   private double characterizationVolts = 0.0;
+  private int shotCount = 0;
+  private final Timer sinceLastShot = new Timer();
 
   public Shooter(ShooterIO io) {
     // TODO: Store io, start stateTimer, register FaultReporter checks for BOTH motors separately.
@@ -3562,7 +4009,16 @@ public class Shooter extends SubsystemBase {
   public void periodic() {
     // TODO: Standard five-step periodic. Also differentiate inputs.velocityRpm through accelFilter
     // into accelRpmPerSec, push gains via ifChanged, push the PowerBudget scalar at Priority.HIGH,
-    // and log goalRpm, error, and both motors' currents.
+    // and log goalRpm, error, and both motors' currents. Call detectShot() after inputs are fresh.
+  }
+
+  private void detectShot() {
+    // TODO: armed = goalRpm > 0 && |lastVelocityRpm - goalRpm| < kShotArmToleranceRpm. If armed &&
+    // (lastVelocityRpm - inputs.velocityRpm) > kShotDipRpm && sinceLastShot.hasElapsed(
+    // kShotRefractorySec): shotCount++, sinceLastShot.restart(), log Shooter/ShotDetected true for
+    // this loop. The signal is registered at 100 Hz but this runs at the 50 Hz loop rate. If a
+    // logged burst shows back-to-back pieces merging into one dip, the fix is to count dips in the
+    // timestamped high-rate samples (the PhoenixOdometryThread pattern), not to shrink the window.
   }
 
   private SystemState handleStateTransition() {
@@ -3604,10 +4060,31 @@ public class Shooter extends SubsystemBase {
 
   @AutoLogOutput(key = "Shooter/WillBeAtSpeed")
   public boolean willBeAtSpeedIn(double horizonSec) {
-    // TODO: Project velocityRpm + accelRpmPerSec * horizonSec and test it against the tolerance
-    // band. Lets the Superstructure open the feed slightly before the flywheel actually arrives,
-    // which is worth roughly one extra shot per scoring cycle.
+    // TODO: willBeAtSpeedIn(horizonSec, kToleranceRpm.get()).
     return false;
+  }
+
+  public boolean willBeAtSpeedIn(double horizonSec, double toleranceRpm) {
+    // TODO: Project velocityRpm + accelRpmPerSec * horizonSec and test it against +/- toleranceRpm.
+    // Lets the Superstructure open the feed slightly before the flywheel actually arrives. The
+    // Superstructure passes kBurstToleranceRpm once a burst is feeding, so recovery between pieces
+    // does not stop and restart the indexer (section 2.4). A zero goal is never "at speed".
+    return false;
+  }
+
+  @AutoLogOutput(key = "Shooter/ShotCount")
+  public int getShotCount() {
+    // TODO: Getter. Pieces FIRED, not scored - nothing on the robot can see a score.
+    return 0;
+  }
+
+  public double getSecondsSinceLastShot() {
+    // TODO: sinceLastShot.get(), or +infinity before the first shot of the match.
+    return Double.POSITIVE_INFINITY;
+  }
+
+  public void resetShotCount() {
+    // TODO: Zero it in autonomousInit so per-match counts are clean. (Moved here from Indexer.)
   }
 
   public double getVelocityRpm() {
@@ -3838,7 +4315,9 @@ public class TurretUnwrapper {
   public static boolean passesThroughArc(
       double fromRad, double toRad, double arcMinRad, double arcMaxRad) {
     // TODO: Return true when the closed interval [min(from,to), max(from,to)] overlaps
-    // [arcMinRad, arcMaxRad]. Turret uses this to refuse a sweep through the deployed intake.
+    // [arcMinRad, arcMaxRad]. Turret uses this to refuse a sweep through the intake while the
+    // intake's pivot is in the turret-conflict band. (M10 replaced its callers with
+    // passesThroughArcWrapped, which tests every full-turn image of the arc.)
     return false;
   }
 }
@@ -4308,7 +4787,9 @@ public class Vision extends SubsystemBase {
 
   public void setIntakePipeline(int index) {
     // TODO: intakeCameraIO.setPipeline(index) - Superstructure switches it to the game-piece
-    // pipeline whenever the intake is deployed and back to AprilTags when stowed.
+    // pipeline while IntakeMode is INTAKING and back to AprilTags otherwise. Keyed on the intake
+    // REQUEST, not the arm position: the arm now rests deployed for most of the match (section
+    // 2.4), and keying on position would take the camera off AprilTags permanently.
   }
 
   @AutoLogOutput(key = "Vision/QuestTrusted")
@@ -4335,8 +4816,12 @@ The cross-mechanism state machine, and the only class allowed to command more th
 It owns the `ShootingSolver`, converts its output into turret and flywheel goals, decides when the
 indexer may feed, enforces the intake/turret interlock in both directions, and handles the
 "turret cannot reach" case by asking the drivetrain for a heading. It exposes exactly one mutator to
-the rest of the robot (`setWantedState` / `setWantedStateCommand`) so a binding cannot put the robot
-into an illegal combination. Its `readyToScore` gate is the combination described in §6.
+the rest of the robot through two mutators, `setWantedState` for the shooter-side intent and
+`setIntakeRequested` for the intake intent, so a binding cannot put the robot into an illegal
+combination. The two intents are **orthogonal regions** (§2.4). The driver can shoot, move and
+intake at once, and `resolveIntakeMode()` reconciles them each loop. Its `readyToScore` gate is
+the seven-term combination described in §6.5. It asks nothing about game pieces, because with a
+hopper and no piece sensor there is nothing trustworthy to ask.
 
 ```java
 package frc.robot.subsystems.superstructure;
@@ -4360,9 +4845,9 @@ import org.littletonrobotics.junction.AutoLogOutput;
 public class Superstructure extends SubsystemBase {
   public enum WantedState {
     IDLE,
-    DEFAULT,
+    DEFAULT, // RESTING, intake keeps its posture (a deployed intake stays deployed)
+    STOW, // RESTING, and set the intake posture to STOWED - the only way the intake retracts
     HOME,
-    INTAKE,
     EJECT,
     SPIN_UP,
     SCORE_ON_MOVE,
@@ -4376,9 +4861,7 @@ public class Superstructure extends SubsystemBase {
   public enum SystemState {
     IDLE,
     HOMING,
-    STOWED,
-    INTAKING,
-    INDEXING,
+    RESTING, // was STOWED; renamed because the intake is usually deployed while resting
     EJECTING,
     SPINNING_UP,
     SCORING_ON_THE_MOVE,
@@ -4388,6 +4871,19 @@ public class Superstructure extends SubsystemBase {
     WAITING_FOR_TURRET,
     CHARACTERIZING,
     FAULTED
+  }
+
+  /** The intake region, resolved every loop from the SystemState and the intake request. */
+  public enum IntakeMode {
+    STOWED,
+    DEPLOYED,
+    INTAKING,
+    FEED_ASSIST
+  }
+
+  private enum IntakePosture {
+    STOWED,
+    DEPLOYED
   }
 
   private final Drive drive;
@@ -4406,6 +4902,12 @@ public class Superstructure extends SubsystemBase {
   private boolean ignoreShotTolerances = false;
   private Optional<Rotation2d> requestedDriveHeading = Optional.empty();
 
+  private boolean intakeRequested = false;
+  private IntakePosture intakePosture = IntakePosture.STOWED; // the robot starts inside its frame
+  private IntakeMode intakeMode = IntakeMode.STOWED;
+  private boolean burstLatched = false; // feed has opened in this scoring state (section 2.4)
+  private double unproductiveFeedSec = 0.0; // gate-open, unloaded feeding since the last shot
+
   public Superstructure(
       Drive drive,
       Intake intake,
@@ -4416,8 +4918,9 @@ public class Superstructure extends SubsystemBase {
       Vision vision) {
     // TODO: Store everything, start stateTimer, and wire the two interlocks:
     // intake.setDeployGuard(() -> !turretInIntakeConflictArc());
-    // turret.setIntakeArcGuard(() -> !intake.isStowed());
-    // This is the one place the interlock exists; do not duplicate it.
+    // turret.setIntakeArcGuard(intake::isInTurretConflictBand);
+    // This is the one place the interlock exists; do not duplicate it. Note the turret half keys
+    // on the intake's PIVOT BAND, not on "stowed": a deployed intake cannot reach the turret.
   }
 
   @Override
@@ -4425,64 +4928,100 @@ public class Superstructure extends SubsystemBase {
     // TODO: Standard five-step periodic (this subsystem has no IO layer). Before
     // handleStateTransition(), recompute lastShot = solver.solve(...) exactly once per loop and
     // solver.logDebug("Superstructure/Shot", lastShot) so every state reads the same solution.
+    // After the transition and before applyState(): intakeMode = resolveIntakeMode(), then
+    // updateEmptyBelief(). applyState() commands the shooter side (turret, shooter) from the
+    // SystemState handler and the feed side (intake, floor roller, indexer) from applyFeedSide(),
+    // so no handler has to re-derive the intake logic. Log IntakeMode, IntakePosture, BurstLatched
+    // and UnproductiveFeedSec.
   }
 
   private SystemState handleStateTransition() {
-    // TODO: Guarded switch on wantedState. Key guards: any SCORE_* requires indexer.hasPiece() and
-    // !FaultReporter.getInstance().anyCritical(), else fall through to SPINNING_UP; SCORE_ON_MOVE
-    // additionally requires lastShot.isUsable(), else WAITING_FOR_TURRET; if turret.isOutOfRange()
-    // -> WAITING_FOR_TURRET; HOME -> HOMING until intake.isHomed() && turret.isHomed(), with a
-    // state timeout to FAULTED; INTAKE -> INTAKING then INDEXING once indexer.hasPiece().
+    // TODO: Guarded switch on wantedState. Key guards: any SCORE_* requires
+    // !FaultReporter.getInstance().anyCritical(), else fall through to SPINNING_UP - there is NO
+    // piece guard (section 2.4); SCORE_ON_MOVE additionally requires lastShot.isUsable(), else
+    // WAITING_FOR_TURRET; if turret.isOutOfRange() -> WAITING_FOR_TURRET; HOME -> HOMING until
+    // intake.isHomed() && turret.isHomed(), with a state timeout to FAULTED; DEFAULT and STOW ->
+    // RESTING (STOW also sets intakePosture = STOWED).
     return SystemState.IDLE;
   }
 
   private void onEnter(SystemState state) {
-    // TODO: Any SCORING_* -> solver.reloadTables() and indexer.resetShotCount() is NOT called here
-    // (that belongs to autonomousInit). INTAKING -> vision.setIntakePipeline(gamePiecePipeline).
-    // Leaving INTAKING -> vision.setIntakePipeline(aprilTagPipeline).
+    // TODO: Any SCORING_* -> solver.reloadTables(), burstLatched = false. shooter.resetShotCount()
+    // is NOT called here (that belongs to autonomousInit). The intake-camera pipeline switch moves
+    // to resolveIntakeMode(): game-piece pipeline on entering IntakeMode.INTAKING, AprilTags on
+    // leaving it.
   }
 
   private void onExit(SystemState state) {
-    // TODO: Any SCORING_* -> indexer.setWantedState(HOLD) and clear requestedDriveHeading.
+    // TODO: Any SCORING_* -> indexer.setWantedState(IDLE), burstLatched = false, and clear
+    // requestedDriveHeading.
   }
 
   private void applyState() {
     // TODO: switch dispatching to the handlers below.
   }
 
-  private void stowed() {
-    // TODO: intake STOW, floorRoller IDLE, indexer HOLD (or IDLE when empty), turret STOW,
-    // shooter IDLE (idle RPM, not zero).
+  private void resting() {
+    // TODO: turret STOW, shooter IDLE (idle RPM, not zero). The feed side comes from
+    // applyFeedSide(): the intake keeps its posture - it does NOT stow just because nothing is
+    // happening, since raising it would dump the hopper.
   }
 
   private void homing() {
     // TODO: intake HOME, turret HOME, everything else IDLE.
   }
 
-  private void intaking() {
-    // TODO: intake DEPLOY_AND_INTAKE, floorRoller INTAKE, indexer INDEX, turret STOW (keeps it out
-    // of the intake arc), shooter IDLE.
+  private IntakeMode resolveIntakeMode() {
+    // TODO: The table in section 2.4. HOMING/EJECTING/CHARACTERIZING/FAULTED are overridden by
+    // their own handlers and return the mode unchanged. Otherwise: intakeRequested -> INTAKING
+    // (and intakePosture = DEPLOYED); else scoring state with the gate open and posture DEPLOYED
+    // -> FEED_ASSIST, unless a mis-tuned kFeedAssistAngleRad is in the turret-conflict band and the
+    // turret needs the arc (then DEPLOYED, log Superstructure/FeedAssistBlocked and raise the
+    // misconfiguration alert - never expected on this robot); else the posture.
+    // Switch the intake-camera pipeline on entering/leaving INTAKING. Also log
+    // Superstructure/StowedWhileMoving (and drive its warning alert) when the chassis is moving and
+    // !intake.isRetainingPieces() - pieces can fall out of a stowed intake.
+    return IntakeMode.STOWED;
   }
 
-  private void indexing() {
-    // TODO: intake STOW, floorRoller FEED briefly, indexer INDEX until hasPiece() then HOLD.
+  private void applyFeedSide() {
+    // TODO: Skipped in the override states. Otherwise, from intakeMode, shotRequested =
+    // wantedState is SCORE_* / AUTO_SCORE_ON_MOVE / PASS (the WANTED state, so a request diverted
+    // to SPINNING_UP or WAITING_FOR_TURRET still counts), and feedOpen = scoring system state &&
+    // isReadyToScore():
+    //   intake:      INTAKING -> DEPLOY_AND_INTAKE; FEED_ASSIST -> FEED_ASSIST;
+    //                DEPLOYED -> DEPLOY_ONLY; STOWED -> STOW
+    //   floorRoller: indexer.isUnjamming() ? EJECT : shotRequested ? FEED : IDLE
+    //   indexer:     feedOpen ? FEED : IDLE
+    // The floor roller LEADS: it packs the pile against the stopped indexer as soon as a shot is
+    // requested, and the braked indexer is the block until the shooter is ready. It never runs for
+    // intaking alone. Nothing here stows the turret: a deployed intake is outside the conflict band.
   }
+
+  private void updateEmptyBelief() {
+    // TODO: If a scoring state is active, the gate is open, the indexer is FEEDING (not
+    // UNJAMMING), !indexer.isLoaded(), and shooter.getSecondsSinceLastShot() > one loop, add one
+    // loop period to unproductiveFeedSec. Reset it to 0 when a shot is detected and whenever
+    // IntakeMode is INTAKING (new pieces may be arriving). Time with the gate CLOSED must not
+    // accumulate - it says nothing about the hopper.
 
   private void ejecting() {
-    // TODO: intake EJECT, floorRoller EJECT, indexer EJECT, shooter COAST.
+    // TODO: intake EJECT, floorRoller EJECT, indexer EJECT, shooter COAST. Held-button, not
+    // timed: emptying a full hopper takes as long as it takes.
   }
 
   private void spinningUp() {
     // TODO: shooter.setGoal(lastShot.isUsable() ? lastShot.flywheelRpm() :
-    // Constants.Shooter.kIdleRpm.get()); turret aims if the solution is usable, else stows.
+    // Constants.Shooter.kIdleRpm.get()); turret aims if the solution is usable, else stows. The
+    // feed side (including intaking, if held) comes from applyFeedSide().
   }
 
   private void scoringOnTheMove() {
     // TODO: turret.setGoal(lastShot.turretFieldAngle(), lastShot.turretAngularVelocityRadPerSec());
     // shooter.setGoal(lastShot.flywheelRpm());
-    // indexer.setWantedState(isReadyToScore() ? FEED : HOLD);
-    // floorRoller.setWantedState(isReadyToScore() ? FEED : IDLE);
-    // intake stays STOW so nothing enters the turret's arc mid-shot.
+    // The indexer, floor roller and intake are commanded by applyFeedSide(): FEED streams the
+    // hopper while the gate is open, the intake feed-assists (or keeps intaking, if held), and the
+    // pivot-band interlock - not a blanket stow - keeps the arm out of the turret's way.
   }
 
   private void scoringStationary() {
@@ -4503,7 +5042,7 @@ public class Superstructure extends SubsystemBase {
   private void waitingForTurret() {
     // TODO: The turret cannot reach the aim point. Set requestedDriveHeading to the field angle that
     // would bring the aim point back inside the turret's travel, hold the flywheel at the solved RPM,
-    // and keep the indexer in HOLD. DriveCommands reads getRequestedDriveHeading() and blends it into
+    // and keep the indexer IDLE (applyFeedSide sees the gate closed). DriveCommands reads getRequestedDriveHeading() and blends it into
     // the driver's rotation input.
   }
 
@@ -4525,13 +5064,25 @@ public class Superstructure extends SubsystemBase {
   @AutoLogOutput(key = "Superstructure/ReadyToScore")
   public boolean isReadyToScore() {
     // TODO: The full gate (see section 6.5): lastShot.isUsable() && turret.atGoal() &&
-    // shooter.willBeAtSpeedIn(Constants.getLoopPeriodSec() * 2) && indexer.hasPiece() &&
+    // shooter.willBeAtSpeedIn(Constants.getLoopPeriodSec() * 2,
+    //     burstLatched ? kBurstToleranceRpm : kToleranceRpm) &&
     // RobotState.getVisionStalenessSec() < kMaxVisionStalenessSec &&
     // RobotState.getPoseStdDevEstimate() < kMaxPoseStdDevMeters &&
     // RobotState.getFieldRelativeAccel().getNorm() < kMaxChassisAccelForShotMetersPerSec2 &&
     // !FaultReporter.anyCritical(). Return true unconditionally when ignoreShotTolerances.
+    // Seven terms; there is no piece term (section 2.4). Set burstLatched when the gate first
+    // opens in a scoring state; clear it when any term OTHER than term 3 is false. Compute the
+    // gate once per loop and cache it, so applyFeedSide and the log see the same answer.
     // Log EACH term separately under Superstructure/ReadyTerms/* - when the robot will not shoot,
     // this log is how you find out which term is false in under ten seconds.
+    return false;
+  }
+
+  @AutoLogOutput(key = "Superstructure/LikelyEmpty")
+  public boolean likelyEmpty() {
+    // TODO: unproductiveFeedSec >= Constants.Superstructure.kEmptyConfirmSec.get(). A BELIEF, not a
+    // measurement: autos use it to end a scoring leg and the driver controller rumbles on it.
+    // Never gate a teleop shot on it.
     return false;
   }
 
@@ -4547,8 +5098,36 @@ public class Superstructure extends SubsystemBase {
 
   public Command scoreUntilEmptyCommand() {
     // TODO: Command used by autos: setWantedStateCommand(AUTO_SCORE_ON_MOVE) then
-    // Commands.waitUntil(() -> !indexer.hasPiece()).withTimeout(tunable) then back to DEFAULT.
+    // Commands.waitUntil(this::likelyEmpty).withTimeout(Constants.Auto.kScoreTimeoutSec) then back
+    // to DEFAULT. The timeout is now a max-burst bound (long enough to empty a full hopper), and
+    // likelyEmpty() is what ends the leg early.
     return null;
+  }
+
+  public void onEnable() {
+    // TODO: Called from Robot.autonomousInit and teleopInit. If intakePosture == STOWED and the
+    // system state is not HOMING or FAULTED, set intakePosture = DEPLOYED. The robot must START
+    // stowed (a rule) but pieces fall out of a stowed intake, so the first enable deploys it with
+    // no button press. An intake an operator deliberately STOWed during auto is redeployed at
+    // teleopInit, for the same reason.
+  }
+
+  public void setIntakeRequested(boolean requested) {
+    // TODO: Assign. The second mutator (section 2.4). Independent of wantedState, so the driver can
+    // hold INTAKE and SCORE at the same time.
+  }
+
+  public Command intakeWhileHeldCommand() {
+    // TODO: Commands.startEnd(() -> setIntakeRequested(true), () -> setIntakeRequested(false))
+    // WITHOUT requiring this subsystem, for a whileTrue binding. Release stops the roller; the
+    // intake stays deployed.
+    return null;
+  }
+
+  @AutoLogOutput(key = "Superstructure/IntakeMode")
+  public IntakeMode getIntakeMode() {
+    // TODO: Getter.
+    return intakeMode;
   }
 
   public void setIgnoreShotTolerances(boolean ignore) {
@@ -4673,12 +5252,13 @@ public class AutoFactory {
     // TODO: NamedCommands.registerCommand(name, command) for the full vocabulary below. Keep the
     // names EXACTLY as written here - they are typed by hand into the PathPlanner GUI and a typo
     // produces a silently-skipped marker, not an error:
-    //   "Intake"          -> superstructure.setWantedStateCommand(WantedState.INTAKE)
-    //   "StopIntake"      -> superstructure.setWantedStateCommand(WantedState.DEFAULT)
+    //   "Intake"          -> Commands.runOnce(() -> superstructure.setIntakeRequested(true))
+    //   "StopIntake"      -> Commands.runOnce(() -> superstructure.setIntakeRequested(false))
+    //                        (roller stops; the intake stays deployed)
+    //   "StowIntake"      -> superstructure.setWantedStateCommand(WantedState.STOW)
     //   "SpinUp"          -> superstructure.setWantedStateCommand(WantedState.SPIN_UP)
     //   "ScoreOnMove"     -> superstructure.scoreUntilEmptyCommand()
     //   "ScoreStationary" -> scoreStationaryCommand()
-    //   "WaitForPiece"    -> waitForPieceCommand(2.0)
     //   "Eject"           -> superstructure.setWantedStateCommand(WantedState.EJECT)
     //   "Home"            -> superstructure.setWantedStateCommand(WantedState.HOME)
     //   "StowTurret"      -> turret.setWantedStateCommand(Turret.WantedState.STOW)
@@ -4702,15 +5282,9 @@ public class AutoFactory {
 
   public Command scoreStationaryCommand() {
     // TODO: superstructure.setWantedStateCommand(SCORE_STATIONARY)
-    //   .andThen(Commands.waitUntil(() -> !indexer.hasPiece()))
+    //   .andThen(Commands.waitUntil(superstructure::likelyEmpty))
     //   .withTimeout(Constants.Auto.kScoreTimeoutSec.get())
     //   .andThen(superstructure.setWantedStateCommand(DEFAULT)).
-    return null;
-  }
-
-  public Command waitForPieceCommand(double timeoutSec) {
-    // TODO: Commands.waitUntil(indexer::hasPiece).withTimeout(timeoutSec). Used after an intake
-    // marker so the routine does not drive away from a piece it has not actually collected.
     return null;
   }
 
@@ -4788,10 +5362,21 @@ public class AutoRoutines {
 
   public Command driveAndIntake(String pathName) {
     // TODO: Commands.deadline(factory.followPath(pathName),
-    //   superstructure.setWantedStateCommand(Superstructure.WantedState.INTAKE))
-    //   .andThen(factory.waitForPieceCommand(Constants.Auto.kIntakeSettleSec.get())).
-    // The deadline group ends when the path ends; the trailing wait gives the indexer a moment to
-    // seat the piece before the next segment starts moving.
+    //   superstructure.intakeWhileHeldCommand())
+    //   .andThen(Commands.deadline(Commands.waitSeconds(Constants.Auto.kIntakeSettleSec.get()),
+    //       superstructure.intakeWhileHeldCommand())).
+    // A fixed dwell, not a wait-for-piece: there is no piece sensor (section 2.4), so the
+    // routine cannot know whether the pickup worked and does not pretend to.
+    return null;
+  }
+
+  public Command driveIntakeAndShoot(String pathName) {
+    // TODO: Commands.deadline(factory.followPath(pathName),
+    //   superstructure.intakeWhileHeldCommand(),
+    //   superstructure.setWantedStateCommand(Superstructure.WantedState.AUTO_SCORE_ON_MOVE))
+    //   .andThen(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT)).
+    // The hopper-robot pattern: sweep through pieces while firing whatever is aboard, no stop and
+    // no separate pickup leg. Pieces are fired as they arrive; the intake stays down throughout.
     return null;
   }
 
@@ -4824,12 +5409,6 @@ public class AutoRoutines {
     return null;
   }
 
-  public Command bailoutIfEmpty(Command ifHasPiece, Command ifEmpty) {
-    // TODO: Commands.either(ifHasPiece, ifEmpty, indexer::hasPiece) evaluated at schedule time.
-    // This is the "we missed the pickup, go get the next one instead of shooting air" branch.
-    return null;
-  }
-
   public Command aimTurretAt(Rotation2d fieldAngle) {
     // TODO: Commands.runOnce(() -> turret.setGoal(fieldAngle, 0.0)) then
     // Commands.waitUntil(turret::atGoal).withTimeout(1.0). Used to pre-position the turret during a
@@ -4852,16 +5431,28 @@ public class AutoRoutines {
   }
 
   public Command preloadOnly() {
-    // TODO: resetPoseToPathStart("Center_Preload") -> spinUpWhile(shootInPlace(2.0)) ->
-    // followPath("Center_Preload"). Scores the preload then leaves. The fallback routine when
-    // vision is down: it depends on nothing but odometry.
+    // TODO: resetPoseToPathStart("Center_Preload") -> waitUntilIntakeRetaining() ->
+    // spinUpWhile(shootInPlace(...)) -> followPath("Center_Preload"). Fires the 8 preloaded pieces
+    // then leaves. The fallback routine when vision is down: it depends on nothing but odometry.
+    // Log Auto/PreloadFired = shooter.getShotCount() at the end: 8 pieces in is a known ground
+    // truth, so every match's preload burst checks the shot detector for free.
+    return null;
+  }
+
+  public Command waitUntilIntakeRetaining() {
+    // TODO: Commands.waitUntil(intake::isRetainingPieces).withTimeout(tunable, ~1 s). EVERY routine
+    // starts with this before its first path: the robot starts with the intake STOWED (a rule),
+    // Superstructure.onEnable() deploys it at autonomousInit, and pieces fall out of a stowed
+    // intake if the robot moves first. The timeout exists so a dead pivot costs a second, not
+    // the auto.
     return null;
   }
 
   public Command centerThreePiece() {
     // TODO: Center start. resetPose -> shootInPlace -> driveAndIntake("Center_ToPiece1") ->
     // driveAndShoot("Center_Score1") -> driveAndIntake("Center_ToPiece2") ->
-    // driveAndShoot("Center_Score2"), each pickup wrapped in bailoutIfEmpty.
+    // driveAndShoot("Center_Score2"). (There is no bailoutIfEmpty any more: a missed pickup cannot
+    // be detected without a sensor, and a moving scoring leg over an empty hopper costs no stop.)
     return null;
   }
 
@@ -4893,7 +5484,7 @@ public class AutoRoutines {
   public Command dynamicScavenge() {
     // TODO: The vision-driven routine. Loop up to kMaxScavengeCycles: if
     // vision.getGamePieceFieldPose() is present, AutoBuilder.pathfindToPose(that pose,
-    // AutoFactory.defaultPathfindConstraints(), 0.0) while INTAKE; else drive to the next static
+    // AutoFactory.defaultPathfindConstraints(), 0.0) with intakeWhileHeldCommand(); else drive to the next static
     // waypoint. Then driveAndShoot back. Depends on the intake Limelight's game-piece pipeline
     // being tuned, so gate it behind a chooser entry students can avoid at an early event.
     return null;
@@ -5514,8 +6105,10 @@ Builds a real `Superstructure` on top of real subsystems wired to *empty* `XxxIO
 (the same `new XxxIO() {}` anonymous classes `RobotContainer` uses in REPLAY mode), then steps
 `periodic()` by hand. No `CommandScheduler`, no HAL beyond `HAL.initialize`. This is how you verify
 the guards and timeouts that are otherwise only exercised by a misbehaving robot: you can assert
-"requesting SCORE with no game piece never reaches `SCORING_ON_THE_MOVE`" in 40 ms instead of
-discovering it in a qualification match.
+"requesting SCORE without a usable shot solution never feeds" in 40 ms instead of discovering it in
+a qualification match. The hopper replan (§2.4) retires the piece-gate cases and adds the intake
+region, burst, empty-belief and jam cases below; the Shooter and Indexer FSM suites gain matching
+unit cases (shot detection and jam recovery respectively).
 
 ```java
 package frc.robot.subsystems.superstructure;
@@ -5557,20 +6150,103 @@ public class SuperstructureFsmTest {
   @Test
   void startsInHomingAndReachesStowed() {
     // TODO: assertEquals(SystemState.HOMING, superstructure.getSystemState()) at construction; mark
-    // both mechanisms homed via their empty IO inputs; step(5); assert STOWED.
+    // both mechanisms homed via their empty IO inputs; step(5); assert RESTING, and assert the
+    // intake is STOWED (the robot starts inside its frame; nothing has asked it to deploy).
   }
 
   @Test
-  void scoreRequestWithoutPieceNeverReachesScoring() {
-    // TODO: setWantedState(SCORE_ON_MOVE) with indexer.hasPiece() false. step(50). Assert the state
-    // is SPINNING_UP and was NEVER SCORING_ON_THE_MOVE at any step (record the visited states).
+  void scoringDoesNotRequireAPiece() {
+    // TODO: The replacement for the retired scoreRequestWithoutPieceNeverReachesScoring. With a
+    // usable shot and no simulated load anywhere, setWantedState(SCORE_ON_MOVE); step(50). Assert
+    // the state reaches SCORING_ON_THE_MOVE and the indexer is asked to FEED once the gate opens.
+    // Pins the decision in section 2.4 so nobody quietly re-adds a piece guard.
   }
 
   @Test
   void scoreOnMoveRequiresUsableShotSolution() {
-    // TODO: Give the indexer a piece but leave the shot tables at their default zeros so
-    // ShotParameters.isUsable() is false. Assert the FSM settles in WAITING_FOR_TURRET, not
-    // SCORING_ON_THE_MOVE.
+    // TODO: Leave the shot tables at their default zeros so ShotParameters.isUsable() is false.
+    // Assert the FSM settles in WAITING_FOR_TURRET, not SCORING_ON_THE_MOVE, and the indexer is
+    // never FEED.
+  }
+
+  @Test
+  void releasingIntakeLeavesItDeployed() {
+    // TODO: setIntakeRequested(true); step until the intake is INTAKING; setIntakeRequested(false);
+    // step(20). Assert the intake is DEPLOYED with the roller stopped, and never passed through
+    // STOWING. Then setWantedState(DEFAULT) and assert it STILL does not stow; only STOW does.
+  }
+
+  @Test
+  void intakeScoreAndDriveTogether() {
+    // TODO: Hold both setIntakeRequested(true) and SCORE_ON_MOVE with a usable shot. Assert
+    // IntakeMode == INTAKING, the turret is AIMING (not stowed), and the indexer FEEDs when the
+    // gate opens. The old intaking() stowed the turret; this proves that coupling is gone.
+  }
+
+  @Test
+  void feedAssistOnlyWhileGateOpenAndNotIntaking() {
+    // TODO: Deployed posture, SCORE_ON_MOVE, intake not held. Gate closed -> IntakeMode DEPLOYED;
+    // gate open -> FEED_ASSIST; then hold intake -> INTAKING wins. Release score -> DEPLOYED.
+  }
+
+  @Test
+  void feedAssistRocksAndNeverBlocksTheTurret() {
+    // TODO: With the default constants, score through the turret's conflict arc. Assert the
+    // intake's pivot goal alternates between the deployed and feed-assist angles every half
+    // period, isInTurretConflictBand() stays false throughout, and the turret still aims. Then
+    // drop the LOW power scalar below 1 and assert the rocking stops at the feed-assist angle.
+  }
+
+  @Test
+  void misconfiguredFeedAssistYieldsToTurret() {
+    // TODO: The guard for a mis-tuned constant: set kFeedAssistAngleRad inside the band, aim
+    // through the arc, assert the intake stays DEPLOYED, FeedAssistBlocked is logged and the alert
+    // fires.
+  }
+
+  @Test
+  void floorRollerLeadsAndIndexerGates() {
+    // TODO: Request SCORE_ON_MOVE with the gate held closed (e.g. unusable shot). Assert the floor
+    // roller is FEED from the first loop while the indexer stays IDLE; open the gate and assert
+    // the indexer then FEEDs. Separately: intake held with no shot requested -> floor roller IDLE;
+    // SPIN_UP alone -> floor roller IDLE.
+  }
+
+  @Test
+  void firstEnableDeploysTheIntake() {
+    // TODO: Boot (posture STOWED), home, call onEnable(); step until settled. Assert the intake
+    // reaches DEPLOYED and isRetainingPieces() becomes true. Assert the turret was refused its
+    // conflict arc until the pivot left the band, and allowed it afterwards.
+  }
+
+  @Test
+  void burstLatchKeepsFeedingThroughRecovery() {
+    // TODO: Open the gate, then injectShot() into ShooterIOSim at a steady cadence. Assert the
+    // indexer stays FEED across every dip that stays inside kBurstToleranceRpm (no FEED->IDLE
+    // chatter), and that a dip beyond it DOES close the gate. Then stale the pose (term 5) and
+    // assert the latch clears. Count FEED->IDLE transitions, not the final state.
+  }
+
+  @Test
+  void likelyEmptyOnlyAccumulatesWithTheGateOpen() {
+    // TODO: The mutation target. (a) Gate closed for 10 x kEmptyConfirmSec: assert likelyEmpty()
+    // stays false. (b) Gate open, no load, no shots: assert it becomes true after ~kEmptyConfirmSec.
+    // (c) Repeat (b) but with setSimulatedLoad(true): stays false. (d) Repeat (b) with a shot
+    // injected halfway: the clock restarts. (e) Intake held: the clock resets.
+  }
+
+  @Test
+  void scoreUntilEmptyEndsOnBeliefOrTimeout() {
+    // TODO: Run scoreUntilEmptyCommand() by hand-stepping its command. Assert it ends early once
+    // likelyEmpty() is true, and at kScoreTimeoutSec when shots keep arriving (a hopper that never
+    // empties must not hold the auto forever).
+  }
+
+  @Test
+  void jamReversesTheFloorRollerAndPausesTheEmptyClock() {
+    // TODO: setSimulatedJam(true) while feeding. Assert the indexer enters UNJAMMING, the floor
+    // roller is EJECT for the same loops, unproductiveFeedSec does not advance, and after
+    // kMaxUnjamAttempts the indexer latches JAMMED with its alert raised.
   }
 
   @Test
@@ -5589,10 +6265,13 @@ public class SuperstructureFsmTest {
 
   @Test
   void intakeAndTurretInterlockHoldsBothWays() {
-    // TODO: (a) Deploy the intake, then command a turret goal inside the conflict arc; assert the
-    // turret's commanded position stays outside [kIntakeConflictMinRad, kIntakeConflictMaxRad].
-    // (b) Park the turret inside the conflict arc, then request INTAKE; assert the intake does not
-    // leave STOWED. Both directions matter; teams routinely implement only one.
+    // TODO: Rewritten for the pivot band (section 2.4). (a) With the intake STOWED (inside the
+    // band - the real conflict on this robot), command a turret goal inside the conflict arc;
+    // assert the turret's commanded position stays outside the arc (use passesThroughArcWrapped -
+    // the travel is wider than a full turn). (b) Park the turret inside the arc, then request STOW
+    // from deployed; assert the pivot holds short of the band. (c) The new negative case: with the
+    // intake DEPLOYED or feed-assisting (outside the band), the turret MAY enter the arc. Both directions matter; teams routinely implement only one, and (c) is
+    // what stops the interlock being "fixed" back into a blanket stow.
   }
 
   @Test
@@ -5612,7 +6291,7 @@ public class SuperstructureFsmTest {
   @Test
   void disablingClearsWantedStateSafely() {
     // TODO: From SCORING_ON_THE_MOVE, call setWantedState(IDLE); step(3); assert the indexer's
-    // wanted state is HOLD or IDLE and never FEED. This is the "auto leaked a goal into teleop" bug.
+    // wanted state is IDLE and never FEED. This is the "auto leaked a goal into teleop" bug.
   }
 }
 ```
@@ -5796,12 +6475,13 @@ Constants
 ├── Drivetrain   mass/MOI/COF (plain) + driver feel and auto-align gains (tunable)
 ├── Intake       gear ratio + inversion + sim MOI (plain); angles, gains, RPM, homing (tunable)
 ├── FloorRoller  gear ratio + inversion (plain); RPM and gains (tunable)
-├── Indexer      gear ratio + beam-break presence (plain); RPM, gains, detection thresholds (tunable)
+├── Indexer      gear ratio + inversion (plain); RPM, gains, load and jam thresholds (tunable)
 ├── Turret       gear ratio + inversion + sim MOI (plain); limits, gains, tolerances, arcs (tunable)
-├── Shooter      gear ratio + inversions + sim MOI (plain); gains, idle/max RPM, tolerance (tunable)
+├── Shooter      gear ratio + inversions + sim MOI (plain); gains, idle/max RPM, tolerances, shot detection (tunable)
 ├── Shot         the three shot-table arrays + solver settings + every readyToShoot gate
 ├── Vision       camera names + four Transform3ds (plain); covariances and rejection gates (tunable)
 ├── Power        brownout thresholds and the current-budget floor
+├── Superstructure [ADD - §5.3] homing timeout and the likelyEmpty() confirmation time
 ├── Auto         [ADD - §5.3] path-following timeouts and pathfind constraints
 └── Controls     [ADD - §5.3] deadbands, trigger thresholds, rumble levels
 ```
@@ -5857,17 +6537,40 @@ deploy, no disable, no rebuild. This is the mechanism that makes the ~180 tunabl
 rather than a liability — but it is also why rule 2 exists: 180 tunables is already at the edge of
 what a person can navigate, and 400 would be unusable.
 
-### 5.3 Two nested classes to add
+### 5.3 Three nested classes to add
 
-`AutoFactory`, `AutoRoutines`, `AutoSelector`, `DriveToPoseCommand` and `RobotContainer` reference
-these; paste them into the `Constants` tree between `Drivetrain` and `Intake`.
+`AutoFactory`, `AutoRoutines`, `AutoSelector`, `DriveToPoseCommand`, `RobotContainer` and
+`Superstructure` reference these; paste them into the `Constants` tree between `Drivetrain` and
+`Intake`.
 
 ```java
+  public static final class Superstructure {
+    private Superstructure() {}
+
+    /** Longer than either mechanism's own homing timeout, so the mechanism faults first and says which. */
+    public static final LoggedTunableNumber kHomingTimeoutSec =
+        new LoggedTunableNumber("Superstructure/HomingTimeout", 5.0);
+
+    /**
+     * Gate-open, unloaded feeding with no shot detected before likelyEmpty() turns true (section
+     * 2.4). Must be longer than the longest gap between pieces in a real burst, or an auto leaves
+     * pieces aboard. TODO: read the gap distribution off Shooter/ShotDetected in a logged burst.
+     */
+    public static final LoggedTunableNumber kEmptyConfirmSec =
+        new LoggedTunableNumber("Superstructure/EmptyConfirm", 0.75);
+  }
+
   public static final class Auto {
     private Auto() {}
 
+    /**
+     * Upper bound on one scoring leg. With a hopper this is a max-burst bound, not a one-piece
+     * timeout: long enough to empty a FULL hopper (50 pieces) at kFeedRpm, since likelyEmpty() is
+     * what ends the leg early. TODO: time emptying 50 pieces and add margin; the placeholder
+     * assumes roughly 8 pieces per second.
+     */
     public static final LoggedTunableNumber kScoreTimeoutSec =
-        new LoggedTunableNumber("Auto/ScoreTimeout", 2.0);
+        new LoggedTunableNumber("Auto/ScoreTimeout", 8.0);
     public static final LoggedTunableNumber kIntakeSettleSec =
         new LoggedTunableNumber("Auto/IntakeSettle", 0.25);
     public static final LoggedTunableNumber kStartPoseWarnMeters =
@@ -6031,7 +6734,6 @@ Non-CAN devices:
 | --- | --- | --- | --- |
 | Intake pivot ThroughBore | roboRIO DIO (absolute PWM) | DIO 0 | `Constants.Dio.kIntakePivotAbsEncoder` |
 | Turret ThroughBore | roboRIO DIO (absolute PWM) | DIO 1 | `Constants.Dio.kTurretAbsEncoder` |
-| Indexer beam break | roboRIO DIO | DIO 2 | `Constants.Dio.kIndexerBeamBreak` (optional) |
 | Turret Limelight 4 | Ethernet / NT | `limelight-turret` | `Constants.Vision.kTurretCameraName` |
 | Intake Limelight 4 | Ethernet / NT | `limelight-intake` | `Constants.Vision.kIntakeCameraName` |
 | Meta Quest 3S | Ethernet (USB-C adapter) / NT | questnavlib default table | handled inside `QuestNavIOReal` |
@@ -6079,7 +6781,7 @@ Superstructure.periodic()
    2. ShootingSolver.solve(...)  -> ShotParameters      (pure function, no I/O)
    3. turret.setGoal(field angle, field angular rate)
       shooter.setGoal(rpm)
-   4. isReadyToScore() -> indexer FEED or HOLD
+   4. isReadyToScore() -> indexer FEED or IDLE (burst latch holds FEED between pieces)
 Turret.periodic()     -> field angle - robot rotation -> TurretUnwrapper -> motor position + FF
 ```
 
@@ -6210,7 +6912,9 @@ what keeps that from reaching the turret.
 
 ### 6.5 The `readyToShoot` gate
 
-`Superstructure.isReadyToScore()` is an AND of eight terms. Every one of them is logged separately
+`Superstructure.isReadyToScore()` is an AND of seven terms. (It was eight; the piece term was removed
+by the hopper replan, §2.4 — the numbering below keeps the gap so logs and discussions from before
+the change still line up.) Every one of them is logged separately
 under `Superstructure/ReadyTerms/*`, because the question you will actually ask at 11 p.m. on a
 practice field is not "is it ready" but "**which** term is false."
 
@@ -6218,14 +6922,14 @@ practice field is not "is it ready" but "**which** term is false."
 | --- | --- | --- | --- |
 | 1 | `lastShot.isUsable()` | — | Solver did not converge, or the goal is outside `[kMinDistanceMeters, kMaxDistanceMeters]`. Firing a non-converged solution aims at whatever the last iteration happened to produce. |
 | 2 | `turret.atGoal()` | `kToleranceRad` = 1.5°, `kVelocityToleranceRadPerSec` = 0.5 | Turret still slewing. The *velocity* half matters as much as the position half: a turret passing through the right angle at 3 rad/s is not aimed. |
-| 3 | `shooter.willBeAtSpeedIn(2 · loopPeriod)` | `kToleranceRpm` = 75 | Predictive, not instantaneous. The piece takes ~40 ms to leave the indexer, so the question is "will the wheel be at speed *when the piece arrives*", answered by extrapolating the filtered flywheel acceleration. This is what removes the one-shot-low that plagues instantaneous `atSpeed()` gates. |
-| 4 | `indexer.hasPiece()` | debounced 60 ms | No piece — feed would run the belt for nothing and desync the shot counter. |
+| 3 | `shooter.willBeAtSpeedIn(2 · loopPeriod, tol)` | `kToleranceRpm` = 75; `kBurstToleranceRpm` = 300 once the burst has latched | Predictive, not instantaneous. The piece takes ~40 ms to leave the indexer, so the question is "will the wheel be at speed *when the piece arrives*", answered by extrapolating the filtered flywheel acceleration. This is what removes the one-shot-low that plagues instantaneous `atSpeed()` gates. The wider burst tolerance applies only after the feed has opened in the current scoring state, so the first piece of every burst still meets the tight band, and the indexer does not stop and restart between pieces. |
+| ~~4~~ | ~~`indexer.hasPiece()`~~ | — | **Removed (§2.4).** With a hopper and no piece sensor, "has a piece" cannot be answered. Feeding an empty hopper costs nothing, and shot counting no longer depends on the indexer. |
 | 5 | `RobotState.getVisionStalenessSec() < kMaxVisionStalenessSec` | 0.6 s | No tag seen recently. Odometry alone drifts; past ~0.6 s the pose is a dead-reckoning guess and the aim angle is a guess with it. |
 | 6 | `RobotState.getPoseStdDevEstimate() < kMaxPoseStdDevMeters` | 0.20 m | Pose is fresh but *uncertain* (single distant tag). At 5 m, 20 cm of lateral pose error is ~2.3° of aim error — roughly the whole error budget. |
 | 7 | `RobotState.getFieldRelativeAccel().getNorm() < kMaxChassisAccelForShotMetersPerSec2` | 3.0 m/s² | Hard acceleration, where the α = 0 first-order model is wrong (§6.3). |
 | 8 | `!FaultReporter.getInstance().anyCritical()` | — | A dead flywheel follower or a disconnected turret encoder. Better to not shoot than to shoot into a partner's robot. |
 
-`SCORING_STATIONARY` adds a ninth term — chassis speed below a tunable — and `SCORING_FORCED` sets
+`SCORING_STATIONARY` adds one more term — chassis speed below a tunable — and `SCORING_FORCED` sets
 `ignoreShotTolerances`, which returns `true` unconditionally. The forced path still aims: it skips
 the *gates*, not the *solver*. Every forced shot is logged loudly so a post-match review can
 separate "the gate was too tight" from "the operator overrode a correct refusal."
@@ -6477,12 +7181,12 @@ to the programming laptop.
 
 | Marker name | Command | Typical use |
 | --- | --- | --- |
-| `Intake` | `superstructure.setWantedStateCommand(INTAKE)` | At the start of a pickup path |
-| `StopIntake` | `setWantedStateCommand(DEFAULT)` | After a pickup, to stow |
+| `Intake` | `superstructure.setIntakeRequested(true)` | At the start of a pickup path. Independent of any scoring marker, so a path can intake and shoot at once |
+| `StopIntake` | `superstructure.setIntakeRequested(false)` | After a pickup. Stops the roller; **the intake stays deployed** so the hopper does not spill (§2.4) |
+| `StowIntake` | `setWantedStateCommand(STOW)` | Rarely. Only where the intake must come in; raising it may dump pieces |
 | `SpinUp` | `setWantedStateCommand(SPIN_UP)` | ~1 s before a scoring leg; saves the spin-up time |
-| `ScoreOnMove` | `superstructure.scoreUntilEmptyCommand()` | On a scoring path, no stop |
+| `ScoreOnMove` | `superstructure.scoreUntilEmptyCommand()` | On a scoring path, no stop. Ends on `likelyEmpty()` or `kScoreTimeoutSec` |
 | `ScoreStationary` | `factory.scoreStationaryCommand()` | Preload shot only |
-| `WaitForPiece` | `factory.waitForPieceCommand(2.0)` | Immediately after a pickup point |
 | `Eject` | `setWantedStateCommand(EJECT)` | Jam recovery |
 | `Home` | `setWantedStateCommand(HOME)` | Never in a real routine; useful when testing |
 | `StowTurret` | `turret.setWantedStateCommand(STOW)` | Before a path that passes near a wall |
@@ -6517,11 +7221,18 @@ with the correct start pose and a single trivial path; the Java routine is what 
 you prefer pure-GUI authoring for the simple ones, `AutoFactory.buildAuto("Leave")` runs the `.auto`
 directly — both paths through the code are supported, and mixing them per-routine is fine.)
 
-**Why Java routines instead of pure `.auto` files.** The GUI is excellent at geometry and unable to
-express `bailoutIfEmpty` — "we missed that pickup, skip its scoring leg and go get the next piece
-instead of firing at nothing." That single branch is worth more than everything else in this
-section: a 5-piece auto that degrades to a 3-piece auto when a pickup fails beats a 5-piece auto
-that throws two pieces at the floor and finishes out of position.
+**Why Java routines instead of pure `.auto` files.** The GUI is excellent at geometry and poor at
+control flow: loops like `dynamicScavenge`, the `sequenceOf` builder, and timeouts computed from
+tunables at schedule time. (The original argument here was `bailoutIfEmpty` — skip a scoring leg
+after a missed pickup. The hopper replan removed it, §2.4: without a piece sensor a missed pickup
+cannot be detected, and a moving scoring leg over an empty hopper costs no stop.)
+
+**Hopper robots change what a routine looks like.** The "Pieces" column above counts pickups from
+the original single-piece design. With a hopper, the natural unit is a *sweep*:
+`driveIntakeAndShoot(path)` drives through a group of pieces with the intake down and fires
+whatever is aboard as it goes. `TODO: once the REBUILT field layout and preload rules are known,
+redraw the routine list around sweeps rather than piece-by-piece cycles; the building blocks
+already support both.`
 
 ### 8.4 Paths to draw
 
@@ -6553,7 +7264,7 @@ the robot and reading `RobotState/EstimatedPose` in AdvantageScope.
 1. **Draw everything blue.** `AllianceFlipUtil::shouldFlip` is `AutoBuilder`'s flip callback, so red
    is automatic. Drawing a red mirror by hand guarantees the two drift apart.
 2. **Pickup paths end slow; scoring paths do not end at all.** Set a low end velocity on `*_ToPiece*`
-   so the intake has time to seat the piece; leave the end velocity **high** on `*_Score*` — that is
+   so the intake has time to pull the pieces in; leave the end velocity **high** on `*_Score*` — that is
    where shoot-on-the-move happens, and a path that decelerates into its own scoring point throws
    away the advantage the whole turret exists to provide.
 3. **Never set a rotation target to "face the goal."** The turret does that. Set the chassis rotation
@@ -6590,8 +7301,14 @@ Three auto-specific details that *are* real:
 * **`AUTO_SCORE_ON_MOVE` vs `SCORE_ON_MOVE`.** Same behavior, different wanted state, so the log
   shows unambiguously whether a shot was a driver shot or an auto shot when you score your own
   routines from the WPILOG afterward.
-* **`scoreUntilEmptyCommand()` has a timeout.** `Constants.Auto.kScoreTimeoutSec` (2.0 s). An auto
-  that waits forever for a gate that will never open loses the whole routine, not one shot.
+* **`scoreUntilEmptyCommand()` ends on a belief, bounded by a timeout.** It ends when
+  `likelyEmpty()` turns true. That happens after `kEmptyConfirmSec` of gate-open feeding with no
+  shot, §2.4. `Constants.Auto.kScoreTimeoutSec` (8.0 s placeholder) is the upper bound, sized to
+  empty a *full* 50-piece hopper. An auto that waits forever for a gate that will never open loses the
+  whole routine, not one shot.
+* **An auto can intake and shoot on the same path.** `driveIntakeAndShoot` holds the intake request
+  and `AUTO_SCORE_ON_MOVE` together. It is the same orthogonal-region mechanism the driver uses,
+  so again there is no auto-specific code.
 * **Pre-spin the flywheel.** `spinUpWhile(...)` wraps a pickup leg in `SPIN_UP`, so the flywheel is
   at speed before the scoring leg begins. Worth roughly 0.8 s per cycle, which is the difference
   between a 4-piece and a 5-piece auto.
@@ -6637,7 +7354,10 @@ The convention for this project, all of it already encoded in §4:
 | `RobotState/DistanceToGoalMeters`, `/VisionStalenessSec`, `/PoseConfidence` | double | `@AutoLogOutput` | Gate terms 5 and 6 |
 | `RobotState/Sources/<NAME>/{Staleness,StdDev,Accepted,Rejected}` | double/int | `logState()` | Which source was driving the estimate at any instant |
 | `Superstructure/Shot/{VirtualGoal,Iterations,Residual,Distance,Rpm}` | mixed | `ShootingSolver.logDebug` | `VirtualGoal` as a `Pose2d` on the 2D field is the fastest solver diagnostic that exists |
-| `Superstructure/ReadyToScore` + `Superstructure/ReadyTerms/<1..8>` | boolean ×9 | `isReadyToScore()` | Why the robot will not shoot, answered in ten seconds |
+| `Superstructure/ReadyToScore` + `Superstructure/ReadyTerms/<1-3,5-8>` | boolean ×8 | `isReadyToScore()` | Why the robot will not shoot, answered in ten seconds (term 4 retired by §2.4; numbering kept) |
+| `Superstructure/{IntakeMode,BurstLatched,UnproductiveFeedSec,LikelyEmpty,FeedAssistBlocked,StowedWhileMoving}`, `Intake/RetainingPieces` | enum/boolean/double | `Superstructure.periodic()` | The hopper model (§2.4): why the intake is where it is, and why an auto thought it was empty |
+| `Shooter/{ShotDetected,ShotCount}` | boolean/int | `Shooter.detectShot()` | Pieces fired, per burst; the gaps between pulses size `kEmptyConfirmSec` |
+| `Indexer/{Loaded,Unjamming}` | boolean | `@AutoLogOutput` | Whether the feed is pushing pieces, and jam recovery |
 | `Vision/<source>/Rejections/<reason>` | int counters | `processCamera` | Which rejection rule is actually firing |
 | `Vision/QuestTrusted`, `Vision/SeedEvents` | boolean, int | `Vision` | Quest dropouts and re-seed count per match |
 | `Faults/<name>`, `Faults/AnyCritical`, `Faults/Count` | boolean/int | `FaultReporter.periodic()` | One red light for the dashboard |
@@ -6663,16 +7383,19 @@ logic errors hide, low where they cannot.
 | --- | --- | --- | --- |
 | Swerve modules | `DCMotorSim` ×2 per module (template's `ModuleIOSim`) | Medium | Odometry integration, kinematics, path following geometry. **Not** traction or slip. |
 | Intake pivot | `SingleJointedArmSim` | High | Gravity feedforward sign, travel limits, homing-by-current logic, the intake/turret interlock |
-| Intake roller, floor roller, indexer | `DCMotorSim` | Low | FSM transitions and command routing only. Piece detection is *injected* (see below), not simulated. |
+| Intake roller, floor roller, indexer | `DCMotorSim` | Low | FSM transitions and command routing only. Indexer load and jams are *injected* (see below), not simulated. |
 | Turret | `DCMotorSim` + software soft limits | **High — the important one** | Unwrap branch selection, limit behavior, velocity feedforward sign, and the full aim loop against a simulated pose. If the turret tracks correctly in sim while the sim robot drives a square, the math is right. |
-| Flywheel | `FlywheelSim` | High | Spin-up time, `willBeAtSpeedIn()` prediction, the `atSpeed` gate's behavior during recovery between shots |
+| Flywheel | `FlywheelSim` + `injectShot()` | High | Spin-up time, `willBeAtSpeedIn()` prediction, the `atSpeed` gate's behavior during recovery between shots, burst hysteresis, and shot detection against injected pieces at any cadence |
 | Vision (`VisionIOSim`) | ideal camera from ground-truth pose | Medium | The transform composition, the rejection ladder, and covariance scaling — by *injecting* latency, noise and dropouts. An ideal camera validates nothing; a camera you can make lie validates the policy. |
 | QuestNav (`QuestNavIOSim`) | perfect tracking + injectable dropout | Medium | Seeding, re-seeding, and every degradation rule in §7.7, on demand, without a headset |
 
-**Game pieces are not simulated** without maple-sim. `IndexerIOSim` exposes a method to *inject*
-"a piece is present" (driven from a simulation keyboard binding or a timer), which is enough to
-exercise every FSM path. This is the honest limit of the WPILib-only sim: it validates logic, not
-physics.
+**Game pieces are not simulated** without maple-sim. Instead, two things are *injected*, from a
+simulation keyboard binding, a timer or a test. `ShooterIOSim.injectShot()` takes one piece's worth
+of energy out of the flywheel. `IndexerIOSim.setSimulatedLoad` / `setSimulatedJam` make the indexer
+behave as if the hopper is pressing on it, or jammed. Replaying a burst of N shots at a chosen
+cadence exercises shot counting, burst hysteresis and `likelyEmpty()` with no hopper model at all.
+This is the honest limit of the WPILib-only sim: it validates logic, not physics. In particular it
+cannot tell you the hopper's capacity or whether FEED_ASSIST actually helps.
 
 **The simulation workflow that actually pays for itself:**
 
@@ -6713,7 +7436,7 @@ same URL. Either writes `vendordeps/maple-sim.json`; no `build.gradle` edit is n
 | `ModuleIOSim` | Back it with maple-sim's swerve module simulation instead of two `DCMotorSim`s. Traction limits become real, and auto routines that were optimistic in sim stop being optimistic. |
 | `Robot.simulationInit()` | `SimulatedArena.getInstance()` setup; place the drivetrain sim at the selected auto's start pose. |
 | `Robot.simulationPeriodic()` | `SimulatedArena.getInstance().simulationPeriodic()` and log `FieldSimulation/GamePieces` as a `Pose3d[]` for the 3D view. |
-| `IntakeIOSim` / `IndexerIOSim` | Replace injected piece detection with maple-sim's intake simulation. |
+| `IntakeIOSim` / `IndexerIOSim` / `ShooterIOSim` | Replace injected indexer load and flywheel shots with maple-sim's intake and game-piece simulation — the only way to model hopper capacity. |
 | `Constants.Field` | `kGamePieceMassKg` and `kGamePieceDiameterMeters` stop being unused and must be measured. |
 | `VisionIOSim` | Can stay as-is. |
 
@@ -6901,12 +7624,51 @@ hold.
 
 ---
 
+**M10b — Hopper retrofit (4–5 days, lanes B + D; needs M10). Added by the §2.4 replan.**
+Bring the built M5 mechanisms and M10 superstructure from the single-piece model to the hopper
+model, as its own feature branch cut from `feature-superstructure`. Nothing here needs hardware.
+In outline, so each step compiles and its suite passes before the next. **The authoritative,
+step-by-step order is "M10b: the order in which built code changes" in `PROJECT_OVERVIEW.md`**. It
+splits these four into eleven steps (0–10), including the vision-gate widening and a separate interlock
+commit:
+1. `Shooter`: shot detection, `getShotCount`/`resetShotCount`/`getSecondsSinceLastShot`, the
+   tolerance overload of `willBeAtSpeedIn`, and `ShooterIOSim.injectShot()`.
+2. `Indexer`: the §4.6 rewrite. Delete `hasPiece`, `INDEX`/`HOLD`, the latched-sample replay, the
+   shot counter and the beam-break path; add jam handling and `isLoaded()`. The existing
+   `IndexerFsmTest` cases are about the deleted behaviour; replace them rather than adapt them.
+3. `Intake`: `DEPLOY_ONLY` resting in a real `DEPLOYED` state, `FEED_ASSIST`, and
+   `isInTurretConflictBand()` replacing `isStowed()` in the turret guard.
+4. `Superstructure`: the orthogonal intake region, `RESTING`/`STOW`, the seven-term gate with the
+   burst latch, `likelyEmpty()`, and the §4.14 test changes. `RobotContainer` bindings and
+   `AutoFactory` markers follow.
+
+**Checkpoint:** every §4.14 case passes. That includes the three negative cases that pin the
+replan's decisions: a deployed intake *may* share the arc with the turret, scoring does *not*
+require a piece, and gate-closed time does *not* advance `likelyEmpty()`. Run a mutation pass
+aimed at the `likelyEmpty()` accumulator and the burst latch, since those are the two places a
+plausible-looking bug passes every "happy path" test. In sim: hold intake, score and drive
+together and confirm from the log that `Superstructure/IntakeMode` reads `INTAKING` while the
+turret is `AIMING`. Then release intake and confirm the intake stays deployed. From boot, confirm
+the intake starts STOWED, deploys on enable, and the turret is refused its arc only until the pivot
+leaves the stow band. While scoring, confirm the floor roller runs before the indexer and the
+intake rocks. M10's
+"eight separately-logged booleans" becomes seven.
+
+---
+
 **M11 — Stationary shooting (1 week, lanes B + D).**
 Collect the shot tables: run `measureShotTablePoint` at each of the 8–10
 `kDistanceBreakpointsMeters`, with a tape measure and a 120 fps phone video for the time of flight.
 Fill `kLaunchSpeedMetersPerSec`, `kTimeOfFlightSec`, `kRpmPerMeterPerSec`, `kRpmIntercept`.
+**Measure with bursts, not single pieces** (§2.4): load the hopper, fire at `kFeedRpm`, and fit to
+the whole burst. A table built from single pieces over-predicts every piece after the first, which
+leave a recovering wheel. While doing it, log `Shooter/ShotDetected` and tune `kShotDipRpm`,
+`kShotRefractorySec`, `kBurstToleranceRpm` and `kEmptyConfirmSec` from the same logs.
 **Checkpoint:** 8 of 10 shots score from a standstill at three different distances, with
-`SCORE_STATIONARY`. **This is the gate for M12** — shoot-on-the-move cannot work if the stationary
+`SCORE_STATIONARY`, counting every piece of a burst rather than only the first.
+`Shooter/ShotCount` matches a hand count of pieces fired to within one per burst. The 8-piece
+preload is a known quantity, so firing it is the easiest ground-truth check of the detector, and
+every auto repeats it (`Auto/PreloadFired`). **This is the gate for M12** — shoot-on-the-move cannot work if the stationary
 model is wrong, and you will not be able to tell the two failures apart.
 
 ---
@@ -6923,8 +7685,10 @@ AdvantageScope's 2D field. `solver.getLastIterationCount()` stays below the cap.
 **M13 — Autos (1.5 weeks, lane D + lane A).**
 `AutoFactory`, `AutoRoutines`, `AutoSelector`. Draw the paths per §8.4. Follow the verification order
 in §8.6 exactly.
-**Checkpoint:** all eight routines run in sim; `Leave`, `Preload Only` and `Center 3` run on the real
-field; `AutoSelector/StartPoseError` is under 5 cm when the robot is placed correctly and the warning
+**Checkpoint:** all eight routines run in sim; every routine starts with `waitUntilIntakeRetaining()`
+and none moves before the intake is deployed (check `Superstructure/StowedWhileMoving` is never true);
+`Auto/PreloadFired` reads 8 at the end of `Preload Only`; `Leave`, `Preload Only` and `Center 3` run
+on the real field; `AutoSelector/StartPoseError` is under 5 cm when the robot is placed correctly and the warning
 alert fires when it is not.
 
 ---
@@ -6935,7 +7699,10 @@ current limit. Brake-mode-release timer. `kTuningMode = false` and a full re-tes
 Practice-bot identity verified (§5.5). A pit checklist that includes "check the Alerts widget."
 **Checkpoint:** unplug any single CAN device and the robot tells you which one, by name, on the
 dashboard, within one second. Run a full 2:30 match in practice and confirm the battery finishes
-above `kBrownoutWarningVolts`.
+above `kBrownoutWarningVolts`. **Combined-mode run (§2.4):** drive a figure-eight while intaking
+and firing continuously for 20 s. Confirm from `Power/FilteredVoltage` that no brownout occurs,
+that the `LOW` scalar (intake, floor roller) is the first to drop, and that FEED_ASSIST oscillation
+is suppressed while it does.
 
 ---
 
@@ -6950,12 +7717,14 @@ Lane D:  M3 ──────────────── M10 ─────
 Lane X:  M0 ── (Constants/util maintenance, logging ownership) ────────────┘
 ```
 
-**The four hard dependencies** — everything else can float:
+**The five hard dependencies** — everything else can float:
 
 1. **M2 blocks M7, M8, M10, M12.** `RobotState` is the hub. If M2 slips, everything slips.
 2. **M5's turret blocks M8.** No turret angle buffer, no moving-camera transform.
 3. **M3 + M5 block M10.** The Superstructure needs both the solver and the mechanisms.
-4. **M11 blocks M12.** Non-negotiable — see the checkpoint note.
+4. **M10b blocks M11.** The shot tables are measured in bursts, which needs the hopper feed path,
+   burst latch and shot detector.
+5. **M11 blocks M12.** Non-negotiable — see the checkpoint note.
 
 **The deliberate parallelism win:** lane D's M3 needs no hardware at all, so the hardest math in the
 project gets written and unit-tested during the two weeks everyone else is waiting for a robot. If
@@ -6982,7 +7751,7 @@ displaces.
 | **Variable hood / adjustable launch angle** | The manifest has two fixed flywheels and no hood actuator. The shot model is therefore **1-D**: distance → (speed, time of flight). | If a hood is added, every `InterpolatingDoubleTreeMap` in `ShootingSolver` becomes a 2-D interpolation and `ShotParameters` gains a `hoodAngle`. That is a real rewrite of §6.2, not an addition. |
 | **A physics model of the shot** | No drag, no Magnus, no spin. The TOF and launch-speed tables are *measured*, which absorbs all of it empirically and exactly, at your robot's actual conditions. | Never, for a competition robot. A measured table beats a modeled one every time. |
 | **Turret backlash compensation** | A dead-band model needs a direction-of-travel state and adds a discontinuity the velocity feedforward fights. | Only if characterization shows backlash larger than `kToleranceRad` (1.5°). Fix it mechanically first. |
-| **Multi-piece magazine / queued indexing** | `Indexer.hasPiece()` is a single boolean. The manifest gives no way to know whether two pieces are aboard. | If a second sensor is installed. The FSM would gain a `hasSecondPiece` guard and `scoreUntilEmpty` would count instead of waiting. |
+| **A piece count (how many are in the hopper)** | The robot carries a hopper (§2.4) but has no piece sensor, so it cannot count what it holds. It counts pieces *fired* at the flywheel and keeps a `likelyEmpty()` belief; nothing is gated on either. | Only if a live count is wanted for the driver. A "hopper full" signal is not needed: the hopper holds 50 and overfilling does not jam. A count would need an entry sensor at the intake mouth, with count = 8 preloaded + in − fired and drift handling. The FSM would not change shape, only gain inputs. |
 | **Shot outcome detection** | Nothing on this robot can observe whether a piece went in. `getShotCount()` counts *fires*, not *scores*. | With a goal-side camera pipeline or a field-published score feed. Until then, hit rate is a human count from match video. |
 | **Vision on a coprocessor thread** | Both Limelights do their own processing; the RIO only reads NetworkTables. Nothing here needs a thread. | Never, with Limelights. Only if you moved to PhotonVision on an Orange Pi doing RIO-side solving. |
 | **Defender modeling / dynamic obstacle avoidance** | `navgrid.json` knows static field elements only. AD\* replans around nothing that moves. | This is a multi-season research project, not a build-season feature. |
@@ -7125,7 +7894,32 @@ and make the final pre-event commit the one that flips it.
 
 ---
 
-**13. The `/U/logs` USB stick fills up.**
+**13. `likelyEmpty()` ends an auto's scoring leg with pieces still aboard.**
+*Presents as:* autos that "leave pieces in the robot" and drive off early, only sometimes. It looks
+like an intake problem, because the robot visibly had pieces.
+*Detection:* `Superstructure/UnproductiveFeedSec` climbing while `Superstructure/ReadyToScore` is
+false, which is the accumulator counting gate-closed time. Or `kEmptyConfirmSec` shorter than the
+longest gap between `Shooter/ShotDetected` pulses in a burst.
+*Mitigation:* the accumulator only runs with the gate open and the indexer unloaded (§2.4), and
+`likelyEmptyOnlyAccumulatesWithTheGateOpen` is a mutation target in M10b. Size `kEmptyConfirmSec`
+from logged bursts, not by feel.
+
+---
+
+**14. The turret-conflict pivot band is the wrong width.**
+*Presents as:* either a turret that is refused its arc for longer than it should be after the
+intake leaves stow (band too wide), or the intake arm and turret meeting as the intake stows or
+deploys (band too narrow). The second one is the expensive one, and it is silent until they touch.
+*Detection:* `Intake/InTurretConflictBand` against the arm's actual position, filmed through a
+slow stow with the turret parked just outside its arc.
+*Mitigation:* the band is a width from stow with a realistic 15° placeholder, not two absolute
+angles defaulting to zero. The trap of an empty, inert band (M10's identity-transform trap in
+another form) cannot occur by default. Measure the exact edge from CAD and add margin rather than
+trimming it.
+
+---
+
+**15. The `/U/logs` USB stick fills up.**
 *Presents as:* no logs for exactly the matches you most want to analyze. `WPILOGWriter` fails
 quietly.
 *Mitigation:* one named student owns log offload; delete weekly; check free space in the pit.
@@ -7184,7 +7978,7 @@ declarations, which is where its real effort lives.
 | `subsystems/intake/IntakeIO.java` | 10 | 1 | rookie |
 | `subsystems/intake/IntakeIOTalonFX.java` | 11 | 3 | veteran |
 | `subsystems/intake/IntakeIOSim.java` | 9 | 3 | rookie (with help on `SingleJointedArmSim`) |
-| `subsystems/intake/Intake.java` | 22 | 4 | veteran (lane B) — homing + deploy guard |
+| `subsystems/intake/Intake.java` | 26 | 4 | veteran (lane B) — homing + pivot-band guard + feed assist |
 | **4.5 Floor roller** | | | |
 | `subsystems/floorroller/FloorRollerIO.java` | 6 | 1 | rookie |
 | `subsystems/floorroller/FloorRollerIOTalonFX.java` | 7 | 2 | rookie |
@@ -7193,8 +7987,8 @@ declarations, which is where its real effort lives.
 | **4.6 Indexer** | | | |
 | `subsystems/indexer/IndexerIO.java` | 6 | 1 | rookie |
 | `subsystems/indexer/IndexerIOTalonFX.java` | 7 | 2 | rookie |
-| `subsystems/indexer/IndexerIOSim.java` | 7 | 2 | rookie |
-| `subsystems/indexer/Indexer.java` | 12 | 3 | rookie — current-spike piece detection needs tuning patience |
+| `subsystems/indexer/IndexerIOSim.java` | 8 | 2 | rookie |
+| `subsystems/indexer/Indexer.java` | 12 | 2 | rookie — feed/unjam FSM; jam thresholds need tuning patience (§2.4 replan) |
 | **4.7 Turret** | | | |
 | `subsystems/turret/TurretIO.java` | 9 | 1 | rookie |
 | `subsystems/turret/TurretIOTalonFX.java` | 10 | 4 | veteran — abs encoder + Motion Magic + FF units |
@@ -7203,8 +7997,8 @@ declarations, which is where its real effort lives.
 | **4.8 Shooter** | | | |
 | `subsystems/shooter/ShooterIO.java` | 7 | 1 | rookie |
 | `subsystems/shooter/ShooterIOTalonFX.java` | 8 | 3 | veteran — leader/follower + `Follower` opposition |
-| `subsystems/shooter/ShooterIOSim.java` | 6 | 2 | rookie |
-| `subsystems/shooter/Shooter.java` | 13 | 3 | veteran — `willBeAtSpeedIn()` prediction |
+| `subsystems/shooter/ShooterIOSim.java` | 7 | 2 | rookie |
+| `subsystems/shooter/Shooter.java` | 18 | 3 | veteran — `willBeAtSpeedIn()` prediction + shot detection |
 | **4.9 Shooting on the move** | | | |
 | `shooting/ShotParameters.java` | 2 | 1 | rookie |
 | `shooting/ShootingSolver.java` | 10 | **5** | strongest veteran (lane D) |
@@ -7218,9 +8012,9 @@ declarations, which is where its real effort lives.
 | `subsystems/vision/QuestNavIOSim.java` | 6 | 2 | rookie |
 | `subsystems/vision/Vision.java` | 15 | **5** | veteran (lane C) — the whole fusion policy |
 | **4.11 Superstructure** | | | |
-| `subsystems/superstructure/Superstructure.java` | 28 | **5** | strongest veteran (lane D) |
+| `subsystems/superstructure/Superstructure.java` | 33 | **5** | strongest veteran (lane D) — two orthogonal regions |
 | **4.12 Autos** | | | |
-| `autos/AutoFactory.java` | 13 | 4 | veteran (lane D) |
+| `autos/AutoFactory.java` | 12 | 4 | veteran (lane D) |
 | `autos/AutoRoutines.java` | 18 | 3 | veteran + rookie pair |
 | `autos/AutoSelector.java` | 8 | 2 | rookie |
 | **4.13 Commands** | | | |
@@ -7230,7 +8024,7 @@ declarations, which is where its real effort lives.
 | **4.14 Tests** | | | |
 | `test/…/shooting/ShootingSolverTest.java` | 11 | 3 | veteran (lane D) |
 | `test/…/shooting/TurretUnwrapperTest.java` | 10 | 2 | rookie — ideal first contribution, no hardware |
-| `test/…/superstructure/SuperstructureFsmTest.java` | 12 | 4 | veteran (lane D) |
+| `test/…/superstructure/SuperstructureFsmTest.java` | 20 | 4 | veteran (lane D) |
 | **4.15 Non-Java & generated** | | | |
 | `deploy/pathplanner/settings.json` | 0 (11 fields) | 2 | rookie + mentor (needs a scale) |
 | `deploy/pathplanner/navgrid.json` | 0 (GUI) | 2 | rookie |
@@ -7239,18 +8033,18 @@ declarations, which is where its real effort lives.
 | `build.gradle` | 0–1 lines | 1 | veteran (lane X) |
 | `vendordeps/maple-sim.json` | 0 (optional) | 1 | veteran (lane X) |
 | `generated/TunerConstants.java` | 0 (regenerate) | 3 | veteran (lane A) |
-| **TOTAL — 57 Java files** | **509** | — | — |
+| **TOTAL — 57 Java files** | **532** | — | — |
 
 **Reading the table for scheduling.** The five difficulty-5 files — `RobotState`, `Turret`,
-`ShootingSolver`, `TurretUnwrapper`, `Vision`, `Superstructure` — are 125 of the 509 methods (25 %)
+`ShootingSolver`, `TurretUnwrapper`, `Vision`, `Superstructure` — are 130 of the 532 methods (24 %)
 and account for essentially all of §11.2's failure modes. They belong to three named veterans and
-must be code-reviewed by a second person. Everything rated 1–2 is 143 methods (28 %) of genuinely
+must be code-reviewed by a second person. Everything rated 1–2 is 157 methods (30 %) of genuinely
 rookie-appropriate work that can proceed in parallel from week 1: every `XxxIO` interface, every
-`XxxIOSim`, `FloorRoller` end to end, the three simple utilities, `AutoSelector`, and
-`TurretUnwrapperTest`.
+`XxxIOSim`, `FloorRoller` and `Indexer` end to end (the §2.4 replan made the indexer a
+difficulty-2 file), the three simple utilities, `AutoSelector`, and `TurretUnwrapperTest`.
 
 **Rough line estimate from this table:** at 12–18 lines per method plus imports and the constants
-file, 509 methods lands at **~7,000–8,500 lines of Java**, which matches §1's estimate. About 400 of
+file, 532 methods lands at **~7,000–8,500 lines of Java**, which matches §1's estimate. About 400 of
 those lines are the JUnit tests.
 
 ---
