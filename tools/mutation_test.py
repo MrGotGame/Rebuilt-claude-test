@@ -32,7 +32,8 @@ THE MUTATION LIST IS PER MILESTONE AND SHOULD BE EXTENDED, NOT REPLACED. The fir
 block targets M10: the superstructure's guards, its entry and exit actions, both halves
 of the intake/turret interlock, the readiness gate, FaultReporter's severity handling,
 and the two latent bugs M10 found in already-merged code. The second block is M10b's,
-growing one retrofit step at a time; step 2 added the flywheel shot detector. Several
+growing one retrofit step at a time: step 2 added the flywheel shot detector, step 3
+the intake's resting and feed-assist states and its two geometric predicates. Several
 M10 anchors name code that later M10b steps replace (the piece guard, the isStowed turret
 guard), and those entries must be rewritten against the new code in the step that
 changes it, not deleted. Adding a milestone means adding its
@@ -169,6 +170,44 @@ MUTATIONS = [
     ("burst overload ignores the tolerance it was given", SH,
      "    return Math.abs(projectedRpm - goalRpm) < toleranceRpm && goalRpm > 0.0;",
      "    return Math.abs(projectedRpm - goalRpm) < Constants.Shooter.kToleranceRpm.get()\n        && goalRpm > 0.0;"),
+
+    # ---- M10b step 3: the intake's resting and feed-assist states, and its two geometric
+    # predicates. The arrival fix is attacked where it bites -- judging arrival against the previous
+    # loop's goal again -- and every predicate is attacked on its fail-closed branch as well as its
+    # main one, because a predicate that fails open near the turret is the expensive kind of wrong.
+    ("DEPLOY_ONLY never settles into DEPLOYED", IN,
+     "        yield atAngle(deployed) ? SystemState.DEPLOYED : SystemState.DEPLOYING;",
+     "        yield SystemState.DEPLOYING;"),
+    ("arrival judged against the previous loop's goal again", IN,
+     "        yield atAngle(deployed) ? SystemState.INTAKING : SystemState.DEPLOYING;",
+     "        yield atGoal() ? SystemState.INTAKING : SystemState.DEPLOYING;"),
+    ("FEED_ASSIST escapes the M10 deploy guard", IN,
+     "      case FEED_ASSIST -> {\n        if (!deployAllowed.getAsBoolean()) {\n          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;\n        }",
+     "      case FEED_ASSIST -> {"),
+    ("feed-assist roller does not run", IN,
+     "    io.setRollerVelocity(Constants.Intake.kFeedAssistRollerRpm.get());",
+     "    io.setRollerVelocity(0.0);"),
+    ("rock never alternates", IN,
+     "    return halfPeriodsElapsed % 2 == 0 ? feedAssistRad : deployedRad;",
+     "    return feedAssistRad;"),
+    ("rock ignores the low-power fallback", IN,
+     "    if (periodSec <= 0.0 || !rockingAllowed) {",
+     "    if (periodSec <= 0.0) {"),
+    ("conflict band fails OPEN on an unhomed arm", IN,
+     "    if (!isHomed) {\n      return true;\n    }",
+     "    if (!isHomed) {\n      return false;\n    }"),
+    ("conflict band ignores the commanded goal", IN,
+     "    return inTurretConflictBand(inputs.pivotPositionRad, stowed, deployed, width)\n        || inTurretConflictBand(pivotGoalRad, stowed, deployed, width);",
+     "    return inTurretConflictBand(inputs.pivotPositionRad, stowed, deployed, width);"),
+    ("conflict band on the wrong side when stow is below deploy", IN,
+     "      return angleRad <= stowedRad + widthRad;",
+     "      return angleRad >= stowedRad + widthRad;"),
+    ("conflict band fails OPEN on degenerate geometry", IN,
+     "    return Math.abs(angleRad - stowedRad) <= widthRad;",
+     "    return false;"),
+    ("retaining pieces trusts an unhomed encoder", IN,
+     "    return isHomed\n        && withinRetainingRange(",
+     "    return withinRetainingRange("),
 ]
 
 

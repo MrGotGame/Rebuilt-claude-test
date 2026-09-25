@@ -10,6 +10,7 @@ import frc.robot.Constants;
 import frc.robot.util.LoggedTunableNumber;
 import frc.robot.util.PowerBudget;
 import java.util.function.BooleanSupplier;
+import java.util.function.DoubleSupplier;
 import org.littletonrobotics.junction.AutoLogOutput;
 import org.littletonrobotics.junction.Logger;
 
@@ -26,6 +27,13 @@ import org.littletonrobotics.junction.Logger;
  *
  * <p>Second, a deploy guard: the intake refuses to deploy while the turret is inside its conflict
  * arc. That interaction is the single most likely way to destroy this robot.
+ *
+ * <p>M10b (plan section 2.4) made the robot a hopper robot, which adds two resting behaviours: the
+ * intake rests DEPLOYED once it has been down, because raising it lets pieces fall out, and while
+ * scoring it rocks between deployed and a partial raise ({@link SystemState#FEED_ASSISTING}) to
+ * push the hopper into the indexer. It also publishes the two geometric questions the rest of the
+ * robot needs: whether the arm is in the turret's way ({@link #isInTurretConflictBand()}), and
+ * whether it is low enough to keep pieces aboard ({@link #isRetainingPieces()}).
  */
 public class Intake extends SubsystemBase {
   /** What the operator or superstructure has asked the intake to do. */
@@ -33,7 +41,10 @@ public class Intake extends SubsystemBase {
     IDLE,
     STOW,
     DEPLOY_AND_INTAKE,
+    /** Deployed with the roller stopped: the resting posture while carrying pieces. */
     DEPLOY_ONLY,
+    /** Rock between deployed and the partial raise, roller inward, to feed the hopper. */
+    FEED_ASSIST,
     EJECT,
     HOME,
     CHARACTERIZE
@@ -45,14 +56,56 @@ public class Intake extends SubsystemBase {
     STOWING,
     STOWED,
     DEPLOYING,
+    /** At the deploy angle with the roller stopped. Added for M10b. */
+    DEPLOYED,
     INTAKING,
+    /** Rocking between the deploy and feed-assist angles. Added for M10b. */
+    FEED_ASSISTING,
     EJECTING,
     HOMING,
     CHARACTERIZING,
     FAULTED
   }
 
+  /**
+   * The pivot angles this machine commands, and the width of the turret-conflict band.
+   *
+   * <p>Added for M10b, on the precedent M8 set for {@code Vision}'s camera mountings: the geometry
+   * is a constructor argument that defaults to the constants, so tests can supply a real one. Every
+   * angle constant is still a 0.0 placeholder, which puts stow, deploy, eject and feed-assist at
+   * the same point -- geometry in which the band has no direction, the rock has no amplitude, and
+   * every assertion about either passes for free. Suppliers rather than numbers, so the default
+   * geometry still follows the tunables live.
+   *
+   * @param stowedRad the stow angle, at the end of travel where the band lies
+   * @param deployedRad the deploy angle, where pieces are collected and held
+   * @param ejectRad the angle the arm moves to while ejecting
+   * @param feedAssistRad the partial-raise end of the feed-assist rock
+   * @param turretConflictBandRad width of the band, measured from stow toward deploy
+   */
+  public record PivotGeometry(
+      DoubleSupplier stowedRad,
+      DoubleSupplier deployedRad,
+      DoubleSupplier ejectRad,
+      DoubleSupplier feedAssistRad,
+      DoubleSupplier turretConflictBandRad) {
+    /**
+     * The robot's geometry, read live from the tunables in {@code Constants.Intake}.
+     *
+     * @return geometry backed by the constants
+     */
+    public static PivotGeometry fromConstants() {
+      return new PivotGeometry(
+          Constants.Intake.kStowedAngleRad,
+          Constants.Intake.kDeployedAngleRad,
+          Constants.Intake.kEjectAngleRad,
+          Constants.Intake.kFeedAssistAngleRad,
+          Constants.Intake.kTurretConflictBandRad);
+    }
+  }
+
   private final IntakeIO io;
+  private final PivotGeometry geometry;
   private final IntakeIOInputsAutoLogged inputs = new IntakeIOInputsAutoLogged();
   private final Timer stateTimer = new Timer();
   private final Timer homingSettleTimer = new Timer();
@@ -139,12 +192,27 @@ public class Intake extends SubsystemBase {
    */
   private boolean homeRequested = true;
 
+  /** Rocking may run only while LOW-priority current is not being cut. Refreshed every loop. */
+  private double lowPriorityCurrentScalar = 1.0;
+
   /**
-   * Builds the intake around a hardware implementation.
+   * Builds the intake around a hardware implementation, with the robot's own geometry.
    *
    * @param io the hardware layer: real, simulated, or an empty implementation for log replay
    */
   public Intake(IntakeIO io) {
+    this(io, PivotGeometry.fromConstants());
+  }
+
+  /**
+   * Builds the intake around a hardware implementation and an explicit geometry.
+   *
+   * @param io the hardware layer: real, simulated, or an empty implementation for log replay
+   * @param geometry the pivot angles and conflict band; tests pass a real one because the constants
+   *     are still placeholders
+   */
+  public Intake(IntakeIO io, PivotGeometry geometry) {
+    this.geometry = geometry;
     // IMPLEMENTATION (was TODO: "Start stateTimer, and register FaultReporter checks for
     // pivotConnected, rollerConnected and absEncoderConnected so a dead device is visible on the
     // dashboard rather than presenting as 'the intake just does not work'.")
@@ -228,7 +296,8 @@ public class Intake extends SubsystemBase {
     // LOW priority: the intake is among the first things throttled when the battery sags, because
     // a robot that cannot pick a piece off the floor can still drive and still shoot what it
     // holds. The IO layer deadbands this, so calling it every loop costs nothing on the bus.
-    io.setCurrentLimitScalar(PowerBudget.getInstance().getScalar(PowerBudget.Priority.LOW));
+    lowPriorityCurrentScalar = PowerBudget.getInstance().getScalar(PowerBudget.Priority.LOW);
+    io.setCurrentLimitScalar(lowPriorityCurrentScalar);
 
     SystemState nextState = handleStateTransition();
     if (nextState != systemState) {
@@ -320,29 +389,51 @@ public class Intake extends SubsystemBase {
       return SystemState.HOMING;
     }
 
+    // Every "have we arrived" below is judged against the TARGET of the state being requested, not
+    // against pivotGoalRad. pivotGoalRad is whatever the PREVIOUS loop's handler commanded, so the
+    // original atGoal()-based arms reported arrival for one loop after every change of request:
+    // asked to deploy from stow, a pivot sitting at its stow goal read "at goal" and the machine
+    // entered INTAKING for a loop with the arm still stowed, and asked to stow from deploy it
+    // entered STOWED for a loop with the arm still deployed. Found in M10b, where the vision gate
+    // (INTAKING) and the pieces-retained question both depend on those states meaning what they
+    // say.
+    double stowed = geometry.stowedRad().getAsDouble();
+    double deployed = geometry.deployedRad().getAsDouble();
     return switch (wantedState) {
       case IDLE -> SystemState.IDLE;
-      case STOW -> atGoal() ? SystemState.STOWED : SystemState.STOWING;
+      case STOW -> atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
 
-        // The guard covers all three states that put the arm outside the stow position, not just
-        // the
-        // two named DEPLOY. EJECT swings to kEjectAngleRad, which is just as capable of meeting the
-        // turret as the deploy angle is.
+        // The guard covers every request that puts the arm outside the stow position, not just the
+        // two named DEPLOY. EJECT swings to the eject angle and FEED_ASSIST rocks through the
+        // deploy angle, both just as capable of meeting the turret as the deploy angle is -- under
+        // the M10 interlock this guard still implements. (M10b step 5 replaces it with the
+        // pivot-band rule, in the same commit as the turret half, so the two cannot disagree.)
       case DEPLOY_AND_INTAKE -> {
         if (!deployAllowed.getAsBoolean()) {
-          yield atGoal() ? SystemState.STOWED : SystemState.STOWING;
+          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
         }
-        yield atGoal() ? SystemState.INTAKING : SystemState.DEPLOYING;
+        yield atAngle(deployed) ? SystemState.INTAKING : SystemState.DEPLOYING;
       }
       case DEPLOY_ONLY -> {
         if (!deployAllowed.getAsBoolean()) {
-          yield atGoal() ? SystemState.STOWED : SystemState.STOWING;
+          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
         }
-        yield SystemState.DEPLOYING;
+        // Settles into a real DEPLOYED state rather than lingering in DEPLOYING forever, which is
+        // what it did before M10b. With the intake now resting deployed for most of a match, a
+        // state that permanently claimed "in transit" would switch off every consumer that needs
+        // to know the arm has arrived.
+        yield atAngle(deployed) ? SystemState.DEPLOYED : SystemState.DEPLOYING;
+      }
+      case FEED_ASSIST -> {
+        if (!deployAllowed.getAsBoolean()) {
+          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
+        }
+        // No arrival test: the rock is always moving, so there is no angle to have arrived at.
+        yield SystemState.FEED_ASSISTING;
       }
       case EJECT -> {
         if (!deployAllowed.getAsBoolean()) {
-          yield atGoal() ? SystemState.STOWED : SystemState.STOWING;
+          yield atAngle(stowed) ? SystemState.STOWED : SystemState.STOWING;
         }
         yield SystemState.EJECTING;
       }
@@ -405,7 +496,7 @@ public class Intake extends SubsystemBase {
         // confidently wrong zero -- worse than no zero at all, because isHomed would then be true
         // and every closed-loop command would be trusted.
         if (homingSucceeded) {
-          io.seedPivotPosition(Constants.Intake.kStowedAngleRad.get());
+          io.seedPivotPosition(geometry.stowedRad().getAsDouble());
           isHomed = true;
         }
         io.setPivotSoftLimitsEnabled(true);
@@ -426,7 +517,9 @@ public class Intake extends SubsystemBase {
       case IDLE -> idling();
       case STOWING, STOWED -> stowing();
       case DEPLOYING -> deploying();
+      case DEPLOYED -> deployed();
       case INTAKING -> intaking();
+      case FEED_ASSISTING -> feedAssisting();
       case EJECTING -> ejecting();
       case HOMING -> homing();
       case CHARACTERIZING -> characterizing();
@@ -456,7 +549,7 @@ public class Intake extends SubsystemBase {
   private void stowing() {
     // IMPLEMENTATION (was TODO: "io.setPivotPosition(kStowedAngleRad.get());
     // io.setRollerVelocity(0).")
-    pivotGoalRad = Constants.Intake.kStowedAngleRad.get();
+    pivotGoalRad = geometry.stowedRad().getAsDouble();
     io.setPivotPosition(pivotGoalRad);
     io.setRollerVelocity(0.0);
   }
@@ -470,7 +563,20 @@ public class Intake extends SubsystemBase {
     // starts it, which is why this handler does not need the "until atGoal()" test itself.
     // Spinning a roller through the travel would sweep pieces sideways on the way down and draw
     // current the power budget has not been asked for.
-    pivotGoalRad = Constants.Intake.kDeployedAngleRad.get();
+    pivotGoalRad = geometry.deployedRad().getAsDouble();
+    io.setPivotPosition(pivotGoalRad);
+    io.setRollerVelocity(0.0);
+  }
+
+  /**
+   * Holds the deploy angle with the roller stopped: the resting posture while carrying pieces.
+   *
+   * <p><b>Outputs:</b> commands the pivot to the deploy angle and stops the roller.
+   */
+  private void deployed() {
+    // Added for M10b. Identical outputs to deploying(); what differs is what the STATE tells the
+    // rest of the robot -- that the arm has arrived, rather than that it is on its way.
+    pivotGoalRad = geometry.deployedRad().getAsDouble();
     io.setPivotPosition(pivotGoalRad);
     io.setRollerVelocity(0.0);
   }
@@ -479,9 +585,60 @@ public class Intake extends SubsystemBase {
   private void intaking() {
     // IMPLEMENTATION (was TODO: "io.setPivotPosition(kDeployedAngleRad.get());
     // io.setRollerVelocity(kIntakeRollerRpm.get()).")
-    pivotGoalRad = Constants.Intake.kDeployedAngleRad.get();
+    pivotGoalRad = geometry.deployedRad().getAsDouble();
     io.setPivotPosition(pivotGoalRad);
     io.setRollerVelocity(Constants.Intake.kIntakeRollerRpm.get());
+  }
+
+  /**
+   * Rocks the arm between the deploy and feed-assist angles with the roller running inward.
+   *
+   * <p><b>Outputs:</b> commands the pivot to whichever end of the rock this half-period calls for,
+   * and runs the roller at {@code kFeedAssistRollerRpm}.
+   */
+  private void feedAssisting() {
+    // Added for M10b (plan section 2.4). Rocking lets pieces flow off the intake onto the hopper
+    // floor and into the indexer better than a static raise. The phase is timed from entry into
+    // this state, so every scoring burst starts its rock the same way: rising first.
+    pivotGoalRad =
+        feedAssistGoalRad(
+            stateTimer.get(),
+            Constants.Intake.kFeedAssistPeriodSec.get(),
+            lowPriorityCurrentScalar >= 1.0,
+            geometry.deployedRad().getAsDouble(),
+            geometry.feedAssistRad().getAsDouble());
+    io.setPivotPosition(pivotGoalRad);
+    io.setRollerVelocity(Constants.Intake.kFeedAssistRollerRpm.get());
+  }
+
+  /**
+   * Which end of the feed-assist rock the pivot should be driven to right now.
+   *
+   * <p>A pure function so the rock can be tested without a pivot plant, which with the placeholder
+   * gains rings for seconds and never settles at either end. It starts by rising to the feed-assist
+   * angle and alternates every half period. It holds the feed-assist angle still when the period is
+   * zero, and also when rocking is not allowed: rocking is pure pivot current, so it is the first
+   * thing given up when {@code PowerBudget} starts cutting LOW-priority current. Holding the raised
+   * angle still keeps pieces aboard, just with a slower flow.
+   *
+   * @param timeInStateSec seconds since the rock started
+   * @param periodSec full rock period, in seconds; zero or less holds still
+   * @param rockingAllowed false to hold the feed-assist angle regardless of the period
+   * @param deployedRad the lower end of the rock
+   * @param feedAssistRad the raised end of the rock
+   * @return the pivot goal for this instant, in radians
+   */
+  static double feedAssistGoalRad(
+      double timeInStateSec,
+      double periodSec,
+      boolean rockingAllowed,
+      double deployedRad,
+      double feedAssistRad) {
+    if (periodSec <= 0.0 || !rockingAllowed) {
+      return feedAssistRad;
+    }
+    long halfPeriodsElapsed = (long) Math.floor(timeInStateSec / (periodSec / 2.0));
+    return halfPeriodsElapsed % 2 == 0 ? feedAssistRad : deployedRad;
   }
 
   /** Holds the eject angle and runs the roller outward. */
@@ -492,7 +649,7 @@ public class Intake extends SubsystemBase {
     // kEjectRollerRpm carries its own sign in Constants; it is not negated here. One place decides
     // which way "out" is, and it is the constant, so that a mechanism rebuild reversing the roller
     // is a one-line change rather than a hunt through the FSM.
-    pivotGoalRad = Constants.Intake.kEjectAngleRad.get();
+    pivotGoalRad = geometry.ejectRad().getAsDouble();
     io.setPivotPosition(pivotGoalRad);
     io.setRollerVelocity(Constants.Intake.kEjectRollerRpm.get());
   }
@@ -617,9 +774,115 @@ public class Intake extends SubsystemBase {
     // the encoder is seeded, so without it a freshly-booted intake sitting at a raw zero would
     // report itself at goal, and handleStateTransition would promote STOWING straight to STOWED --
     // telling the turret it is safe to sweep through an arc containing an arm of unknown position.
+    return atAngle(pivotGoalRad);
+  }
+
+  /**
+   * Whether the pivot is at a given angle, on a trusted encoder.
+   *
+   * <p>Added for M10b so the transition logic can ask about the angle a request TARGETS rather than
+   * the goal the previous loop commanded; see {@link #handleStateTransition()}.
+   *
+   * @param targetRad the angle to compare against, in radians
+   * @return true when homed and within {@code kPivotToleranceRad} of {@code targetRad}
+   */
+  private boolean atAngle(double targetRad) {
     return isHomed
-        && Math.abs(inputs.pivotPositionRad - pivotGoalRad)
+        && Math.abs(inputs.pivotPositionRad - targetRad)
             < Constants.Intake.kPivotToleranceRad.get();
+  }
+
+  /**
+   * Whether the arm is, or is about to be, inside the turret's sweep.
+   *
+   * <p>Added for M10b (plan section 2.4). The turret consumes this from step 5 of the retrofit on,
+   * replacing {@code !isStowed()}, which had the conflict backwards: on this robot a DEPLOYED
+   * intake cannot reach the turret, and the STOWED one can. The conflict is the band of pivot
+   * angles nearest stow, {@code turretConflictBandRad} wide.
+   *
+   * <p>Both the measured angle and the commanded goal are tested, so the answer turns true the
+   * moment a move into the band is commanded rather than when the arm arrives. It fails CLOSED
+   * whenever the encoder is untrusted: an unhomed arm could be anywhere, including in the band. The
+   * robot starts stowed, so that is also simply true at boot.
+   *
+   * @return true while the pivot or its goal is in the band, or the pivot is unhomed
+   */
+  @AutoLogOutput(key = "Intake/InTurretConflictBand")
+  public boolean isInTurretConflictBand() {
+    if (!isHomed) {
+      return true;
+    }
+    double stowed = geometry.stowedRad().getAsDouble();
+    double deployed = geometry.deployedRad().getAsDouble();
+    double width = geometry.turretConflictBandRad().getAsDouble();
+    return inTurretConflictBand(inputs.pivotPositionRad, stowed, deployed, width)
+        || inTurretConflictBand(pivotGoalRad, stowed, deployed, width);
+  }
+
+  /**
+   * Whether an angle lies in the turret-conflict band.
+   *
+   * <p>The band is everything on stow's side of an edge {@code widthRad} in from stow toward
+   * deploy, INCLUDING anything past stow. Stow is the hard stop, so nothing should read past it,
+   * but a reading past it is still the arm at its most dangerous and must not report clear. Written
+   * as "which side of the edge" rather than as an interval so that works without a second constant.
+   *
+   * <p>The direction comes from comparing the two angles, so the band follows the pivot's sign
+   * convention on its own. When the two are equal -- which the 0.0 placeholders make true today --
+   * there is no direction, and it fails CLOSED by treating everything within {@code widthRad} of
+   * stow on either side as in the band.
+   *
+   * @param angleRad the angle to classify, in radians
+   * @param stowedRad the stow angle, in radians
+   * @param deployedRad the deploy angle, in radians
+   * @param widthRad the band's width from stow, in radians
+   * @return true if the angle is in the band
+   */
+  static boolean inTurretConflictBand(
+      double angleRad, double stowedRad, double deployedRad, double widthRad) {
+    if (deployedRad < stowedRad) {
+      return angleRad >= stowedRad - widthRad;
+    }
+    if (deployedRad > stowedRad) {
+      return angleRad <= stowedRad + widthRad;
+    }
+    return Math.abs(angleRad - stowedRad) <= widthRad;
+  }
+
+  /**
+   * Whether the arm is low enough to keep pieces in the robot.
+   *
+   * <p>Added for M10b (plan section 2.4). Pieces can fall out while the intake is stowed but stay
+   * in anywhere from the deploy angle up to the feed-assist angle, so every auto waits on this
+   * before its first path: the robot must start stowed, and the first enable deploys it. Measured
+   * position, not state, because the question is where the arm physically is.
+   *
+   * @return true when homed and between the deploy and feed-assist angles, within tolerance
+   */
+  @AutoLogOutput(key = "Intake/RetainingPieces")
+  public boolean isRetainingPieces() {
+    return isHomed
+        && withinRetainingRange(
+            inputs.pivotPositionRad,
+            geometry.deployedRad().getAsDouble(),
+            geometry.feedAssistRad().getAsDouble(),
+            Constants.Intake.kPivotToleranceRad.get());
+  }
+
+  /**
+   * Whether an angle lies between the deploy and feed-assist angles, widened by a tolerance.
+   *
+   * @param angleRad the angle to classify, in radians
+   * @param deployedRad one end of the range, in radians
+   * @param feedAssistRad the other end, in radians; either order
+   * @param toleranceRad how far outside the range still counts, in radians
+   * @return true if the angle is within the widened range
+   */
+  static boolean withinRetainingRange(
+      double angleRad, double deployedRad, double feedAssistRad, double toleranceRad) {
+    double low = Math.min(deployedRad, feedAssistRad) - toleranceRad;
+    double high = Math.max(deployedRad, feedAssistRad) + toleranceRad;
+    return angleRad >= low && angleRad <= high;
   }
 
   /**

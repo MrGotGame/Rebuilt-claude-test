@@ -73,6 +73,363 @@ public class IntakeFsmTest {
     return (int) (Constants.Intake.kHomingTimeoutSec.get() / LOOP_SEC) + 30;
   }
 
+  // ---------------------------------------------------------------- M10b: the hopper intake ----
+
+  /** Stow angle of the test geometry, radians. */
+  private static final double STOWED = -1.2;
+
+  /** Deploy angle of the test geometry, radians. */
+  private static final double DEPLOYED = 0.3;
+
+  /** Feed-assist angle of the test geometry: between the two, clear of the band. */
+  private static final double FEED_ASSIST = -0.2;
+
+  /** Eject angle of the test geometry, radians. */
+  private static final double EJECT = 0.5;
+
+  /** Band width of the test geometry: the plan's 15 degrees nearest stow. */
+  private static final double BAND = Math.toRadians(15.0);
+
+  /**
+   * A real, non-degenerate geometry. Every angle constant is still a 0.0 placeholder, which puts
+   * stow, deploy and feed-assist at one point: the band has no direction and the rock no amplitude,
+   * and every assertion about either would pass for free. The M8 lesson, again.
+   */
+  private static final Intake.PivotGeometry GEOMETRY =
+      new Intake.PivotGeometry(
+          () -> STOWED, () -> DEPLOYED, () -> EJECT, () -> FEED_ASSIST, () -> BAND);
+
+  /** The ideal pivot under {@link #intake} once {@link #rebuildIdeal()} has run. */
+  private IdealPivotIO ideal;
+
+  /**
+   * Rebuilds the intake over an ideal pivot and the test geometry, homes it, and leaves it STOWED.
+   *
+   * <p><b>Outputs:</b> replaces {@link #intake}; sets {@link #ideal}.
+   */
+  private void rebuildIdeal() {
+    ideal = new IdealPivotIO();
+    CommandScheduler.getInstance().unregisterSubsystem(intake);
+    intake = new Intake(ideal, GEOMETRY);
+    step(40);
+    assertTrue(intake.isHomed(), "the ideal pivot failed to home");
+
+    // The boot request is HOME, and a completed home resolves to STOWING rather than STOWED; the
+    // machine parks there until somebody asks for something, which in the robot is the
+    // superstructure. Ask for the stow explicitly.
+    intake.setWantedState(Intake.WantedState.STOW);
+    step(5);
+    assertEquals(Intake.SystemState.STOWED, intake.getSystemState());
+  }
+
+  /**
+   * A pivot that goes exactly where it is told, and stalls when driven open loop.
+   *
+   * <p>The simulated arm is the right tool for homing and gravity, but with the placeholder gains
+   * it rings for seconds and never settles at a goal, so any case about WHICH state the machine
+   * reports once the arm arrives would be testing the gains. This reports the commanded angle on
+   * the next update, and the stall current homing looks for whenever it is driven open loop. It
+   * also records what it was last commanded, which is what the rocking cases assert on.
+   */
+  private static final class IdealPivotIO implements IntakeIO {
+    private double positionRad = 0.0;
+    private double goalRad = 0.0;
+    private boolean closedLoop = false;
+    private double openLoopVolts = 0.0;
+    double lastRollerRpm = 0.0;
+
+    /**
+     * Reports the pivot where it was last sent, stalled against a stop while driven open loop.
+     *
+     * @param inputs the struct to populate
+     */
+    @Override
+    public void updateInputs(IntakeIOInputs inputs) {
+      if (closedLoop) {
+        positionRad = goalRad;
+      }
+      inputs.pivotConnected = true;
+      inputs.rollerConnected = true;
+      inputs.absEncoderConnected = true;
+      inputs.pivotPositionRad = positionRad;
+      inputs.pivotVelocityRadPerSec = 0.0;
+      inputs.pivotStatorCurrentAmps = !closedLoop && openLoopVolts != 0.0 ? 40.0 : 0.0;
+    }
+
+    /**
+     * Records a closed-loop goal.
+     *
+     * @param positionRad the goal, in radians
+     */
+    @Override
+    public void setPivotPosition(double positionRad) {
+      closedLoop = true;
+      goalRad = positionRad;
+    }
+
+    /**
+     * Records an open-loop drive.
+     *
+     * @param volts the voltage
+     */
+    @Override
+    public void setPivotOpenLoop(double volts) {
+      closedLoop = false;
+      openLoopVolts = volts;
+    }
+
+    /**
+     * Records the roller speed.
+     *
+     * @param velocityRpm the speed, in RPM
+     */
+    @Override
+    public void setRollerVelocity(double velocityRpm) {
+      lastRollerRpm = velocityRpm;
+    }
+
+    /**
+     * Moves the sensor, as a real seed does.
+     *
+     * @param positionRad the seeded angle, in radians
+     */
+    @Override
+    public void seedPivotPosition(double positionRad) {
+      this.positionRad = positionRad;
+    }
+
+    /**
+     * The goal most recently commanded.
+     *
+     * @return the goal, in radians
+     */
+    double lastGoalRad() {
+      return goalRad;
+    }
+  }
+
+  /**
+   * DEPLOY_ONLY arrives and STAYS in a real DEPLOYED state with the roller stopped.
+   *
+   * <p>Before M10b it resolved to DEPLOYING forever, a state that permanently claimed "in transit".
+   * With the intake now resting deployed for most of a match, every consumer that needs to know the
+   * arm has arrived would have been switched off.
+   */
+  @Test
+  void deployOnlySettlesIntoDeployed() {
+    rebuildIdeal();
+    intake.setDeployGuard(() -> true);
+
+    intake.setWantedState(Intake.WantedState.DEPLOY_ONLY);
+    step(5);
+    assertEquals(Intake.SystemState.DEPLOYED, intake.getSystemState());
+
+    for (int i = 0; i < 50; i++) {
+      step(1);
+      assertEquals(Intake.SystemState.DEPLOYED, intake.getSystemState(), "left DEPLOYED at " + i);
+      assertEquals(0.0, ideal.lastRollerRpm, "a resting deployed intake must not spin its roller");
+    }
+  }
+
+  /**
+   * A change of request never reports arrival before the arm has moved.
+   *
+   * <p>The original transitions judged arrival against the goal the PREVIOUS loop commanded, so for
+   * one loop after every change of request they reported the new state with the arm still at the
+   * old one: stow to intake entered INTAKING with the arm stowed, which the intake-camera gate
+   * reads, and deploy to stow entered STOWED with the arm deployed, which the M10 turret interlock
+   * reads. The ideal pivot makes the first loop after a request exactly the loop in question.
+   */
+  @Test
+  void noArrivalIsReportedBeforeTheArmMoves() {
+    rebuildIdeal();
+    intake.setDeployGuard(() -> true);
+
+    intake.setWantedState(Intake.WantedState.DEPLOY_AND_INTAKE);
+    step(1);
+    assertEquals(
+        Intake.SystemState.DEPLOYING,
+        intake.getSystemState(),
+        "reported INTAKING on the first loop, with the arm still stowed");
+    step(5);
+    assertEquals(Intake.SystemState.INTAKING, intake.getSystemState());
+
+    intake.setWantedState(Intake.WantedState.STOW);
+    step(1);
+    assertEquals(
+        Intake.SystemState.STOWING,
+        intake.getSystemState(),
+        "reported STOWED on the first loop, with the arm still deployed");
+    assertFalse(intake.isStowed(), "told the turret the arm was stowed while it was deployed");
+  }
+
+  /**
+   * FEED_ASSIST rocks: it rises first, alternates every half period between the two angles, and
+   * runs the roller inward throughout.
+   */
+  @Test
+  void feedAssistRocksBetweenItsTwoAngles() {
+    rebuildIdeal();
+    intake.setDeployGuard(() -> true);
+    intake.setWantedState(Intake.WantedState.DEPLOY_ONLY);
+    step(5);
+
+    intake.setWantedState(Intake.WantedState.FEED_ASSIST);
+    double periodSec = Constants.Intake.kFeedAssistPeriodSec.get();
+    int loops = (int) Math.round(2.0 * periodSec / LOOP_SEC);
+    int changes = 0;
+    double previousGoal = Double.NaN;
+    for (int i = 0; i < loops; i++) {
+      step(1);
+      assertEquals(Intake.SystemState.FEED_ASSISTING, intake.getSystemState());
+      assertEquals(Constants.Intake.kFeedAssistRollerRpm.get(), ideal.lastRollerRpm);
+      double goal = ideal.lastGoalRad();
+      assertTrue(
+          goal == FEED_ASSIST || goal == DEPLOYED, "rocked to an angle outside its two ends");
+      if (i == 0) {
+        assertEquals(FEED_ASSIST, goal, "the rock must start by rising");
+      } else if (goal != previousGoal) {
+        changes++;
+      }
+      previousGoal = goal;
+    }
+
+    // Two full periods are four half periods, so three changes of direction.
+    assertEquals(3, changes, "the rock did not alternate every half period");
+  }
+
+  /**
+   * FEED_ASSIST swings the arm out of stow just as DEPLOY does, so the M10 guard covers it too.
+   *
+   * <p>Pinned while the M10 interlock stands. M10b step 5 replaces the guard with the pivot-band
+   * rule, under which the rock -- clear of the band at both ends -- no longer waits on the turret,
+   * and this case is rewritten there.
+   */
+  @Test
+  void feedAssistIsRefusedByTheGuardToo() {
+    rebuildIdeal();
+    intake.setDeployGuard(() -> false);
+
+    intake.setWantedState(Intake.WantedState.FEED_ASSIST);
+    step(30);
+
+    assertNotEquals(
+        Intake.SystemState.FEED_ASSISTING, intake.getSystemState(), "rocked past a closed guard");
+  }
+
+  /**
+   * The conflict band follows the arm: true while unhomed and at stow, false once deployed and
+   * throughout the rock, and true again the moment a stow is COMMANDED rather than when it lands.
+   */
+  @Test
+  void conflictBandFollowsTheArmAndLeadsItIntoStow() {
+    ideal = new IdealPivotIO();
+    CommandScheduler.getInstance().unregisterSubsystem(intake);
+    intake = new Intake(ideal, GEOMETRY);
+    assertTrue(
+        intake.isInTurretConflictBand(), "an unhomed arm could be anywhere; must fail closed");
+
+    step(40);
+    assertTrue(intake.isInTurretConflictBand(), "the stowed arm is in the turret's way");
+
+    intake.setDeployGuard(() -> true);
+    intake.setWantedState(Intake.WantedState.DEPLOY_ONLY);
+    step(5);
+    assertFalse(intake.isInTurretConflictBand(), "a deployed arm cannot reach the turret");
+
+    intake.setWantedState(Intake.WantedState.FEED_ASSIST);
+    for (int i = 0; i < 60; i++) {
+      step(1);
+      assertFalse(intake.isInTurretConflictBand(), "the rock entered the band at loop " + i);
+    }
+
+    // One loop: the stow goal is commanded, but the ideal pivot has not reported arriving yet.
+    intake.setWantedState(Intake.WantedState.STOW);
+    step(1);
+    assertNotEquals(STOWED, ideal.positionRad, "the arm should not have arrived yet");
+    assertTrue(
+        intake.isInTurretConflictBand(),
+        "a stow on its way into the band must block the turret before the arm arrives");
+  }
+
+  /**
+   * Pieces are retained anywhere from deploy up to the feed-assist angle, never at stow, and never
+   * on an untrusted encoder.
+   */
+  @Test
+  void retainingPiecesTracksTheArm() {
+    ideal = new IdealPivotIO();
+    CommandScheduler.getInstance().unregisterSubsystem(intake);
+    intake = new Intake(ideal, GEOMETRY);
+    assertFalse(intake.isRetainingPieces(), "an unhomed arm must not claim to hold pieces");
+
+    step(40);
+    assertFalse(intake.isRetainingPieces(), "pieces fall out of a stowed intake");
+
+    intake.setDeployGuard(() -> true);
+    intake.setWantedState(Intake.WantedState.DEPLOY_ONLY);
+    step(5);
+    assertTrue(intake.isRetainingPieces(), "a deployed intake holds its pieces");
+
+    intake.setWantedState(Intake.WantedState.FEED_ASSIST);
+    for (int i = 0; i < 60; i++) {
+      step(1);
+      assertTrue(intake.isRetainingPieces(), "pieces were lost mid-rock at loop " + i);
+    }
+  }
+
+  /**
+   * The band lies at the stow end of travel whichever way the pivot's angles run, includes anything
+   * past stow, and fails closed when stow and deploy coincide.
+   */
+  @Test
+  void conflictBandIsDirectionAgnosticAndFailsClosed() {
+    double w = BAND;
+
+    // Stow below deploy, as in the test geometry.
+    assertTrue(Intake.inTurretConflictBand(-1.2, -1.2, 0.3, w), "stow itself");
+    assertTrue(Intake.inTurretConflictBand(-1.2 + 0.9 * w, -1.2, 0.3, w), "inside the band");
+    assertFalse(Intake.inTurretConflictBand(-1.2 + 1.1 * w, -1.2, 0.3, w), "just clear of it");
+    assertTrue(Intake.inTurretConflictBand(-1.3, -1.2, 0.3, w), "past the stow stop");
+
+    // The mirror image: stow above deploy, as the real robot may turn out to be.
+    assertTrue(Intake.inTurretConflictBand(1.2, 1.2, -0.3, w), "stow itself, mirrored");
+    assertTrue(Intake.inTurretConflictBand(1.2 - 0.9 * w, 1.2, -0.3, w), "inside, mirrored");
+    assertFalse(Intake.inTurretConflictBand(1.2 - 1.1 * w, 1.2, -0.3, w), "clear, mirrored");
+    assertTrue(Intake.inTurretConflictBand(1.3, 1.2, -0.3, w), "past stow, mirrored");
+
+    // Placeholder geometry: no direction, so both sides of stow count.
+    assertTrue(Intake.inTurretConflictBand(0.9 * w, 0.0, 0.0, w), "degenerate, above");
+    assertTrue(Intake.inTurretConflictBand(-0.9 * w, 0.0, 0.0, w), "degenerate, below");
+    assertFalse(Intake.inTurretConflictBand(1.1 * w, 0.0, 0.0, w), "degenerate, clear");
+  }
+
+  /**
+   * The rock alternates on the half period, and holds the raised angle when its period is zero or
+   * when rocking is not allowed.
+   *
+   * <p>The not-allowed case is the low-power fallback, and it is tested here, on the pure function,
+   * because {@code PowerBudget} is still the M14 stub whose scalar is always 1.0: no
+   * whole-mechanism case can reach the fallback until M14 lands.
+   */
+  @Test
+  void feedAssistGoalAlternatesAndFallsBackToHolding() {
+    double period = 0.5;
+    assertEquals(FEED_ASSIST, Intake.feedAssistGoalRad(0.0, period, true, DEPLOYED, FEED_ASSIST));
+    assertEquals(FEED_ASSIST, Intake.feedAssistGoalRad(0.24, period, true, DEPLOYED, FEED_ASSIST));
+    assertEquals(DEPLOYED, Intake.feedAssistGoalRad(0.26, period, true, DEPLOYED, FEED_ASSIST));
+    assertEquals(FEED_ASSIST, Intake.feedAssistGoalRad(0.51, period, true, DEPLOYED, FEED_ASSIST));
+
+    assertEquals(
+        FEED_ASSIST,
+        Intake.feedAssistGoalRad(0.26, 0.0, true, DEPLOYED, FEED_ASSIST),
+        "a zero period must hold the raised angle");
+    assertEquals(
+        FEED_ASSIST,
+        Intake.feedAssistGoalRad(0.26, period, false, DEPLOYED, FEED_ASSIST),
+        "with rocking disallowed, it must hold the raised angle");
+  }
+
   /** The machine boots into HOMING and homes itself without being asked. */
   @Test
   void bootsIntoHomingAndReachesStowed() {
