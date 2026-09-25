@@ -44,7 +44,7 @@ Software stack: WPILib 2026, AdvantageKit 26.0.2 (IO-layer logging and log repla
 
 ## The plan
 
-**`plans/PLAN_3_MAXIMUM.md` is the single authoritative plan.** It is a ~7,200-line document
+**`plans/PLAN_3_MAXIMUM.md` is the single authoritative plan.** It is a ~7,900-line document
 covering architecture, a file-by-file specification with every method signature, constants strategy,
 the shooting-on-the-move math, vision fusion, autonomous, logging and simulation, a student build
 order with milestones, and a risk register.
@@ -165,7 +165,8 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | — | Camera mountings measured from CAD; intake-camera gating | `feature-cad-constants` | 3 of 4 transforms measured; 6 tests, mutation score 6/6; `kRobotToQuest` still unmeasured |
 | — | Combine M1–M9 as the base for M10 | `integration-m1_m9` | Complete — M3 and M4 merged in; 112 tests, 103 passing, 0 failures |
 | M10 | `Superstructure`: fourteen states, both interlocks, the `readyToScore` gate | `feature-superstructure` | **Simulation checkpoint complete** — 121 tests, 0 skipped, mutation score 26/26; hardware checkpoint outstanding |
-| M11+ | Shot tables, shoot-on-the-move, autos, hardening | not started | — |
+| M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` (to be cut from `feature-superstructure`) | **Replanned 2026-09-24** (plan §2.4); not started. Change order below |
+| M11+ | Shot tables (now measured in bursts), shoot-on-the-move, autos, hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
@@ -380,6 +381,110 @@ real geometry, and `kIntakeConflictMinRad` and `kIntakeConflictMaxRad` are still
 checkpoint clause that matters most — deliberately deploy the intake into the turret's arc and
 confirm both directions hold — has been discharged in simulation against simulated geometry only,
 and simulated geometry cannot be wrong about where the mechanisms actually are.
+
+### Replanned: the robot carries a hopper, not one piece
+
+REBUILT lets a robot hold as many game pieces as it can carry, and the plan had modelled the robot
+as a one-piece slot. `Indexer.hasPiece()` was the pivot of intaking, scoring and autos, and M5 and
+M10 were built that way. Section 2.4 of the plan is the replan. It is written down here because it
+reverses decisions already implemented on `feature-indexer` and `feature-superstructure`. Those
+branches are left as they are, as the record of the single-piece design; the new milestone **M10b**
+retrofits them on a new branch.
+
+The decisions, each made by the user:
+
+- **No piece sensors.** The robot cannot count what it holds, and cannot reliably tell that it
+  holds anything. So nothing is gated on having a piece. The readiness gate drops from eight terms
+  to seven, and scoring feeds whenever the shot is ready. Shots are counted at the **flywheel**,
+  where every scored piece takes a measurable bite out of wheel speed. "Probably empty" is a
+  timed belief that autos use to end a scoring leg, never a teleop gate.
+- **The intake rests deployed.** Releasing the intake button stops the roller and leaves the arm
+  down, because raising it would dump the hopper. It stows only on an explicit `STOW`. A new
+  partial-raise `FEED_ASSIST` position pushes the hopper toward the indexer while scoring.
+- **Shoot, move and intake at once.** Intake and scoring become two independent requests, modelled
+  as orthogonal regions of the Superstructure rather than doubling the scoring states. The
+  existing `PowerBudget` priorities already shed the intake first when current runs short.
+- **The interlock was stricter than the robot.** It treated a *deployed* intake as being in the
+  turret's way. On this robot the deployed intake cannot reach the turret, so the conflict becomes
+  a band of pivot angles the arm passes *through*, to be measured from CAD. Until that band is
+  measured the interlock is inert. That is the same shape as M8's identity-transform trap, and it
+  is recorded as a named risk.
+
+The review questions were answered on 2026-09-25 and are recorded in §2.4:
+- The hopper holds 50 pieces and does not jam when overfilled, so no "full" signal is needed.
+- The *stowed* intake does conflict with the turret, over roughly the top 15° of its travel. The
+  feed-assist position does not.
+- Feed-assist rocks back and forth rather than holding still.
+- The robot starts with 8 pieces and the intake stowed, as the rules require. Pieces can fall out of
+  a stowed intake, so the first enable deploys it and every auto waits for that before moving.
+- The floor roller runs only to feed the indexer. It starts as soon as a shot is requested, and the
+  stopped indexer holds pieces back until the shooter is ready.
+
+What remains is on-robot tuning: the exact band edge and the rocking period.
+
+### M10b: the order in which built code changes
+
+The replan touches code that already exists. M5's intake, indexer and floor roller, M4's flywheel,
+M10's superstructure, and the vision intake-camera gate were all built to the single-piece model.
+This section is the order to change them in. It was written against `feature-superstructure` as it
+stood when the replan was accepted: 121 tests, all passing.
+
+**Where the work happens.** M10b gets its own branch, `feature-hopper`, cut from
+`feature-superstructure` because it depends on M10. It lives in its own sibling directory, and main's
+documentation is merged in first so the branch carries the §2.4 plan it implements:
+
+```bash
+cd AdvantageKitRebuilt
+git clone ./feature-superstructure feature-hopper
+cd feature-hopper
+git remote set-url origin https://github.com/MrGotGame/Rebuilt-claude-test.git
+git checkout -b feature-hopper feature-superstructure
+git fetch ../AdvantageKit_TalonFXSwerveTemplate main && git merge FETCH_HEAD
+```
+
+`feature-indexer`, `feature-intake` and `feature-superstructure` are **not** edited. They stay as
+the record of the single-piece design, which is the point of keeping every branch.
+
+**The rules that fix the order:**
+
+1. **Add before you switch, and switch before you delete.** New behaviour goes in alongside the old
+   API first. The superstructure then switches over. Only after that is the old API deleted, in a
+   commit whose sole job is deletion, so the compiler proves nothing still uses it.
+2. **Bottom up.** The superstructure is the only client of the mechanisms' new behaviour, so the
+   mechanisms change first and are tested on their own suites.
+3. **Every step ends with `./gradlew build test` green.** Every behaviour change also gets a case
+   that fails without it. That is the testing standard below, not a new rule.
+4. **One step, one commit, one reason.** The interlock correction in particular is its own commit.
+   It is the part of this replan most likely to be walked through with students.
+
+| # | Step | Files | Why it sits here | Done when |
+|---|---|---|---|---|
+| 0 | Branch setup and baseline | — | Establishes the starting test count, so later steps can show what they replaced. | Branch builds; 121 tests pass. |
+| 1 | **Constants, additive only** | `Constants.java` | Every later step reads these. Adding them changes no behaviour. Old constants such as `kHasBeamBreak`, `kHasPiece*` and `kIndexFeedSec` stay until step 8. | New intake (`kFeedAssist*`, `kTurretConflictBandRad`), indexer (`kLoaded*`, `kJam*`, `kUnjam*`), shooter (`kBurstToleranceRpm`, `kShot*`), `Superstructure.kEmptyConfirmSec`, and `Auto.kScoreTimeoutSec` → 8.0. Build green. |
+| 2 | **Shooter: shot detection** | `Shooter`, `ShooterIOSim`, `ShooterFsmTest` | Fully independent of everything else and purely additive. It also has to exist before anything can stop counting shots at the indexer. | `getShotCount` / `getSecondsSinceLastShot` / `resetShotCount`, the `willBeAtSpeedIn(horizon, tolerance)` overload, and `injectShot()`. New cases: one shot per injected piece at cadence, spin-up is not a shot, the refractory window holds. |
+| 3 | **Intake: resting and feed-assist states, band predicates** | `Intake`, `IntakeFsmTest` | The superstructure's new intake region needs these to exist. `isStowed()` is kept, so nothing that calls it breaks yet. | `DEPLOY_ONLY` settles in a real `DEPLOYED` state rather than lingering in `DEPLOYING`. `FEED_ASSIST` rocks between the two angles, and holds still at period 0 or when power is short. `isInTurretConflictBand()` is true while stowed and false when deployed. `isRetainingPieces()` is added. The deploy guard is consulted only for motions that cross the band. |
+| 4 | **Vision: widen the intake-camera gate** | `Intake.isAtIntakingAngle()`, `RobotContainer` (the three `intake::isIntaking` gate suppliers), `IntakeCameraGateTest` | Needs step 3's `DEPLOYED` state. It is separate from the superstructure because it is a *vision* decision with its own suite and its own failure mode. | The gate admits `INTAKING` and `DEPLOYED`, which share one pivot angle, and still rejects `EJECTING`, `FEED_ASSISTING` and every transit state. A new case fuses a frame while `DEPLOYED`. The existing `EJECTING` rejection case still passes. |
+| 5 | **The interlock correction** | `Superstructure` (one line of wiring plus `intaking()`), `Turret` Javadoc, `SuperstructureFsmTest` | The smallest change that makes the interlock match the real robot. It has to land before step 7, because step 7 lets the turret aim while intaking, which is only safe once the guard keys on the band. | `turret.setIntakeArcGuard(intake::isInTurretConflictBand)` replaces `() -> !intake.isStowed()`. `intaking()` no longer stows the turret. The interlock test gains its negative case: a **deployed** intake *may* share the arc with the turret, while a **stowed** one blocks it in both directions. |
+| 6 | **Indexer: jam handling and the load diagnostic, additive** | `Indexer`, `IndexerIOSim`, `IndexerFsmTest` | The superstructure's step 7 needs `isUnjamming()` and `isLoaded()`. `hasPiece()` and `INDEX`/`HOLD` are left working, because the superstructure still calls them until step 7. | `FEEDING` detects a stall, then goes to `UNJAMMING`, then back to `FEEDING`, and latches `JAMMED` with an alert after `kMaxUnjamAttempts`. `isLoaded()` is evaluated only while feeding forward. `setSimulatedLoad` / `setSimulatedJam` hooks are added. |
+| 7 | **Superstructure switchover** | `Superstructure`, `RobotContainer` bindings, `Robot` init hooks, `SuperstructureFsmTest` | The one big step, and last among the behaviour changes because it consumes all of steps 2–6. `RobotContainer` has to change in the same commit, because removing `WantedState.INTAKE` breaks its binding. | `INTAKE`, `INTAKING` and `INDEXING` are removed. `STOWED` is renamed `RESTING` and `STOW` is added. It adds `setIntakeRequested`, `intakeWhileHeldCommand`, `resolveIntakeMode`, `applyFeedSide` (floor roller leads, indexer gates), `onEnable` (first enable deploys) and `StowedWhileMoving`. The piece guard and gate term 4 are gone. It adds the burst latch and `likelyEmpty()`, and `scoreUntilEmptyCommand` waits on it. `Robot.autonomousInit`/`teleopInit` call `onEnable` and `shooter.resetShotCount`. The §4.14 cases are all present. **No production code calls `hasPiece()`, `INDEX`, `HOLD` or `FloorRoller.INTAKE` any more.** |
+| 8 | **Delete the single-piece model** | `Indexer`, `IndexerIO*`, `FloorRoller`, `Constants`, `IndexerFsmTest`, `FloorRollerFsmTest` | Only safe now: the compiler proves step 7 left no caller. It is a deletion-only commit, so the diff reads as exactly what the replan retired. | `hasPiece`, `INDEX`/`HOLD`, `INDEXING`/`HOLDING`, the latched-sample replay and settle window, the indexer shot counter, the beam-break path and alert, `setSimulatedPiecePresent`, `FloorRoller.INTAKE`/`INTAKING`, and the old constants (`kHasBeamBreak`, `Dio.kIndexerBeamBreak`, `kHasPiece*`, `kShotDetectDebounceSec`, `kIndexRpm`, `kDetectionSettleSec`, `kIndexFeedSec`) are all deleted. Test cases about deleted behaviour are deleted too, not adapted. Build green. |
+| 9 | **Autos: markers and skeletons** | `AutoFactory`, `AutoRoutines` | These are still skeletons (PathPlanner is unconfigured), so this is mostly the vocabulary and TODOs. It comes last because it depends on step 7's API and nothing depends on it. | `Intake`/`StopIntake` markers use `setIntakeRequested`, and `StowIntake` is added. `WaitForPiece`, `waitForPieceCommand` and `bailoutIfEmpty` are removed. `waitUntilIntakeRetaining()` opens every routine, and `driveIntakeAndShoot` and `Auto/PreloadFired` are added. |
+| 10 | **Verify, then record** | `docs`, this file, `CONTEXT_AND_CONVENTIONS.md` | Evidence before claims. | A mutation pass aimed at the four places a plausible bug survives happy-path tests: the `likelyEmpty()` accumulator (gate-closed time must not count), the burst latch, the band predicate's direction, and the floor-roller-leads rule. The simulation checkpoint from plan §10.2 M10b is run. Then the milestone table, the branch table, and a short M10b write-up in the style of the M8–M10 sections, including what surprised us. |
+
+**Two ordering traps, recorded before they happen:**
+
+- **Do not fold step 5 into step 7.** If the turret guard still reads `!intake.isStowed()` when
+  step 7 lets the turret aim during intaking, the turret is blocked for exactly the whole time it
+  now needs to aim, and shoot-while-intaking silently never fires. It would look like a gate
+  problem. Landing the interlock first, with its own test, makes that failure impossible to
+  mistake for anything else.
+- **Step 4 before step 7, not after.** Once step 7 lands, the intake rests in `DEPLOYED` for most
+  of the match. With the old gate that quietly switches the intake camera off, and nothing fails.
+  The camera just contributes nothing, which is the "silently inert" failure this project has met
+  three times already.
+
+**Downstream.** M11 builds on `feature-hopper`, not on `feature-superstructure`, because the shot
+tables are measured in bursts through the hopper feed path.
 
 ### The intake camera is not where the plan says it is
 
