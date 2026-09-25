@@ -164,8 +164,8 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M9 | QuestNav: trust gate, seeding, re-seeding, degradation | `feature-questnav` | **Simulation checkpoint complete** — 18 tests, mutation score 12/12; hardware checkpoint outstanding |
 | — | Camera mountings measured from CAD; intake-camera gating | `feature-cad-constants` | 3 of 4 transforms measured; 6 tests, mutation score 6/6; `kRobotToQuest` still unmeasured |
 | — | Combine M1–M9 as the base for M10 | `integration-m1_m9` | Complete — M3 and M4 merged in; 112 tests, 103 passing, 0 failures |
-| M10 | `Superstructure`: fourteen states, both interlocks, the `readyToScore` gate | `feature-superstructure` | **Simulation checkpoint complete** — 121 tests, 0 skipped, mutation score 26/26; hardware checkpoint outstanding |
-| M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` (to be cut from `feature-superstructure`) | **Replanned 2026-09-24** (plan §2.4); not started. Change order below |
+| M10 | `Superstructure`: fourteen states, both interlocks, the `readyToScore` gate | `feature-superstructure` | **Simulation checkpoint complete** — 122 tests, 0 skipped, mutation score 26/26; hardware checkpoint outstanding |
+| M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` | **Replanned 2026-09-24** (plan §2.4). Branch cut from `feature-superstructure`; step 0 done (builds, 122 tests pass). Steps 1–10 not started; change order below |
 | M11+ | Shot tables (now measured in bursts), shoot-on-the-move, autos, hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
@@ -427,7 +427,8 @@ What remains is on-robot tuning: the exact band edge and the rocking period.
 The replan touches code that already exists. M5's intake, indexer and floor roller, M4's flywheel,
 M10's superstructure, and the vision intake-camera gate were all built to the single-piece model.
 This section is the order to change them in. It was written against `feature-superstructure` as it
-stood when the replan was accepted: 121 tests, all passing.
+stood when the replan was accepted: 122 tests, all passing. (M10's record below says 121; `1244f94`,
+which gave `PASSING` its own gate, added the 122nd after that record was written.)
 
 **Where the work happens.** M10b gets its own branch, `feature-hopper`, cut from
 `feature-superstructure` because it depends on M10. It lives in its own sibling directory, and main's
@@ -459,7 +460,7 @@ the record of the single-piece design, which is the point of keeping every branc
 
 | # | Step | Files | Why it sits here | Done when |
 |---|---|---|---|---|
-| 0 | Branch setup and baseline | — | Establishes the starting test count, so later steps can show what they replaced. | Branch builds; 121 tests pass. |
+| 0 | Branch setup and baseline | — | Establishes the starting test count, so later steps can show what they replaced. | Branch builds; 122 tests pass. |
 | 1 | **Constants, additive only** | `Constants.java` | Every later step reads these. Adding them changes no behaviour. Old constants such as `kHasBeamBreak`, `kHasPiece*` and `kIndexFeedSec` stay until step 8. | New intake (`kFeedAssist*`, `kTurretConflictBandRad`), indexer (`kLoaded*`, `kJam*`, `kUnjam*`), shooter (`kBurstToleranceRpm`, `kShot*`), `Superstructure.kEmptyConfirmSec`, and `Auto.kScoreTimeoutSec` → 8.0. Build green. |
 | 2 | **Shooter: shot detection** | `Shooter`, `ShooterIOSim`, `ShooterFsmTest` | Fully independent of everything else and purely additive. It also has to exist before anything can stop counting shots at the indexer. | `getShotCount` / `getSecondsSinceLastShot` / `resetShotCount`, the `willBeAtSpeedIn(horizon, tolerance)` overload, and `injectShot()`. New cases: one shot per injected piece at cadence, spin-up is not a shot, the refractory window holds. |
 | 3 | **Intake: resting and feed-assist states, band predicates** | `Intake`, `IntakeFsmTest` | The superstructure's new intake region needs these to exist. `isStowed()` is kept, so nothing that calls it breaks yet. | `DEPLOY_ONLY` settles in a real `DEPLOYED` state rather than lingering in `DEPLOYING`. `FEED_ASSIST` rocks between the two angles, and holds still at period 0 or when power is short. `isInTurretConflictBand()` is true while stowed and false when deployed. `isRetainingPieces()` is added. The deploy guard is consulted only for motions that cross the band. |
