@@ -39,7 +39,10 @@ step 6 the indexer's jam recovery and load reading, step 7 the superstructure sw
 Step 8 deleted the single-piece model and added no defects of its own -- a deletion has
 no new behaviour to break -- but it rewrote the piece-guard entry, which named the
 deleted hasPiece(). Step 9 added the autos' one runnable hopper-era block, the wait
-for the intake to retain pieces. Several M10 anchors name code that later M10b steps replace (the
+for the intake to retain pieces. Step 10 is the pass the retrofit order asked for: subtler
+defects in the four places a plausible bug survives happy-path tests (the empty clock,
+the burst latch, the band's direction, the floor roller leading), plus the misconfigured
+feed-assist guard, which had none. Several M10 anchors name code that later M10b steps replace (the
 piece guard, the isStowed turret guard), and those entries must be rewritten against
 the new code in the step that changes it, not deleted. Adding a milestone means adding its
 defects to the list and re-running the whole thing, so an old mutation cannot quietly
@@ -376,6 +379,56 @@ MUTATIONS = [
     ("the retain wait has no timeout", AR,
      "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)\n                .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()),",
      "            Commands.waitUntil(factory.getIntake()::isRetainingPieces),"),
+
+    # ---- M10b step 10: the verification pass. The retrofit order names four places where a
+    # plausible bug passes every happy-path test. Each already has a blunt entry above ("burst latch
+    # never sets", "floor roller waits for the gate"); these are the subtler versions that still
+    # read like correct code.
+    #
+    # The burst latch. It must set only once the gate has OPENED -- the first piece of every burst
+    # meets the tight band -- and must drop when the robot leaves the states that feed on the gate.
+    ("burst latch sets before the gate ever opens", SS,
+     "    } else if (gateOpenForThisState) {\n      burstLatched = true;",
+     "    } else {\n      burstLatched = true;"),
+    ("burst latch survives leaving the scoring states", SS,
+     "    if (!burstState || !otherTermsHold) {\n      burstLatched = false;",
+     "    if (!otherTermsHold) {\n      burstLatched = false;"),
+    # The empty clock. It must count only gate-open feeding the indexer is actually doing; a
+    # version keyed on the gate alone counts the loop a jam latches, and every loop after it.
+    ("empty clock counts the gate, not the feeding", SS,
+     "    } else if (feedOpen\n        && indexer.getSystemState() == Indexer.SystemState.FEEDING\n        && !indexer.isLoaded()) {",
+     "    } else if (feedOpen && !indexer.isLoaded()) {"),
+    ("a shot only restarts the clock while intaking", SS,
+     "    if (newShot || intakeMode == IntakeMode.INTAKING) {",
+     "    if (newShot && intakeMode == IntakeMode.INTAKING) {"),
+    # The band's direction. The band is measured IN FROM STOW; measured in from deploy it is M10's
+    # backwards rule again, inside the predicate this time rather than in the wiring. And a reading
+    # past the stow stop is the arm at its most dangerous, not clear.
+    ("band measured in from deploy instead of stow", IN,
+     "      return angleRad <= stowedRad + widthRad;",
+     "      return angleRad >= deployedRad - widthRad;"),
+    ("a reading past the stow stop reads clear", IN,
+     "      return angleRad <= stowedRad + widthRad;",
+     "      return angleRad >= stowedRad && angleRad <= stowedRad + widthRad;"),
+    # The floor roller leading. It keys on the WANTED state, so it also runs while a request is
+    # diverted to SPINNING_UP or WAITING_FOR_TURRET; it runs for every request that shoots,
+    # including the autos'; and a bare pre-spin does not run it.
+    ("floor roller keys on the system state, not the request", SS,
+     "        switch (wantedState) {\n          case SCORE_ON_MOVE, SCORE_STATIONARY, SCORE_FORCED, AUTO_SCORE_ON_MOVE, PASS -> true;",
+     "        switch (systemState) {\n          case SCORING_ON_THE_MOVE, SCORING_STATIONARY, SCORING_FORCED, PASSING -> true;"),
+    ("floor roller does not lead in autonomous", SS,
+     "          case SCORE_ON_MOVE, SCORE_STATIONARY, SCORE_FORCED, AUTO_SCORE_ON_MOVE, PASS -> true;",
+     "          case SCORE_ON_MOVE, SCORE_STATIONARY, SCORE_FORCED, PASS -> true;"),
+    ("a bare pre-spin runs the floor roller", SS,
+     "          case SCORE_ON_MOVE, SCORE_STATIONARY, SCORE_FORCED, AUTO_SCORE_ON_MOVE, PASS -> true;",
+     "          case SCORE_ON_MOVE, SCORE_STATIONARY, SCORE_FORCED, AUTO_SCORE_ON_MOVE, PASS, SPIN_UP -> true;"),
+    # The misconfigured feed-assist guard, which had no test until step 10.
+    ("a refused feed-assist raises no warning", SS,
+     "    feedAssistBlockedAlert.set(feedAssistBlocked);",
+     "    feedAssistBlockedAlert.set(false);"),
+    ("every feed-assist reads as refused", SS,
+     "        next == IntakeMode.FEED_ASSIST\n            && intake.getSystemState() == Intake.SystemState.WAITING_FOR_TURRET;",
+     "        next == IntakeMode.FEED_ASSIST;"),
 ]
 
 
