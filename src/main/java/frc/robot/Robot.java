@@ -155,8 +155,13 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void autonomousInit() {
-    // TODO: robotContainer.setDriveBrakeMode(true); autoStartTimeSec = Timer.getFPGATimestamp();
-    // also indexer.resetShotCount() via the container, so the per-match count is clean.
+    // TODO: robotContainer.setDriveBrakeMode(true); autoStartTimeSec = Timer.getFPGATimestamp().
+    //
+    // IMPLEMENTED in part by M10b step 7: the shot count reset the TODO asked for (now the
+    // flywheel's, not the indexer's), and the first-enable intake deploy -- both in
+    // onAutonomousInit, BEFORE the routine is scheduled, so the routine's first loop already sees
+    // the intake heading down.
+    robotContainer.onAutonomousInit();
     autonomousCommand = robotContainer.getAutonomousCommand();
     if (autonomousCommand != null) {
       CommandScheduler.getInstance().schedule(autonomousCommand);
@@ -195,9 +200,13 @@ public class Robot extends LoggedRobot {
     if (autonomousCommand != null) {
       autonomousCommand.cancel();
     }
-    // TODO: robotContainer.setDriveBrakeMode(true), and reset the superstructure to its DEFAULT
-    // wanted state so that autonomous can never leak a goal into teleop -- a robot that starts
-    // teleop still trying to finish an auto scoring sequence is both confusing and dangerous.
+    // TODO: robotContainer.setDriveBrakeMode(true).
+    //
+    // IMPLEMENTED by M10b step 7: the superstructure reset to DEFAULT this TODO asked for, so
+    // autonomous can never leak a goal into teleop -- plus releasing any intake request an auto
+    // left
+    // standing, and deploying the intake if this is the first enable. See onTeleopInit.
+    robotContainer.onTeleopInit();
   }
 
   /** Nothing to do; all teleop behavior lives in commands. */

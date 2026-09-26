@@ -14,6 +14,7 @@ import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.wpilibj.Alert.AlertType;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.simulation.SimHooks;
+import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import edu.wpi.first.wpilibj2.command.Subsystem;
 import frc.robot.Constants;
@@ -323,25 +324,86 @@ public class SuperstructureFsmTest {
         new double[] {8.0, 12.0, 16.0});
   }
 
+  /**
+   * A solver that produces a shot the flywheel will actually spin up for.
+   *
+   * <p>Added for M10b step 7. {@link #usableSolver()} solves, but its RPM fit is still {@code
+   * Constants.Shot}'s all-zero one, so every shot asks for 0 RPM and the gate can never open -- see
+   * {@link #theReadinessGateCannotOpenUntilTheShotTablesAreMeasured}. The hopper cases need to
+   * watch the gate open, close and hold, so this adds a plausible fit through the solver's
+   * explicit-RPM constructor. At 3 m it asks for roughly 2,700 RPM.
+   *
+   * @return a solver over the same tables as {@link #usableSolver()}, with a non-zero RPM fit
+   */
+  private static ShootingSolver firingSolver() {
+    return new ShootingSolver(
+        new double[] {1.0, 4.0, 7.0},
+        new double[] {0.50, 0.80, 1.10},
+        new double[] {8.0, 12.0, 16.0},
+        () -> 250.0,
+        () -> 0.0);
+  }
+
+  /** The simulated flywheel under the robot {@link #buildFiringRobot()} built. */
+  private ShooterIOSim firingShooter;
+
+  /**
+   * Builds a robot whose gate can open: the firing solver, the ideal intake over the realistic test
+   * geometry, and a simulated flywheel the case can inject pieces into. Places it 3 m in front of
+   * the goal, where the shot points straight ahead (clear of the turret's conflict arc), and homes
+   * it.
+   *
+   * <p><b>Outputs:</b> replaces every subsystem; sets {@link #firingShooter}.
+   */
+  private void buildFiringRobot() {
+    intakeGeometry = IdealPivotIO.GEOMETRY;
+    firingShooter = new ShooterIOSim();
+    buildRobot(
+        firingSolver(),
+        new IdealPivotIO(),
+        new IndexerIOSim(),
+        new TurretIOSim(),
+        firingShooter,
+        new FloorRollerIOSim());
+    placeRobotAt(-3.0, 0.0);
+    homeAndSettle();
+  }
+
+  /**
+   * Requests a shot on the move and steps, with fresh vision, until the readiness gate opens.
+   *
+   * <p><b>Outputs:</b> leaves the robot in SCORING_ON_THE_MOVE with the gate open on the last loop.
+   */
+  private void openTheGate() {
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    for (int i = 0; i < 600 && !superstructure.isReadyToScore(); i++) {
+      stepWithVision(1);
+    }
+    assertTrue(
+        superstructure.isReadyToScore(),
+        "the gate never opened on the firing robot; flywheel at "
+            + shooter.getVelocityRpm()
+            + " of "
+            + shooter.getGoalRpm()
+            + " RPM, turret at goal "
+            + turret.atGoal());
+  }
+
+  /** Loops in {@code Constants.Superstructure.kEmptyConfirmSec}. */
+  private static int emptyConfirmLoops() {
+    return (int) Math.round(Constants.Superstructure.kEmptyConfirmSec.get() / LOOP_SEC);
+  }
+
   /** Loops that comfortably outlast the robot-level homing timeout. */
   private static int loopsPastHomingTimeout() {
     return (int) (Constants.Superstructure.kHomingTimeoutSec.get() / LOOP_SEC) + 30;
   }
 
-  /** Loops the indexer needs to settle and then debounce a newly-arrived piece. */
-  private static int detectionLoops() {
-    return (int)
-            ((Constants.Indexer.kDetectionSettleSec.get()
-                    + Constants.Indexer.kHasPieceDebounceSec.get())
-                / LOOP_SEC)
-        + 15;
-  }
-
-  /** Homes the robot and waits for it to settle into STOWED. */
+  /** Homes the robot and waits for it to settle into RESTING. */
   private void homeAndSettle() {
     step(loopsPastHomingTimeout());
     assertEquals(
-        Superstructure.SystemState.STOWED,
+        Superstructure.SystemState.RESTING,
         superstructure.getSystemState(),
         "the robot never finished homing; intake homed="
             + intake.isHomed()
@@ -349,25 +411,16 @@ public class SuperstructureFsmTest {
             + turret.isHomed());
   }
 
-  /**
-   * Runs an intake cycle until the indexer reports a piece aboard.
-   *
-   * <p>Piece detection runs off the load on a <b>turning</b> wheel, so a piece cannot be detected
-   * while the indexer is stopped. Driving the real intake state is what makes the detection path
-   * the same one the robot uses, rather than poking a flag.
-   */
-  private void acquirePiece() {
-    indexerSim.setSimulatedPiecePresent(true);
-    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
-    step(detectionLoops() + 20);
-    assertTrue(indexer.hasPiece(), "the injected piece was never detected by the indexer");
-  }
-
   // --------------------------------------------------------------------------------- tests ----
 
-  /** The robot should home itself and settle into stowed with no input. */
+  /**
+   * The robot should home itself and settle into RESTING with no input, the intake still stowed.
+   *
+   * <p>The robot must start with the intake stowed (a rule), and nothing but the first enable or an
+   * intake request deploys it -- so at rest after homing, with no enable, it is still stowed.
+   */
   @Test
-  void startsInHomingAndReachesStowed() {
+  void startsInHomingAndReachesResting() {
     assertEquals(
         Superstructure.SystemState.HOMING,
         superstructure.getSystemState(),
@@ -377,15 +430,19 @@ public class SuperstructureFsmTest {
 
     homeAndSettle();
 
-    assertTrue(intake.isHomed(), "reaching STOWED without a homed intake would be a lie");
-    assertTrue(turret.isHomed(), "reaching STOWED without a homed turret would be a lie");
+    assertTrue(intake.isHomed(), "reaching RESTING without a homed intake would be a lie");
+    assertTrue(turret.isHomed(), "reaching RESTING without a homed turret would be a lie");
+    assertEquals(
+        Superstructure.IntakeMode.STOWED,
+        superstructure.getIntakeMode(),
+        "nothing has enabled the robot or asked for the intake, so it must still be stowed");
 
     // The robot is asked for nothing and is therefore doing nothing dangerous, but the flywheel is
-    // deliberately NOT stopped: STOWED idles it so the next shot does not pay the whole spin-up.
+    // deliberately NOT stopped: RESTING idles it so the next shot does not pay the whole spin-up.
     assertNotEquals(
         Shooter.SystemState.COASTING,
         shooter.getSystemState(),
-        "STOWED must idle the flywheel rather than stop it");
+        "RESTING must idle the flywheel rather than stop it");
   }
 
   /**
@@ -413,9 +470,16 @@ public class SuperstructureFsmTest {
         "still homing long after both mechanisms should have finished");
   }
 
-  /** A score request with no game piece must never reach a scoring state. */
+  /**
+   * A score request reaches its scoring state with nothing known about what is aboard.
+   *
+   * <p>Replaces M10's {@code scoreRequestWithoutPieceNeverReachesScoring}, which pinned the piece
+   * guard the hopper replan removed (plan section 2.4). The robot has no piece sensor, so "has a
+   * piece" cannot be answered; a guard on it would divert every scoring request forever. This case
+   * pins the decision so nobody quietly re-adds one.
+   */
   @Test
-  void scoreRequestWithoutPieceNeverReachesScoring() {
+  void scoringDoesNotRequireAPiece() {
     buildRobot(
         usableSolver(),
         new IntakeIOSim(),
@@ -429,16 +493,10 @@ public class SuperstructureFsmTest {
     superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
     stepWithVision(60);
 
-    assertFalse(indexer.hasPiece(), "this case is only meaningful with an empty indexer");
     assertEquals(
-        Superstructure.SystemState.SPINNING_UP,
+        Superstructure.SystemState.SCORING_ON_THE_MOVE,
         superstructure.getSystemState(),
-        "an empty robot asked to score must pre-spin, not score");
-
-    // Pre-spinning rather than refusing is the point: the driver holding the trigger with an empty
-    // robot still gets the wheel brought up, so the shot is ready the instant a piece arrives.
-    assertNotEquals(
-        Indexer.SystemState.FEEDING, indexer.getSystemState(), "the belt ran with nothing aboard");
+        "a score request with a usable solution must score, with no piece guard in the way");
   }
 
   /** Scoring on the move must require a usable shot solution. */
@@ -449,7 +507,6 @@ public class SuperstructureFsmTest {
     // measures the tables.
     placeRobotAt(-3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
 
     superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
     stepWithVision(40);
@@ -632,7 +689,7 @@ public class SuperstructureFsmTest {
     homeAndSettle();
     assertTrue(intake.isInTurretConflictBand(), "the stowed intake should be in the turret's way");
 
-    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
+    superstructure.setIntakeRequested(true);
     step(10);
     assertFalse(
         intake.isInTurretConflictBand(),
@@ -646,7 +703,10 @@ public class SuperstructureFsmTest {
         "the turret is not in the conflict arc, so nothing is being tested; it is at "
             + turret.getPositionRad());
 
-    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    // STOW, not DEFAULT: since M10b step 7 releasing the intake and resting leaves it DOWN, and
+    // STOW is the only request that raises it.
+    superstructure.setIntakeRequested(false);
+    superstructure.setWantedState(Superstructure.WantedState.STOW);
     boolean sawWaiting = false;
     for (int i = 0; i < 200; i++) {
       step(1);
@@ -695,7 +755,7 @@ public class SuperstructureFsmTest {
             + " than the interlock");
 
     // ---- Direction 3, the negative case: a DEPLOYED intake does not block the turret.
-    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
+    superstructure.setIntakeRequested(true);
     step(10);
     assertFalse(intake.isInTurretConflictBand(), "the intake never left the band");
 
@@ -736,21 +796,22 @@ public class SuperstructureFsmTest {
         intakeCameraIO.pipelines.size(),
         "homing and stowing must not touch the camera pipeline");
 
-    // The piece stays out of the indexer so the machine stays in INTAKING rather than walking on
-    // to INDEXING, which would fire onExit(INTAKING) and confuse the count with a real transition.
-    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
+    // Since M10b step 7 intaking is the intake REGION, not a SystemState, and the pipeline switches
+    // on the edges of IntakeMode.INTAKING. Held for 200 loops to prove the switch is an edge and
+    // not a per-loop reassertion.
+    superstructure.setIntakeRequested(true);
     step(200);
     assertEquals(
-        Superstructure.SystemState.INTAKING,
-        superstructure.getSystemState(),
-        "this case needs the machine to sit in INTAKING");
+        Superstructure.IntakeMode.INTAKING,
+        superstructure.getIntakeMode(),
+        "this case needs the intake region to sit in INTAKING");
     assertEquals(
         List.of(Constants.Vision.kAprilTagPipelineIndex, Constants.Vision.kGamePiecePipelineIndex),
         intakeCameraIO.pipelines,
-        "entering INTAKING must switch to the game-piece pipeline exactly once, however long the"
-            + " state is held");
+        "starting to intake must switch to the game-piece pipeline exactly once, however long it is"
+            + " held");
 
-    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    superstructure.setIntakeRequested(false);
     step(200);
     assertEquals(
         List.of(
@@ -758,7 +819,8 @@ public class SuperstructureFsmTest {
             Constants.Vision.kGamePiecePipelineIndex,
             Constants.Vision.kAprilTagPipelineIndex),
         intakeCameraIO.pipelines,
-        "leaving INTAKING must switch back to AprilTags exactly once");
+        "stopping intaking must switch back to AprilTags exactly once -- the intake stays down, but"
+            + " it is no longer looking for pieces");
   }
 
   /** Force-shoot must bypass the readiness gate but still aim. */
@@ -773,7 +835,6 @@ public class SuperstructureFsmTest {
         new FloorRollerIOSim());
     placeRobotAt(-3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
 
     superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
     step(40);
@@ -783,7 +844,7 @@ public class SuperstructureFsmTest {
     assertEquals(
         Superstructure.SystemState.SCORING_ON_THE_MOVE,
         superstructure.getSystemState(),
-        "with a piece and a usable solution the machine must enter the scoring state");
+        "with a usable solution the machine must enter the scoring state");
     assertFalse(superstructure.isReadyToScore(), "the gate must be shut on a stale pose");
     assertNotEquals(
         Indexer.SystemState.FEEDING,
@@ -824,7 +885,6 @@ public class SuperstructureFsmTest {
   void forcedScoringStateFeedsAndIsCounted() {
     placeRobotAt(-3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
 
     assertEquals(0, superstructure.getForcedShotCount(), "nothing forced anything yet");
 
@@ -854,7 +914,6 @@ public class SuperstructureFsmTest {
   void disablingClearsWantedStateSafely() {
     placeRobotAt(-3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
 
     superstructure.setIgnoreShotTolerances(true);
     superstructure.setWantedState(Superstructure.WantedState.SCORE_FORCED);
@@ -917,17 +976,13 @@ public class SuperstructureFsmTest {
 
     assertEquals(Superstructure.SystemState.HOMING, superstructure.getSystemState());
     homeAndSettle();
-    assertEquals(Superstructure.SystemState.STOWED, superstructure.getSystemState());
+    assertEquals(Superstructure.SystemState.RESTING, superstructure.getSystemState());
 
-    superstructure.setWantedState(Superstructure.WantedState.INTAKE);
-    step(20);
-    assertEquals(Superstructure.SystemState.INTAKING, superstructure.getSystemState());
-
-    acquirePiece();
-    assertEquals(
-        Superstructure.SystemState.INDEXING,
-        superstructure.getSystemState(),
-        "a piece arriving during INTAKE must promote the machine to INDEXING");
+    // STOW is also a route to RESTING. (INTAKING and INDEXING are gone since M10b step 7: intaking
+    // is the other region of the machine, covered by its own cases.)
+    superstructure.setWantedState(Superstructure.WantedState.STOW);
+    step(10);
+    assertEquals(Superstructure.SystemState.RESTING, superstructure.getSystemState());
 
     superstructure.setWantedState(Superstructure.WantedState.EJECT);
     step(10);
@@ -945,9 +1000,7 @@ public class SuperstructureFsmTest {
     step(10);
     assertEquals(Superstructure.SystemState.CHARACTERIZING, superstructure.getSystemState());
 
-    // Back to a scoring posture. The piece has to still be aboard for any of the three to be
-    // reachable, which acquirePiece guaranteed and EJECT did not undo -- the simulated piece is a
-    // flag on the IO, not something the eject can physically remove.
+    // Back to a scoring posture.
     superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
     step(30);
     assertEquals(Superstructure.SystemState.SCORING_ON_THE_MOVE, superstructure.getSystemState());
@@ -992,13 +1045,13 @@ public class SuperstructureFsmTest {
    * always reach. The guard was real code that no test could reach, which is the same thing as no
    * guard at all until somebody deploys the intake at the wrong moment.
    *
-   * <p>The block is produced the way it happens on the M10 superstructure: a piece is collected,
-   * after which INDEXING stows the intake -- into the turret-conflict band -- and the shot that
-   * follows wants the turret pointed straight backwards, through its arc. Until M10b step 5 the
-   * block came from the intake being left OUT; on this robot a deployed intake cannot reach the
-   * turret, so that was the old interlock's mistake, and this case now needs the real geometry to
-   * mean anything: on the 0.0 placeholders the band fails closed and the turret is blocked
-   * regardless. (Step 7 stops INDEXING stowing the intake, and revisits this case.)
+   * <p>The block comes from the intake being STOWED -- in the turret-conflict band -- while the
+   * shot wants the turret pointed straight backwards, through its arc. Here the intake is stowed
+   * because nothing has enabled the robot yet: the robot starts stowed by rule. Until M10b step 5
+   * the block came from the intake being left OUT, which on this robot cannot reach the turret; in
+   * step 5 it came from M10's INDEXING stowing the intake after a pickup, which step 7 removed. The
+   * case needs the real geometry to mean anything: on the 0.0 placeholders the band fails closed
+   * and the turret is blocked regardless.
    */
   @Test
   void aBlockedTurretDivertsScoringToWaitingForTurret() {
@@ -1015,11 +1068,9 @@ public class SuperstructureFsmTest {
     // degrees -- squarely inside the 150-210 degree conflict arc.
     placeRobotAt(3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
-    step(10);
     assertTrue(
         intake.isInTurretConflictBand(),
-        "this case needs the intake in the turret's way, stowed by INDEXING after the pickup");
+        "this case needs the intake in the turret's way, stowed as the robot starts");
 
     superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
     boolean sawWaiting = false;
@@ -1075,14 +1126,13 @@ public class SuperstructureFsmTest {
         new FloorRollerIOSim());
     placeRobotAt(-3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
 
     superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
     step(30);
     assertEquals(
         Superstructure.SystemState.SCORING_ON_THE_MOVE,
         superstructure.getSystemState(),
-        "precondition: a healthy robot with a piece and a solution scores");
+        "precondition: a healthy robot with a solution scores");
 
     injectedWarningActive = true;
     step(10);
@@ -1122,14 +1172,13 @@ public class SuperstructureFsmTest {
         new FloorRollerIOSim());
     placeRobotAt(-3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
 
     superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
     step(30);
     assertEquals(
         Superstructure.SystemState.SCORING_ON_THE_MOVE,
         superstructure.getSystemState(),
-        "precondition: a healthy robot with a piece and a solution scores");
+        "precondition: a healthy robot with a solution scores");
 
     injectedFaultActive = true;
     step(10);
@@ -1174,7 +1223,6 @@ public class SuperstructureFsmTest {
     // The SHIPPED solver, so every shot solution is unusable -- which is the whole point.
     placeRobotAt(-3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
 
     superstructure.setWantedState(Superstructure.WantedState.PASS);
     stepWithVision(40);
@@ -1224,15 +1272,13 @@ public class SuperstructureFsmTest {
         new FloorRollerIOSim());
     placeRobotAt(-3.0, 0.0);
     homeAndSettle();
-    acquirePiece();
 
     superstructure.setWantedState(Superstructure.WantedState.SCORE_STATIONARY);
     stepWithVision(200);
 
-    // Everything the test CAN make true is true: a usable solution, a piece aboard, a stationary
-    // robot, fresh tight vision, and no faults.
+    // Everything the test CAN make true is true: a usable solution, a stationary robot, fresh tight
+    // vision, and no faults. (Term 4, a piece aboard, no longer exists -- M10b step 7.)
     assertTrue(superstructure.getLastShot().isUsable(), "term 1 should be satisfiable");
-    assertTrue(indexer.hasPiece(), "term 4 should be satisfiable");
     assertTrue(
         RobotState.getInstance().getVisionStalenessSec()
             < Constants.Shot.kMaxVisionStalenessSec.get(),
@@ -1291,7 +1337,6 @@ public class SuperstructureFsmTest {
     // The machine still transitions -- FAULTED is a state it walked to, not a crash -- and no
     // success predicate is fooled.
     assertFalse(superstructure.isReadyToScore(), "a dead robot reported itself ready to shoot");
-    assertFalse(indexer.hasPiece(), "a dead indexer invented a game piece");
     assertFalse(turret.atGoal(), "a dead turret reported itself on target");
     assertFalse(
         shooter.atSpeed(), "a dead flywheel reported itself at speed; both readings are zero");
@@ -1300,5 +1345,424 @@ public class SuperstructureFsmTest {
     superstructure.setWantedState(Superstructure.WantedState.HOME);
     step(3);
     assertEquals(Superstructure.SystemState.HOMING, superstructure.getSystemState());
+  }
+
+  // --------------------------------------------------------------- M10b step 7: the hopper ----
+
+  /**
+   * Releasing the intake stops the roller and leaves the intake DOWN, resting through DEFAULT; only
+   * STOW raises it. And the floor roller never runs for intaking alone.
+   *
+   * <p>Raising the intake lets pieces fall out of the robot, so nothing but an explicit STOW may do
+   * it (plan section 2.4). M10's DEFAULT stowed it, which on a hopper robot dumps the hopper every
+   * time the driver lets go of a button.
+   */
+  @Test
+  void releasingIntakeLeavesItDeployed() {
+    intakeGeometry = IdealPivotIO.GEOMETRY;
+    buildRobot(
+        new ShootingSolver(),
+        new IdealPivotIO(),
+        new IndexerIOSim(),
+        new TurretIOSim(),
+        new ShooterIOSim(),
+        new FloorRollerIOSim());
+    homeAndSettle();
+
+    superstructure.setIntakeRequested(true);
+    step(10);
+    assertEquals(Superstructure.IntakeMode.INTAKING, superstructure.getIntakeMode());
+    assertEquals(Intake.SystemState.INTAKING, intake.getSystemState());
+    assertEquals(
+        FloorRoller.SystemState.IDLE,
+        floorRoller.getSystemState(),
+        "the floor roller ran for intaking alone; it only ever feeds the indexer");
+
+    superstructure.setIntakeRequested(false);
+    for (int i = 0; i < 30; i++) {
+      step(1);
+      assertNotEquals(
+          Intake.SystemState.STOWING, intake.getSystemState(), "releasing intake raised it");
+    }
+    assertEquals(Superstructure.IntakeMode.DEPLOYED, superstructure.getIntakeMode());
+    assertEquals(Intake.SystemState.DEPLOYED, intake.getSystemState());
+
+    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    step(30);
+    assertEquals(
+        Intake.SystemState.DEPLOYED, intake.getSystemState(), "DEFAULT must not raise the intake");
+
+    superstructure.setWantedState(Superstructure.WantedState.STOW);
+    step(10);
+    assertEquals(Superstructure.IntakeMode.STOWED, superstructure.getIntakeMode());
+    assertEquals(Intake.SystemState.STOWED, intake.getSystemState(), "STOW must raise it");
+  }
+
+  /**
+   * The first enable deploys the intake, even when it arrives during the boot home; and an enable
+   * after an explicit STOW deploys it again.
+   *
+   * <p>The robot must start stowed (a rule) and pieces fall out of a stowed intake, so the first
+   * enable deploys it with no button press. The enable can easily arrive while the boot home is
+   * still running, and must not be lost to it.
+   */
+  @Test
+  void firstEnableDeploysTheIntake() {
+    intakeGeometry = IdealPivotIO.GEOMETRY;
+    buildRobot(
+        new ShootingSolver(),
+        new IdealPivotIO(),
+        new IndexerIOSim(),
+        new TurretIOSim(),
+        new ShooterIOSim(),
+        new FloorRollerIOSim());
+    assertEquals(Superstructure.SystemState.HOMING, superstructure.getSystemState());
+    superstructure.onEnable();
+
+    homeAndSettle();
+    step(10);
+    assertEquals(
+        Superstructure.IntakeMode.DEPLOYED,
+        superstructure.getIntakeMode(),
+        "an enable during the boot home was lost");
+    assertTrue(intake.isRetainingPieces(), "the enabled robot is not holding its preload");
+
+    superstructure.setWantedState(Superstructure.WantedState.STOW);
+    step(10);
+    assertEquals(Intake.SystemState.STOWED, intake.getSystemState());
+    superstructure.onEnable();
+    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    step(10);
+    assertEquals(
+        Intake.SystemState.DEPLOYED,
+        intake.getSystemState(),
+        "an enable after a STOW must deploy the intake again");
+  }
+
+  /**
+   * The floor roller LEADS and the indexer GATES: a shot request starts the floor roller at once
+   * while the indexer stays stopped as the block, and the indexer feeds only once the gate opens.
+   * Neither intaking alone nor a bare pre-spin runs the floor roller.
+   */
+  @Test
+  void floorRollerLeadsAndIndexerGates() {
+    buildFiringRobot();
+
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    step(3);
+    assertFalse(
+        superstructure.isReadyToScore(), "precondition: no vision yet, so the gate is shut");
+    assertEquals(
+        FloorRoller.SystemState.FEEDING,
+        floorRoller.getSystemState(),
+        "the floor roller must start the moment a shot is requested, before the shooter is ready");
+    assertEquals(
+        Indexer.SystemState.IDLE,
+        indexer.getSystemState(),
+        "the indexer is the block: it must stay stopped until the gate opens");
+
+    openTheGate();
+    stepWithVision(3);
+    assertEquals(
+        Indexer.SystemState.FEEDING, indexer.getSystemState(), "the open gate did not feed");
+
+    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    superstructure.setIntakeRequested(true);
+    step(10);
+    assertEquals(
+        FloorRoller.SystemState.IDLE,
+        floorRoller.getSystemState(),
+        "intaking ran the floor roller");
+
+    superstructure.setIntakeRequested(false);
+    superstructure.setWantedState(Superstructure.WantedState.SPIN_UP);
+    step(10);
+    assertEquals(
+        FloorRoller.SystemState.IDLE,
+        floorRoller.getSystemState(),
+        "a bare pre-spin ran the floor roller; nothing has asked to shoot");
+  }
+
+  /**
+   * The robot intakes and shoots at once: the intake keeps collecting, the turret keeps aiming, and
+   * the gate still feeds.
+   *
+   * <p>The point of the hopper replan's orthogonal regions (plan section 2.4). M10's intaking()
+   * stowed the turret, and INTAKE and SCORE were one enum, so this combination could not exist.
+   */
+  @Test
+  void intakeAndScoreRunTogether() {
+    buildFiringRobot();
+    superstructure.setIntakeRequested(true);
+    openTheGate();
+    stepWithVision(5);
+
+    assertEquals(Superstructure.SystemState.SCORING_ON_THE_MOVE, superstructure.getSystemState());
+    assertEquals(Superstructure.IntakeMode.INTAKING, superstructure.getIntakeMode());
+    assertEquals(Intake.SystemState.INTAKING, intake.getSystemState(), "stopped collecting");
+    assertTrue(
+        turret.getSystemState() == Turret.SystemState.AIMING
+            || turret.getSystemState() == Turret.SystemState.UNWRAPPING,
+        "the turret stopped aiming while the robot intakes; it was " + turret.getSystemState());
+    assertEquals(Indexer.SystemState.FEEDING, indexer.getSystemState(), "stopped feeding");
+    assertEquals(FloorRoller.SystemState.FEEDING, floorRoller.getSystemState());
+  }
+
+  /**
+   * Feed-assist rocks only while the feed is open and the intake is not being held; holding intake
+   * wins, and letting go of the shot returns the intake to rest.
+   */
+  @Test
+  void feedAssistOnlyWhileGateOpenAndNotIntaking() {
+    buildFiringRobot();
+    superstructure.onEnable();
+    step(10);
+
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    step(1);
+    assertFalse(superstructure.isReadyToScore(), "precondition: gate shut");
+    assertEquals(
+        Superstructure.IntakeMode.DEPLOYED,
+        superstructure.getIntakeMode(),
+        "feed-assist rocked with the gate shut");
+
+    openTheGate();
+    assertEquals(Superstructure.IntakeMode.FEED_ASSIST, superstructure.getIntakeMode());
+    stepWithVision(3);
+    assertEquals(Intake.SystemState.FEED_ASSISTING, intake.getSystemState());
+
+    superstructure.setIntakeRequested(true);
+    stepWithVision(2);
+    assertEquals(
+        Superstructure.IntakeMode.INTAKING,
+        superstructure.getIntakeMode(),
+        "intaking must win over feed-assist: the mouth has to be down to collect");
+
+    superstructure.setIntakeRequested(false);
+    stepWithVision(2);
+    assertEquals(Superstructure.IntakeMode.FEED_ASSIST, superstructure.getIntakeMode());
+
+    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    step(2);
+    assertEquals(Superstructure.IntakeMode.DEPLOYED, superstructure.getIntakeMode());
+  }
+
+  /**
+   * Once a burst is feeding, a wheel recovering from each piece keeps the feed open instead of
+   * stopping and restarting the indexer; a dip beyond even the burst band does close it; and losing
+   * another term clears the latch.
+   *
+   * <p>The dips are sized so the TIGHT band rejects the recovering wheel -- proved, not assumed --
+   * while the burst band accepts it. The feed is counted loop by loop: "it ended up feeding" would
+   * pass a gate that stuttered every piece.
+   */
+  @Test
+  void burstLatchKeepsFeedingThroughRecovery() {
+    buildFiringRobot();
+    openTheGate();
+    stepWithVision(5);
+    assertTrue(superstructure.isBurstLatched(), "the latch did not set when the gate opened");
+
+    double horizon = Constants.getLoopPeriodSec() * 2.0;
+    boolean tightBandRejected = false;
+    for (int piece = 0; piece < 8; piece++) {
+      firingShooter.injectShot(0.4 * Constants.Shooter.kBurstToleranceRpm.get());
+      for (int i = 0; i < 10; i++) {
+        stepWithVision(1);
+        tightBandRejected |= !shooter.willBeAtSpeedIn(horizon);
+        assertTrue(
+            superstructure.isReadyToScore(),
+            "the gate closed while the wheel recovered within the burst band, piece " + piece);
+        assertEquals(
+            Indexer.SystemState.FEEDING,
+            indexer.getSystemState(),
+            "the indexer stopped mid-burst, piece " + piece);
+      }
+    }
+    assertTrue(
+        tightBandRejected, "the dips never left the tight band, so the latch was never needed");
+
+    firingShooter.injectShot(3.0 * Constants.Shooter.kBurstToleranceRpm.get());
+    boolean closed = false;
+    for (int i = 0; i < 5; i++) {
+      stepWithVision(1);
+      closed |= !superstructure.isReadyToScore();
+    }
+    assertTrue(closed, "a dip beyond the burst band did not close the gate");
+
+    // Starve vision: the staleness term fails, and it is not the flywheel term, so the latch goes.
+    step(60);
+    assertFalse(superstructure.isBurstLatched(), "a non-flywheel term failed and the latch held");
+  }
+
+  /**
+   * The empty belief accumulates only with the gate OPEN: hours of gate-closed "trying" say nothing
+   * about the hopper, while gate-open feeding with nothing coming out reaches the belief in about
+   * {@code kEmptyConfirmSec}.
+   *
+   * <p>The first half is the property the retrofit order names as the mutation target: counting
+   * gate-closed time would end an auto's scoring leg while the hopper is still full, waiting on a
+   * turret.
+   */
+  @Test
+  void likelyEmptyNeedsTheGateOpen() {
+    buildRobot(
+        usableSolver(),
+        new IntakeIOSim(),
+        new IndexerIOSim(),
+        new TurretIOSim(),
+        new ShooterIOSim(),
+        new FloorRollerIOSim());
+    placeRobotAt(-3.0, 0.0);
+    homeAndSettle();
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    stepWithVision(10 * emptyConfirmLoops());
+    assertFalse(superstructure.isReadyToScore(), "precondition: this robot's gate cannot open");
+    assertEquals(
+        0.0,
+        superstructure.getUnproductiveFeedSec(),
+        "gate-closed time was counted as evidence the hopper is empty");
+    assertFalse(superstructure.likelyEmpty());
+
+    buildFiringRobot();
+    openTheGate();
+    int loops = 0;
+    while (!superstructure.likelyEmpty() && loops < 5 * emptyConfirmLoops()) {
+      stepWithVision(1);
+      loops++;
+    }
+    assertTrue(superstructure.likelyEmpty(), "gate-open feeding with no shots never read empty");
+    assertEquals(
+        emptyConfirmLoops(),
+        loops,
+        5,
+        "the belief did not take about kEmptyConfirmSec of gate-open feeding");
+  }
+
+  /**
+   * The empty belief is held off by the three things that say pieces are still moving: the indexer
+   * working against a load, a shot coming out, and the intake collecting.
+   */
+  @Test
+  void likelyEmptyIsHeldOffByLoadShotsAndIntaking() {
+    // A loaded feed: the clock stops once the load registers, and never reaches the belief.
+    buildFiringRobot();
+    indexerSim.setSimulatedLoad(true);
+    openTheGate();
+    stepWithVision(3 * emptyConfirmLoops());
+    assertFalse(superstructure.likelyEmpty(), "a loaded feed was believed empty");
+    assertTrue(
+        superstructure.getUnproductiveFeedSec() < Constants.Superstructure.kEmptyConfirmSec.get());
+
+    // A shot resets the clock.
+    buildFiringRobot();
+    openTheGate();
+    stepWithVision(emptyConfirmLoops() / 2);
+    firingShooter.injectShot();
+    stepWithVision(2);
+    assertTrue(
+        superstructure.getUnproductiveFeedSec() < 3 * LOOP_SEC,
+        "a shot did not reset the clock; it read " + superstructure.getUnproductiveFeedSec());
+    stepWithVision(emptyConfirmLoops() / 2 + 2);
+    assertFalse(
+        superstructure.likelyEmpty(), "the belief counted feeding from before the last shot");
+
+    // Intaking resets it too: new pieces may be arriving.
+    superstructure.setIntakeRequested(true);
+    stepWithVision(2);
+    assertEquals(0.0, superstructure.getUnproductiveFeedSec(), "intaking did not reset the clock");
+  }
+
+  /**
+   * The auto scoring command ends on the empty belief when nothing comes out, and on its timeout
+   * when shots keep coming -- a hopper that never seems to empty must not hold the auto forever.
+   */
+  @Test
+  void scoreUntilEmptyEndsOnBeliefOrTimeout() {
+    buildFiringRobot();
+    int timeoutLoops = (int) Math.round(Constants.Auto.kScoreTimeoutSec.get() / LOOP_SEC);
+
+    Command byBelief = superstructure.scoreUntilEmptyCommand();
+    byBelief.initialize();
+    int loops = 0;
+    boolean finished = false;
+    while (!finished && loops < 3 * timeoutLoops) {
+      stepWithVision(1);
+      byBelief.execute();
+      finished = byBelief.isFinished();
+      loops++;
+    }
+    byBelief.end(false);
+    assertTrue(finished, "the command never ended");
+    assertTrue(superstructure.likelyEmpty(), "it ended, but not because the hopper read empty");
+    assertTrue(loops < timeoutLoops, "it ran to the timeout instead of ending on the belief");
+    step(2);
+    assertEquals(
+        Superstructure.SystemState.RESTING,
+        superstructure.getSystemState(),
+        "the command did not hand the robot back to DEFAULT");
+
+    buildFiringRobot();
+    Command byTimeout = superstructure.scoreUntilEmptyCommand();
+    byTimeout.initialize();
+    loops = 0;
+    finished = false;
+    while (!finished && loops < 3 * timeoutLoops) {
+      stepWithVision(1);
+      if (loops % 10 == 0) {
+        firingShooter.injectShot();
+      }
+      byTimeout.execute();
+      finished = byTimeout.isFinished();
+      loops++;
+    }
+    byTimeout.end(false);
+    assertTrue(finished, "a hopper that kept firing held the command past its timeout");
+    assertFalse(superstructure.likelyEmpty(), "the shots should have kept the belief off");
+    assertEquals(
+        timeoutLoops, loops, 5, "it ended, but not at kScoreTimeoutSec after the scoring began");
+  }
+
+  /**
+   * While the indexer reverses to clear a jam, the floor roller reverses with it and the empty
+   * clock does not advance; a latched jam freezes the clock too.
+   *
+   * <p>The clock condition that matters here is "the indexer is FEEDING". An unjam pulse runs with
+   * the gate still open and the indexer not loaded -- it is reversing -- so without that condition
+   * every pulse would count toward "the hopper is empty".
+   */
+  @Test
+  void jamReversesTheFloorRollerAndPausesTheEmptyClock() {
+    buildFiringRobot();
+    openTheGate();
+    stepWithVision(5);
+    indexerSim.setSimulatedJam(true);
+
+    boolean sawUnjam = false;
+    boolean sawRollerReverse = false;
+    double clockBefore = superstructure.getUnproductiveFeedSec();
+    for (int i = 0; i < 400 && indexer.getSystemState() != Indexer.SystemState.JAMMED; i++) {
+      double clock = superstructure.getUnproductiveFeedSec();
+      stepWithVision(1);
+      if (indexer.getSystemState() == Indexer.SystemState.UNJAMMING) {
+        sawUnjam = true;
+        assertEquals(
+            clock,
+            superstructure.getUnproductiveFeedSec(),
+            1e-9,
+            "the empty clock advanced during an unjam pulse");
+      }
+      sawRollerReverse |= floorRoller.getSystemState() == FloorRoller.SystemState.EJECTING;
+    }
+    assertTrue(sawUnjam, "the jam never produced an unjam pulse");
+    assertTrue(sawRollerReverse, "the floor roller never reversed with the indexer");
+    assertEquals(Indexer.SystemState.JAMMED, indexer.getSystemState());
+
+    double frozen = superstructure.getUnproductiveFeedSec();
+    stepWithVision(50);
+    assertEquals(
+        frozen, superstructure.getUnproductiveFeedSec(), 1e-9, "the clock ran on a jammed indexer");
+    assertTrue(
+        superstructure.getUnproductiveFeedSec() >= clockBefore, "sanity: the clock went backwards");
   }
 }

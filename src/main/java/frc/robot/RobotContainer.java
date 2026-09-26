@@ -3,6 +3,7 @@ package frc.robot;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
+import edu.wpi.first.wpilibj.GenericHID;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import edu.wpi.first.wpilibj2.command.button.CommandXboxController;
@@ -261,10 +262,15 @@ public class RobotContainer {
     //
     // setWantedStateCommand does not require the superstructure, so a held button re-firing cannot
     // interrupt the default drive command.
+    // Intake is the one exception to "held with a release back to DEFAULT". Since M10b step 7 it
+    // is the superstructure's SECOND mutator, independent of the scoring buttons, so the driver can
+    // hold intake and score together -- shoot, move and intake at once (plan section 2.4).
+    // Releasing
+    // it stops the roller and leaves the intake DOWN, because raising it would drop the hopper's
+    // pieces; it must not send DEFAULT, which would cancel a scoring request still being held.
     driver
         .rightTrigger(Constants.Controls.kTriggerThreshold.get())
-        .whileTrue(superstructure.setWantedStateCommand(Superstructure.WantedState.INTAKE))
-        .onFalse(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));
+        .whileTrue(superstructure.intakeWhileHeldCommand());
 
     driver
         .rightBumper()
@@ -304,6 +310,27 @@ public class RobotContainer {
         .b()
         .whileTrue(superstructure.setWantedStateCommand(Superstructure.WantedState.EJECT))
         .onFalse(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));
+
+    // STOW is the only request that raises the intake (M10b step 7). onTrue, not whileTrue: the
+    // posture it sets persists, and the robot rests with the intake stowed until something deploys
+    // it again. It is on the operator because raising the intake drops any pieces in the hopper --
+    // a deliberate act, for defence or an endgame, not something to reach for mid-cycle.
+    operator.x().onTrue(superstructure.setWantedStateCommand(Superstructure.WantedState.STOW));
+
+    // The driver's cue that the hopper is probably empty: a rumble while holding a scoring button
+    // and the superstructure believes nothing is left to fire. A belief, not a measurement -- the
+    // robot has no piece sensor -- so it only ever informs; it never stops a shot.
+    new Trigger(superstructure::likelyEmpty)
+        .and(driver.rightBumper().or(driver.leftBumper()))
+        .whileTrue(
+            Commands.startEnd(
+                () ->
+                    driver
+                        .getHID()
+                        .setRumble(
+                            GenericHID.RumbleType.kBothRumble,
+                            Constants.Controls.kEmptyRumbleStrength.get()),
+                () -> driver.getHID().setRumble(GenericHID.RumbleType.kBothRumble, 0.0)));
 
     // STILL NOT BOUND, and deliberately: the plan's operator layout also lists a manual turret
     // nudge on a stick and a flywheel RPM trim on the D-pad. Neither has a route through the
@@ -423,6 +450,38 @@ public class RobotContainer {
     // nothing is left driving; what is outstanding is only the re-enable transient. Left for M14's
     // brake-mode and competition-hardening pass, which is where the disable path gets its real
     // treatment.
+  }
+
+  /**
+   * Called when autonomous starts.
+   *
+   * <p>Added for M10b step 7. The first enable of a match deploys the intake -- the robot must
+   * start stowed, and pieces fall out of a stowed intake -- and the flywheel's shot count is zeroed
+   * so the match's count starts clean, which also makes the 8-piece preload a known check of the
+   * shot detector.
+   *
+   * <p><b>Outputs:</b> resets the shot count and tells the superstructure the robot is enabled.
+   */
+  public void onAutonomousInit() {
+    shooter.resetShotCount();
+    superstructure.onEnable();
+  }
+
+  /**
+   * Called when teleop starts.
+   *
+   * <p>Added for M10b step 7. Auto must never leak a goal into teleop, so the shooter side goes
+   * back to DEFAULT and any intake request an auto left standing is released. The intake posture is
+   * NOT reset: an intake deployed in auto stays deployed, because the hopper is presumably not
+   * empty. And onEnable deploys it if nothing has yet -- a practice session that starts in teleop
+   * still begins with the intake stowed.
+   *
+   * <p><b>Outputs:</b> resets the superstructure's requests and tells it the robot is enabled.
+   */
+  public void onTeleopInit() {
+    superstructure.setIntakeRequested(false);
+    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    superstructure.onEnable();
   }
 
   /**

@@ -1487,5 +1487,12 @@ public final class Constants {
         new LoggedTunableNumber("Controls/RpmTrimStep", 50.0);
     public static final LoggedTunableNumber kReadyRumbleStrength =
         new LoggedTunableNumber("Controls/ReadyRumble", 0.4);
+
+    /**
+     * Driver rumble while holding a scoring button with the hopper probably empty. Added for M10b
+     * step 7. Stronger than the ready rumble so the two cannot be confused.
+     */
+    public static final LoggedTunableNumber kEmptyRumbleStrength =
+        new LoggedTunableNumber("Controls/EmptyRumble", 0.7);
   }
 }

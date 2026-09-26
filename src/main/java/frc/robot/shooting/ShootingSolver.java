@@ -6,6 +6,7 @@ import edu.wpi.first.math.interpolation.InterpolatingDoubleTreeMap;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import frc.robot.Constants;
 import frc.robot.util.GeomUtil;
+import java.util.function.DoubleSupplier;
 import org.littletonrobotics.junction.Logger;
 
 /**
@@ -49,6 +50,19 @@ public class ShootingSolver {
    */
   private final boolean usesConstantsTables;
 
+  /**
+   * The linear RPM fit, {@code rpm = rpmPerMeterPerSec * |muzzle velocity| + rpmIntercept}.
+   *
+   * <p>Suppliers read on every solve, defaulting to {@code Constants.Shot}'s tunables so a retune
+   * takes effect live. The explicit form exists for M10b step 7's superstructure tests: both
+   * constants are still zero awaiting M11, so every solved shot asks for 0 RPM, the flywheel term
+   * of the readiness gate is always false, and no test could ever watch the gate open -- which is
+   * exactly what the burst latch and the empty belief need to be tested at all.
+   */
+  private final DoubleSupplier rpmPerMeterPerSec;
+
+  private final DoubleSupplier rpmIntercept;
+
   /** Builds a solver whose tables come from {@code Constants.Shot}. */
   public ShootingSolver() {
     // IMPLEMENTATION (was TODO: "Populate both InterpolatingDoubleTreeMaps by zipping
@@ -56,6 +70,8 @@ public class ShootingSolver {
     // kLaunchSpeedMetersPerSec. Assert the three arrays are the same length and throw if not - a
     // mismatched table is a silent aiming bug otherwise.")
     usesConstantsTables = true;
+    rpmPerMeterPerSec = Constants.Shot.kRpmPerMeterPerSec;
+    rpmIntercept = Constants.Shot.kRpmIntercept;
     populate(
         Constants.Shot.kDistanceBreakpointsMeters,
         Constants.Shot.kTimeOfFlightSec,
@@ -73,7 +89,36 @@ public class ShootingSolver {
   public ShootingSolver(double[] distances, double[] timesOfFlight, double[] launchSpeeds) {
     // IMPLEMENTATION (was TODO: "Test-only constructor that takes explicit tables so unit tests do
     // not depend on Constants or NetworkTables.")
+    this(
+        distances,
+        timesOfFlight,
+        launchSpeeds,
+        Constants.Shot.kRpmPerMeterPerSec,
+        Constants.Shot.kRpmIntercept);
+  }
+
+  /**
+   * Test-only constructor taking explicit tables AND an explicit RPM fit.
+   *
+   * <p>Added for M10b step 7: with the RPM fit still zero in {@code Constants.Shot}, this is the
+   * only way a superstructure test can produce a shot the flywheel will actually spin up for, and
+   * so the only way to watch the readiness gate open.
+   *
+   * @param distances ascending distance breakpoints, in meters
+   * @param timesOfFlight time of flight at each breakpoint, in seconds
+   * @param launchSpeeds required ground-frame launch speed at each breakpoint, in meters per second
+   * @param rpmPerMeterPerSec flywheel RPM per meter per second of muzzle speed
+   * @param rpmIntercept flywheel RPM at zero muzzle speed
+   */
+  public ShootingSolver(
+      double[] distances,
+      double[] timesOfFlight,
+      double[] launchSpeeds,
+      DoubleSupplier rpmPerMeterPerSec,
+      DoubleSupplier rpmIntercept) {
     usesConstantsTables = false;
+    this.rpmPerMeterPerSec = rpmPerMeterPerSec;
+    this.rpmIntercept = rpmIntercept;
     populate(distances, timesOfFlight, launchSpeeds);
   }
 
@@ -178,8 +223,7 @@ public class ShootingSolver {
     Translation2d muzzleVelocity = requiredGroundVelocity.minus(velocity);
 
     double rpm =
-        Constants.Shot.kRpmPerMeterPerSec.get() * muzzleVelocity.getNorm()
-            + Constants.Shot.kRpmIntercept.get();
+        rpmPerMeterPerSec.getAsDouble() * muzzleVelocity.getNorm() + rpmIntercept.getAsDouble();
 
     // Angular rate the turret must match to hold the aim point while the robot translates. The
     // robot's velocity is negated because the TARGET's apparent motion is the opposite of the
