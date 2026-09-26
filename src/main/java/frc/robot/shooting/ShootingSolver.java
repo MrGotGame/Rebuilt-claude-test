@@ -25,11 +25,18 @@ import org.littletonrobotics.junction.Logger;
  *     stop when |t_k - t_{k-1}| &lt; kSolverToleranceSec
  * </pre>
  *
- * <p>Then it converts the converged virtual goal into a launch. The ground-frame velocity the game
- * piece must have is {@code vg = unit(gv - p) * (d/t)}. The robot already supplies {@code v}, so
- * the muzzle velocity the shooter must produce <i>relative to the robot</i> is {@code vm = vg - v}.
- * The turret aims along {@code vm}, and the flywheel RPM comes from {@code |vm|} through a linear
- * fit.
+ * <p>Then it converts the converged virtual goal into a launch. Relative to the robot, the shot is
+ * simply a stationary shot at the virtual goal: the muzzle velocity is {@code vm = (gv - p) / t},
+ * so the turret aims at {@code gv} and the flywheel RPM comes from {@code |vm|} through a linear
+ * fit. The piece also keeps the robot's own velocity {@code v}, so over the flight it lands at
+ * {@code gv + v*t = g} -- the real goal. Aiming at the virtual goal IS the velocity compensation.
+ *
+ * <p>Corrected in M12 step 3. Until then the solver also subtracted {@code v} from that muzzle
+ * velocity, following plan section 6.2's conversion table, which counted the robot's motion twice:
+ * once by moving the aim point to {@code gv}, and again by subtracting it. At 3 m and 2 m/s of
+ * strafe that aimed about 44 degrees off the line of sight instead of 26, and every moving shot
+ * missed by about the robot's drift during the flight. M3's tests checked only the direction of the
+ * lead, never where the piece lands; {@code aMovingShotLandsOnTheGoal} does.
  *
  * <p>This class is deliberately <b>pure</b>: no subsystem references, no {@code Timer}, no
  * NetworkTables. That is precisely what lets {@code ShootingSolverTest} assert convergence and
@@ -202,14 +209,16 @@ public class ShootingSolver {
       return ShotParameters.invalid();
     }
 
-    // Ground-frame velocity the game piece must leave with to cover `distance` in `tof`.
-    Translation2d requiredGroundVelocity =
-        new Translation2d(distance / tof, lineOfSight.getAngle());
-
-    // The robot already supplies its own velocity to the piece, so the shooter only has to make up
-    // the difference. THIS subtraction is what shooting on the move actually is -- everything above
-    // is just working out where to point.
-    Translation2d muzzleVelocity = requiredGroundVelocity.minus(velocity);
+    // The muzzle velocity, RELATIVE TO THE ROBOT: a stationary shot at the virtual goal, covering
+    // `distance` in `tof`. The piece also keeps the robot's own velocity, which carries it from the
+    // virtual goal to the real one over the same flight -- that is what the virtual goal was
+    // constructed to do, so nothing more is subtracted here.
+    //
+    // M12 step 3 removed a `.minus(velocity)` that stood here, copied from plan section 6.2's
+    // table. It counted the robot's motion a second time, and at 2 m/s of strafe every moving shot
+    // missed by the drift over its flight. The simulated M12 checkpoint found it: the turret
+    // tracked its command to within two degrees, and every piece still landed 1.3 m off the goal.
+    Translation2d muzzleVelocity = new Translation2d(distance / tof, lineOfSight.getAngle());
 
     double rpm =
         rpmPerMeterPerSec.getAsDouble() * muzzleVelocity.getNorm() + rpmIntercept.getAsDouble();

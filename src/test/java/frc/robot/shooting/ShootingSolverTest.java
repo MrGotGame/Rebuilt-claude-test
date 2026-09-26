@@ -286,4 +286,44 @@ public class ShootingSolverTest {
         solver.solveStationaryAtRpm(new Pose2d(GOAL, Rotation2d.kZero), GOAL, 3000.0).isUsable(),
         "a robot on the goal has no line of sight to aim along");
   }
+
+  // ---------------------------------------------- M12 step 3: where the moving shot actually lands
+  // ----
+
+  /**
+   * A moving shot lands on the goal: sideways, closing, opening and diagonal, at up to 3 m/s.
+   *
+   * <p>Added for M12 step 3, and it is the assertion M3 never had. Every other moving case here
+   * checks the lead's DIRECTION or the range's trend, which the double-counted velocity satisfied
+   * too, so it passed from M3 to M12 while every moving shot missed by the robot's drift over the
+   * flight. This one follows each launch to where it lands. The fit is explicit so the muzzle speed
+   * can be read back from the commanded RPM.
+   */
+  @Test
+  void aMovingShotLandsOnTheGoal() {
+    double rpmPerMps = 250.0;
+    ShootingSolver fitted =
+        new ShootingSolver(DISTANCES, TIMES_OF_FLIGHT, () -> rpmPerMps, () -> 0.0);
+    double[][] velocities = {
+      {0.0, 2.0}, {0.0, -3.0}, {2.0, 0.0}, {-2.0, 0.0}, {1.5, -1.5}, {0.0, 0.0}
+    };
+    for (double[] v : velocities) {
+      Translation2d velocity = new Translation2d(v[0], v[1]);
+      ShotParameters shot =
+          fitted.solve(ORIGIN, new ChassisSpeeds(v[0], v[1], 0.0), Translation2d.kZero, GOAL);
+      assertTrue(shot.isUsable(), "no usable shot at v=" + velocity);
+      Translation2d landing =
+          ShotFlightModel.landingPoint(
+              fitted,
+              ORIGIN.getTranslation(),
+              velocity,
+              shot.turretFieldAngle(),
+              shot.flywheelRpm() / rpmPerMps);
+      assertEquals(
+          0.0,
+          landing.getDistance(GOAL),
+          0.01,
+          "at v=" + velocity + " the shot lands at " + landing + ", not on the goal");
+    }
+  }
 }
