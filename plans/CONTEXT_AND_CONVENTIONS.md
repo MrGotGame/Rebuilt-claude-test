@@ -269,6 +269,14 @@ whole vision and shooting stack rests on that last one.
      intake, the velocity-feedforward sign on the turret, and
      `kFollowerOpposesLeader` on the flywheel — that last one is still a guess, and wrong means the
      pair fights itself at 80 A per motor.
+   - **The intake homing direction is probably wrong, not just unverified.** Joshua has said the
+     STOWED position is the TOP of the intake's travel. `Constants.Intake.kHomingDutyCycle` is
+     -0.15, and its own Javadoc says negative means the stow stop is reached by LOWERING the arm
+     ("if this intake stows upward, flip this sign"). If both hold, homing seeds the stow angle at
+     the deploy stop and every pivot position is wrong by the full travel -- and homing is the one
+     intake motion the intake/turret interlock does not guard. `Intake.faulted()`'s "the arm falls
+     towards stow" comment rests on the same assumption. Raised during M10b and not yet answered:
+     settle it before the intake is powered.
 6. **M6 characterization.** Several placeholder gains are visibly wrong in simulation: the intake
    pivot rings for about eight seconds before settling because `kPivotKg` and `kPivotKd` are both
    0.0, and the flywheel's `kV` under-predicts so `kP` is compensating for a feedforward error
