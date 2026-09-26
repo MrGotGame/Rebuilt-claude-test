@@ -20,6 +20,12 @@ import org.littletonrobotics.junction.Logger;
  * <p>The shot counter is genuinely useful rather than decorative: it gives a per-match "pieces
  * fired" number in the log to compare against the scoring table, which is how you find out whether
  * a bad match was an aiming problem or an intake problem.
+ *
+ * <p>M10b (plan section 2.4) turns the robot into a hopper robot, and step 6 of its retrofit adds
+ * the two things a whole hopper pressing on this wheel needs: jam recovery ({@link
+ * SystemState#UNJAMMING}, {@link SystemState#JAMMED}) and a "loaded" reading ({@link #isLoaded()})
+ * that says whether a feed is actually pushing pieces. Both are additive -- the piece detection and
+ * shot counter above are untouched here, and go in step 8 once nothing calls them.
  */
 public class Indexer extends SubsystemBase {
   /** What the operator or superstructure has asked the indexer to do. */
@@ -38,6 +44,10 @@ public class Indexer extends SubsystemBase {
     INDEXING,
     HOLDING,
     FEEDING,
+    /** Reversing briefly to clear a jam, then feeding again. Added for M10b step 6. */
+    UNJAMMING,
+    /** Gave up after {@code kMaxUnjamAttempts} pulses; stopped until the request changes. */
+    JAMMED,
     EJECTING,
     CHARACTERIZING
   }
@@ -47,6 +57,17 @@ public class Indexer extends SubsystemBase {
   private final Timer stateTimer = new Timer();
   private final Debouncer hasPieceDebouncer = new Debouncer(0.0, Debouncer.DebounceType.kBoth);
   private final Debouncer shotDebouncer = new Debouncer(0.0, Debouncer.DebounceType.kRising);
+  private final Debouncer loadedDebouncer = new Debouncer(0.0, Debouncer.DebounceType.kBoth);
+  private final Debouncer jamDebouncer = new Debouncer(0.0, Debouncer.DebounceType.kRising);
+
+  /**
+   * Fires while the indexer has given up clearing a jam. See {@link SystemState#JAMMED}.
+   *
+   * <p>A warning, not an error: the robot can still drive and intake, and the operator's EJECT is
+   * the recovery. What the drive team needs to know is why the robot stopped shooting.
+   */
+  private final Alert jammedAlert =
+      new Alert("Indexer jammed and could not clear it; EJECT to clear", AlertType.kWarning);
 
   /**
    * Disconnect alert for the indexer motor.
@@ -153,6 +174,22 @@ public class Indexer extends SubsystemBase {
   private String pieceDetectionSource = "None";
 
   /**
+   * Whether a feed is pushing against something, debounced. Only ever true while FEEDING, past the
+   * spin-up settle window. See {@link #isLoaded()}.
+   */
+  private boolean loaded = false;
+
+  /** Whether the jam condition has held for {@code kJamDetectSec}, this loop. */
+  private boolean jamDetected = false;
+
+  /**
+   * Unjam pulses spent since the current FEED request began. Reset by {@link
+   * #setWantedState(WantedState)} whenever the request changes, so every new feed gets a full
+   * allowance.
+   */
+  private int unjamAttempts = 0;
+
+  /**
    * Builds the indexer around a hardware implementation.
    *
    * @param io the hardware layer: real, simulated, or empty for log replay
@@ -204,6 +241,10 @@ public class Indexer extends SubsystemBase {
     // last loop's value: a shot is counted against the state the machine was in when the piece was
     // last seen, which is exactly the state that launched it.
     updatePieceDetection();
+
+    // Load and jam detection read this loop's inputs against LAST loop's state, for the reason the
+    // shot counter does: the question is what the wheel was doing while it was being driven.
+    updateLoadAndJam();
 
     // Gains are pushed before the state machine runs, so a gain edited on the dashboard takes
     // effect on the same loop the operator sees the response change. hasChanged() reports true on
@@ -269,7 +310,11 @@ public class Indexer extends SubsystemBase {
 
     // Alerts last, so they describe the loop that has just run. The beam-break alert can only fire
     // when the sensor is configured; a robot built without one never sees it.
+    Logger.recordOutput("Indexer/UnjamAttempts", unjamAttempts);
+    Logger.recordOutput("Indexer/JamDetected", jamDetected);
+
     disconnectedAlert.set(!inputs.connected);
+    jammedAlert.set(systemState == SystemState.JAMMED);
     beamBreakDisconnectedAlert.set(Constants.Indexer.kHasBeamBreak && !inputs.beamBreakConnected);
   }
 
@@ -429,6 +474,55 @@ public class Indexer extends SubsystemBase {
   }
 
   /**
+   * Recomputes whether a feed is loaded and whether it has jammed.
+   *
+   * <p>Added for M10b step 6. Both answers exist only while FEEDING, and only once {@code
+   * kDetectionSettleSec} has passed since the machine entered it. That window is the reason the
+   * constant survived the retrofit: a wheel spinning up from rest draws high current at low speed,
+   * which reads as "loaded" and as "jammed" at once -- the same transient that once made the
+   * single-piece detector count shots that never happened. Anywhere else the question has no
+   * meaning -- a stopped wheel carries no load, and a reversing one is not trying to feed -- and
+   * answering it anyway is what made the old detector so intricate.
+   *
+   * <p><b>Outputs:</b> updates {@code loaded} and {@code jamDetected}.
+   */
+  private void updateLoadAndJam() {
+    LoggedTunableNumber.ifChanged(
+        hashCode(),
+        values -> {
+          loadedDebouncer.setDebounceTime(values[0]);
+          jamDebouncer.setDebounceTime(values[1]);
+        },
+        Constants.Indexer.kLoadedDebounceSec,
+        Constants.Indexer.kJamDetectSec);
+
+    boolean measuring =
+        systemState == SystemState.FEEDING
+            && stateTimer.hasElapsed(Constants.Indexer.kDetectionSettleSec.get());
+
+    // Loaded: slowed by something, both halves required, exactly as the piece detector's fallback
+    // predicate is -- a current spike alone fires on every acceleration, a shortfall alone on every
+    // new setpoint.
+    boolean loadedSample =
+        measuring
+            && inputs.statorCurrentAmps > Constants.Indexer.kLoadedCurrentAmps.get()
+            && (goalRpm - inputs.velocityRpm) > Constants.Indexer.kLoadedVelocityDropRpm.get();
+
+    // Jammed: STOPPED by something. The current threshold sits above the loaded one, so a full
+    // hopper slowing the wheel is not mistaken for a jam stopping it.
+    boolean jamSample =
+        measuring
+            && inputs.statorCurrentAmps > Constants.Indexer.kJamCurrentAmps.get()
+            && inputs.velocityRpm < Constants.Indexer.kJamVelocityRpm.get();
+
+    // Both debouncers are fed every loop, false when not measuring, so neither can carry a
+    // half-finished window across a state change: the jam window in particular restarts from zero
+    // after every unjam pulse, which is what gives each pulse a fair chance to have worked.
+    loaded = loadedDebouncer.calculate(loadedSample);
+    jamDetected = jamDebouncer.calculate(jamSample);
+  }
+
+  /**
    * Decides which state the machine should be in this loop.
    *
    * @return the state to run this iteration
@@ -455,10 +549,41 @@ public class Indexer extends SubsystemBase {
       case IDLE -> SystemState.IDLE;
       case INDEX -> hasPiece() ? SystemState.HOLDING : SystemState.INDEXING;
       case HOLD -> SystemState.HOLDING;
-      case FEED -> SystemState.FEEDING;
+      case FEED -> feedingState();
       case EJECT -> ejectingState();
       case CHARACTERIZE -> SystemState.CHARACTERIZING;
     };
+  }
+
+  /**
+   * Resolves the state to run while the indexer has been asked to feed.
+   *
+   * <p>Added for M10b step 6. A stall while feeding reverses the wheel for {@code kUnjamSec} and
+   * then feeds again. After {@code kMaxUnjamAttempts} pulses within one FEED request it stops
+   * trying and latches JAMMED, because a jam three reversals cannot clear will not be cleared by a
+   * fourth, and an indexer cycling forever presents as "the robot is shooting slowly" rather than
+   * as the fault it is. The latch is released by a change of request, the same "latch until intent
+   * changes" rule the eject timeout uses; the operator's EJECT is the intended recovery.
+   *
+   * @return FEEDING, UNJAMMING or JAMMED
+   */
+  private SystemState feedingState() {
+    if (systemState == SystemState.JAMMED) {
+      return SystemState.JAMMED;
+    }
+    if (systemState == SystemState.UNJAMMING) {
+      return stateTimer.hasElapsed(Constants.Indexer.kUnjamSec.get())
+          ? SystemState.FEEDING
+          : SystemState.UNJAMMING;
+    }
+    if (jamDetected) {
+      if (unjamAttempts >= Constants.Indexer.kMaxUnjamAttempts) {
+        return SystemState.JAMMED;
+      }
+      unjamAttempts++;
+      return SystemState.UNJAMMING;
+    }
+    return SystemState.FEEDING;
   }
 
   /**
@@ -524,6 +649,13 @@ public class Indexer extends SubsystemBase {
         io.setVelocity(0.0);
       }
       case FEEDING -> commandVelocity(Constants.Indexer.kFeedRpm.get());
+      case UNJAMMING -> commandVelocity(Constants.Indexer.kUnjamRpm.get());
+      case JAMMED -> {
+        // Stopped, in brake. Holding a stalled wheel against its current limit for the rest of a
+        // match is how a motor dies, and a jam that three reversals could not clear needs a person.
+        goalRpm = 0.0;
+        io.stop();
+      }
       case EJECTING -> commandVelocity(Constants.Indexer.kEjectRpm.get());
       case CHARACTERIZING -> {
         // goalRpm is cleared because there is no closed-loop goal in open loop. Leaving the last
@@ -565,6 +697,9 @@ public class Indexer extends SubsystemBase {
     // forever, which is the exact oscillation the latch exists to prevent.
     if (wanted != wantedState) {
       ejectComplete = false;
+      // Every new request gets a full unjam allowance, and a change of request is what releases a
+      // JAMMED latch -- see feedingState().
+      unjamAttempts = 0;
     }
     wantedState = wanted;
   }
@@ -595,6 +730,47 @@ public class Indexer extends SubsystemBase {
     // sees the same answer. A getter that filtered on each call would give different callers
     // different answers and make the log disagree with the behavior it is supposed to explain.
     return hasPiece;
+  }
+
+  /**
+   * Whether a feed is actually pushing against something.
+   *
+   * <p>Added for M10b step 6 (plan section 2.4). Only ever true while FEEDING, past the spin-up
+   * settle window, with the wheel slowed by a load. It gates nothing: the superstructure's
+   * "probably empty" belief uses it only to avoid concluding the hopper is empty while the indexer
+   * is visibly still moving pieces.
+   *
+   * @return true while feeding against a load
+   */
+  @AutoLogOutput(key = "Indexer/Loaded")
+  public boolean isLoaded() {
+    // The state test here is not redundant with the one in updateLoadAndJam(). That one runs
+    // before the transition, so on the loop a FEED request ends it still sees FEEDING and samples a
+    // wheel that genuinely was feeding -- and the debounce, two-sided so a momentary dip in a
+    // loaded feed does not flicker, then holds the answer true for kLoadedDebounceSec into
+    // whatever state came next. Found by the case that watches every loop after leaving FEED.
+    return loaded && systemState == SystemState.FEEDING;
+  }
+
+  /**
+   * Whether the indexer is reversing to clear a jam right now.
+   *
+   * @return true in {@link SystemState#UNJAMMING}; the superstructure reverses the floor roller in
+   *     step with it and pauses its "probably empty" clock
+   */
+  @AutoLogOutput(key = "Indexer/Unjamming")
+  public boolean isUnjamming() {
+    return systemState == SystemState.UNJAMMING;
+  }
+
+  /**
+   * Whether the indexer has given up on a jam.
+   *
+   * @return true in {@link SystemState#JAMMED}
+   */
+  @AutoLogOutput(key = "Indexer/Jammed")
+  public boolean isJammed() {
+    return systemState == SystemState.JAMMED;
   }
 
   /**

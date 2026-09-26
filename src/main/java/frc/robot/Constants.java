@@ -773,6 +773,17 @@ public final class Constants {
      * would present as "the sim stopped working" long after the change that caused it.
      */
     public static final double kSimPieceDetectionMargin = 1.5;
+
+    /**
+     * How far past the load and jam thresholds IndexerIOSim's synthetic load and jam push,
+     * dimensionless. Added for M10b step 6.
+     *
+     * <p>The same idea as {@link #kSimPieceDetectionMargin}, which step 8 deletes along with the
+     * piece detector it serves: expressed as a multiple of the thresholds rather than as absolute
+     * amps and RPM, so retuning a threshold on the robot cannot silently stop the simulation from
+     * reaching the state it was meant to exercise.
+     */
+    public static final double kSimLoadMargin = 1.5;
   }
 
   // ------------------------------------------------------------------------------- the turret ----

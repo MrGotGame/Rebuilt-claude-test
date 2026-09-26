@@ -34,7 +34,8 @@ of the intake/turret interlock, the readiness gate, FaultReporter's severity han
 and the two latent bugs M10 found in already-merged code. The second block is M10b's,
 growing one retrofit step at a time: step 2 added the flywheel shot detector, step 3
 the intake's resting and feed-assist states and its two geometric predicates, step 4
-the intake-camera gate, step 5 both halves of the corrected interlock. Several
+the intake-camera gate, step 5 both halves of the corrected interlock,
+step 6 the indexer's jam recovery and load reading. Several
 M10 anchors name code that later M10b steps replace (the piece guard, the isStowed turret
 guard), and those entries must be rewritten against the new code in the step that
 changes it, not deleted. Adding a milestone means adding its
@@ -58,6 +59,7 @@ TU = "src/main/java/frc/robot/shooting/TurretUnwrapper.java"
 FR = "src/main/java/frc/robot/util/FaultReporter.java"
 IN = "src/main/java/frc/robot/subsystems/intake/Intake.java"
 SH = "src/main/java/frc/robot/subsystems/shooter/Shooter.java"
+IX = "src/main/java/frc/robot/subsystems/indexer/Indexer.java"
 
 MUTATIONS = [
     ("piece-and-fault guard deleted", SS,
@@ -248,6 +250,35 @@ MUTATIONS = [
     ("the wait's hold angle is never latched", IN,
      "      case WAITING_FOR_TURRET -> waitHoldRad = inputs.pivotPositionRad;",
      "      case WAITING_FOR_TURRET -> {}"),
+
+    # ---- M10b step 6: the indexer's jam recovery and load reading. The load reading attacked on
+    # each of its guards (the state test at the accessor, the settle window, the shortfall half of
+    # the predicate); the unjam policy on each of its bounds (the attempt limit, the pulse length,
+    # the latch, the per-request reset) and on what it commands.
+    ("loaded leaks out of FEEDING through the debounce", IX,
+     "    return loaded && systemState == SystemState.FEEDING;",
+     "    return loaded;"),
+    ("load and jam ignore the spin-up settle window", IX,
+     "        systemState == SystemState.FEEDING\n            && stateTimer.hasElapsed(Constants.Indexer.kDetectionSettleSec.get());",
+     "        systemState == SystemState.FEEDING;"),
+    ("loaded needs only the current half", IX,
+     "            && inputs.statorCurrentAmps > Constants.Indexer.kLoadedCurrentAmps.get()\n            && (goalRpm - inputs.velocityRpm) > Constants.Indexer.kLoadedVelocityDropRpm.get();",
+     "            && inputs.statorCurrentAmps > Constants.Indexer.kLoadedCurrentAmps.get();"),
+    ("unjam attempts unbounded", IX,
+     "      if (unjamAttempts >= Constants.Indexer.kMaxUnjamAttempts) {",
+     "      if (false) {"),
+    ("an unjam pulse never ends", IX,
+     "      return stateTimer.hasElapsed(Constants.Indexer.kUnjamSec.get())\n          ? SystemState.FEEDING\n          : SystemState.UNJAMMING;",
+     "      return SystemState.UNJAMMING;"),
+    ("JAMMED latch released while FEED is still requested", IX,
+     "    if (systemState == SystemState.JAMMED) {\n      return SystemState.JAMMED;\n    }",
+     "    if (false) {\n      return SystemState.JAMMED;\n    }"),
+    ("a new FEED request inherits the spent unjam allowance", IX,
+     "      unjamAttempts = 0;\n    }",
+     "    }"),
+    ("an unjam pulse pushes forward instead of reversing", IX,
+     "      case UNJAMMING -> commandVelocity(Constants.Indexer.kUnjamRpm.get());",
+     "      case UNJAMMING -> commandVelocity(Constants.Indexer.kFeedRpm.get());"),
 ]
 
 

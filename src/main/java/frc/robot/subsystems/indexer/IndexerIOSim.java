@@ -21,6 +21,8 @@ public class IndexerIOSim implements IndexerIO {
   private final PIDController controller = new PIDController(0.0, 0.0, 0.0);
   private boolean closedLoop = false;
   private boolean simulatedPiecePresent = false;
+  private boolean simulatedLoad = false;
+  private boolean simulatedJam = false;
   private double appliedVolts = 0.0;
   private double ffVolts = 0.0;
 
@@ -126,6 +128,28 @@ public class IndexerIOSim implements IndexerIO {
       velocityRpm -= Math.copySign(droopRpm, velocityRpm);
     }
 
+    // M10b step 6: the hopper's load and a jam, perturbed at the same reporting boundary and for
+    // the same reason as the synthetic piece above -- DCMotorSim has no external-torque input.
+    // Both act only while the wheel is driven FORWARD, toward the flywheel, which is the only
+    // direction the hopper pushes against. A reverse unjam pulse therefore reads normally, and a
+    // jam is cleared only when the case clears it, never by the pulse itself: that is what lets a
+    // test prove the indexer retries and then gives up.
+    boolean drivenForward = outputVolts > 0.0;
+    double loadMargin = Constants.Indexer.kSimLoadMargin;
+    if (simulatedJam && drivenForward) {
+      // Stopped against the jam: well above the jam current, speed held under the jam threshold.
+      statorAmps = Math.max(statorAmps, Constants.Indexer.kJamCurrentAmps.get() * loadMargin);
+      velocityRpm = 0.0;
+    } else if (simulatedLoad && drivenForward) {
+      // Slowed by the pile, not stopped: above the loaded current, below the jam current, and a
+      // shortfall past the loaded threshold that leaves the wheel turning well above the jam speed.
+      statorAmps = Math.max(statorAmps, Constants.Indexer.kLoadedCurrentAmps.get() * loadMargin);
+      velocityRpm =
+          Math.max(
+              Constants.Indexer.kJamVelocityRpm.get() * 2.0,
+              velocityRpm - Constants.Indexer.kLoadedVelocityDropRpm.get() * loadMargin);
+    }
+
     inputs.velocityRpm = velocityRpm;
     inputs.statorCurrentAmps = statorAmps;
 
@@ -168,6 +192,36 @@ public class IndexerIOSim implements IndexerIO {
     // Nothing caches the flag: updateInputs reads it fresh every loop, so a binding can drop a
     // piece in and take it out again mid-loop-sequence without any state to reset.
     simulatedPiecePresent = present;
+  }
+
+  /**
+   * Test hook: the hopper is pressing pieces into the indexer.
+   *
+   * <p>Added for M10b step 6. While set and driven forward, the indexer reports the current and
+   * shortfall of a wheel slowed by a load, which is what {@code Indexer.isLoaded()} looks for. It
+   * is the hopper-era counterpart of {@link #setSimulatedPiecePresent(boolean)}, which step 8
+   * deletes: there is no longer one piece to be present or absent, only a pile that is or is not
+   * pushing.
+   *
+   * @param loaded true to simulate a loaded feed
+   *     <p><b>Outputs:</b> sets the synthetic load flag read by {@link #updateInputs}.
+   */
+  public void setSimulatedLoad(boolean loaded) {
+    simulatedLoad = loaded;
+  }
+
+  /**
+   * Test hook: something is jammed in the indexer.
+   *
+   * <p>Added for M10b step 6. While set and driven forward, the wheel reports stopped against a
+   * current above the jam threshold. Reversing does not clear it; only clearing this flag does,
+   * which is what lets a test watch the indexer retry and then give up.
+   *
+   * @param jammed true to simulate a jam
+   *     <p><b>Outputs:</b> sets the synthetic jam flag read by {@link #updateInputs}.
+   */
+  public void setSimulatedJam(boolean jammed) {
+    simulatedJam = jammed;
   }
 
   /**

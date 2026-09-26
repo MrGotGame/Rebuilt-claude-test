@@ -171,6 +171,169 @@ public class IndexerFsmTest {
     assertEquals(Indexer.SystemState.HOLDING, indexer.getSystemState());
   }
 
+  // ------------------------------------------------------------- M10b step 6: jams and load ----
+
+  /** Loops for a load or jam to register: the spin-up settle window plus the longer debounce. */
+  private static int loadDetectionLoops() {
+    return (int)
+            ((Constants.Indexer.kDetectionSettleSec.get()
+                    + Math.max(
+                        Constants.Indexer.kLoadedDebounceSec.get(),
+                        Constants.Indexer.kJamDetectSec.get()))
+                / LOOP_SEC)
+        + 10;
+  }
+
+  /**
+   * "Loaded" means a FEED pushing against something, and nothing else: it is false with no load,
+   * false while held or idle with the load present, false while ejecting, and true only while
+   * feeding into the load.
+   *
+   * <p>The not-feeding cases are the point. The old piece detector had to answer its question for a
+   * stopped wheel and needed a whole replay mechanism to do it; this reading refuses to answer
+   * there, and a version that leaked out of FEEDING would tell the superstructure "still moving
+   * pieces" while nothing moves.
+   */
+  @Test
+  void loadedMeansFeedingIntoALoadAndNothingElse() {
+    indexer.setWantedState(Indexer.WantedState.FEED);
+    step(loadDetectionLoops());
+    assertFalse(indexer.isLoaded(), "an unloaded feed reported a load");
+
+    sim.setSimulatedLoad(true);
+    step(loadDetectionLoops());
+    assertTrue(indexer.isLoaded(), "a feed into the hopper's load was not detected");
+    assertEquals(Indexer.SystemState.FEEDING, indexer.getSystemState(), "a load is not a jam");
+
+    for (Indexer.WantedState notFeeding :
+        new Indexer.WantedState[] {
+          Indexer.WantedState.HOLD, Indexer.WantedState.IDLE, Indexer.WantedState.EJECT
+        }) {
+      indexer.setWantedState(notFeeding);
+      for (int i = 0; i < 30; i++) {
+        step(1);
+        assertFalse(indexer.isLoaded(), "reported a load while " + indexer.getSystemState());
+      }
+    }
+  }
+
+  /**
+   * A feed starting from rest is neither loaded nor jammed while the wheel spins up.
+   *
+   * <p>Spin-up draws high current at low speed, which satisfies the load test AND the jam test at
+   * once -- the transient that once made the single-piece detector count shots nobody took. The
+   * settle window is the only thing between it and a spurious unjam pulse on every burst, so this
+   * case watches every loop of the start, not the end state.
+   */
+  @Test
+  void aSpinUpFromRestIsNeitherLoadedNorJammed() {
+    indexer.setWantedState(Indexer.WantedState.FEED);
+    for (int i = 0; i < loadDetectionLoops(); i++) {
+      step(1);
+      assertFalse(indexer.isLoaded(), "spin-up read as a load at loop " + i);
+      assertEquals(
+          Indexer.SystemState.FEEDING,
+          indexer.getSystemState(),
+          "spin-up read as a jam at loop " + i);
+    }
+  }
+
+  /**
+   * A jam gets exactly {@code kMaxUnjamAttempts} reverse pulses, each lasting {@code kUnjamSec},
+   * then the indexer stops trying, latches JAMMED with its alert, and stays latched while FEED is
+   * still requested -- until the request changes.
+   *
+   * <p>Pulses are counted as entries into UNJAMMING, not read off the end state, because "it
+   * retried forever" and "it retried three times" both end in a state that looks like a jam.
+   */
+  @Test
+  void aJamIsRetriedABoundedNumberOfTimesThenLatches() {
+    indexer.setWantedState(Indexer.WantedState.FEED);
+    step(loadDetectionLoops());
+    sim.setSimulatedJam(true);
+
+    int pulses = 0;
+    int longestPulseLoops = 0;
+    int currentPulseLoops = 0;
+    Indexer.SystemState previous = indexer.getSystemState();
+    for (int i = 0; i < 400 && indexer.getSystemState() != Indexer.SystemState.JAMMED; i++) {
+      step(1);
+      Indexer.SystemState state = indexer.getSystemState();
+      if (state == Indexer.SystemState.UNJAMMING) {
+        if (previous != Indexer.SystemState.UNJAMMING) {
+          pulses++;
+          currentPulseLoops = 0;
+        }
+        currentPulseLoops++;
+        longestPulseLoops = Math.max(longestPulseLoops, currentPulseLoops);
+        assertEquals(
+            Constants.Indexer.kUnjamRpm.get(),
+            indexer.getGoalRpm(),
+            "an unjam pulse must reverse the wheel");
+      }
+      previous = state;
+    }
+
+    assertEquals(Indexer.SystemState.JAMMED, indexer.getSystemState(), "never gave up on the jam");
+    assertEquals(Constants.Indexer.kMaxUnjamAttempts, pulses, "wrong number of unjam pulses");
+    assertEquals(
+        Constants.Indexer.kUnjamSec.get() / LOOP_SEC,
+        longestPulseLoops,
+        1.0,
+        "an unjam pulse did not last kUnjamSec");
+    assertEquals(0.0, indexer.getGoalRpm(), "a jammed indexer must stop, not keep pushing");
+
+    // Latched while FEED is still requested, even with the jam gone.
+    sim.setSimulatedJam(false);
+    step(50);
+    assertEquals(
+        Indexer.SystemState.JAMMED,
+        indexer.getSystemState(),
+        "the JAMMED latch released on its own while FEED was still requested");
+
+    // A change of request releases it, and the next FEED starts with a full allowance.
+    indexer.setWantedState(Indexer.WantedState.IDLE);
+    step(3);
+    indexer.setWantedState(Indexer.WantedState.FEED);
+    step(loadDetectionLoops());
+    assertEquals(Indexer.SystemState.FEEDING, indexer.getSystemState());
+
+    // "Full allowance" is asserted, not assumed: jam it again, and the first response must be a
+    // pulse, not an immediate JAMMED left over from the attempts the previous request spent.
+    sim.setSimulatedJam(true);
+    Indexer.SystemState firstResponse = Indexer.SystemState.FEEDING;
+    for (int i = 0; i < 200 && firstResponse == Indexer.SystemState.FEEDING; i++) {
+      step(1);
+      firstResponse = indexer.getSystemState();
+    }
+    assertEquals(
+        Indexer.SystemState.UNJAMMING,
+        firstResponse,
+        "a new FEED request inherited the spent unjam allowance of the last one");
+  }
+
+  /** A jam that one pulse clears goes back to feeding, and stays there. */
+  @Test
+  void aJamClearedByAPulseResumesFeeding() {
+    indexer.setWantedState(Indexer.WantedState.FEED);
+    step(loadDetectionLoops());
+    sim.setSimulatedJam(true);
+    for (int i = 0; i < 200 && indexer.getSystemState() != Indexer.SystemState.UNJAMMING; i++) {
+      step(1);
+    }
+    assertEquals(Indexer.SystemState.UNJAMMING, indexer.getSystemState(), "the jam never fired");
+
+    sim.setSimulatedJam(false);
+    for (int i = 0; i < 150; i++) {
+      step(1);
+      assertTrue(
+          indexer.getSystemState() == Indexer.SystemState.UNJAMMING
+              || indexer.getSystemState() == Indexer.SystemState.FEEDING,
+          "a cleared jam went to " + indexer.getSystemState());
+    }
+    assertEquals(Indexer.SystemState.FEEDING, indexer.getSystemState());
+  }
+
   /** With hardware that never moves, the machine still transitions but detects nothing. */
   @Test
   void deadHardwareTransitionsButDetectsNoPiece() {
