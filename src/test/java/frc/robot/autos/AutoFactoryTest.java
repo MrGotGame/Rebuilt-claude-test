@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.pathplanner.lib.auto.AutoBuilder;
+import com.pathplanner.lib.auto.NamedCommands;
 import com.pathplanner.lib.config.ModuleConfig;
 import com.pathplanner.lib.config.RobotConfig;
 import com.pathplanner.lib.path.PathPlannerPath;
@@ -15,15 +16,26 @@ import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.system.plant.DCMotor;
+import edu.wpi.first.wpilibj.Filesystem;
 import edu.wpi.first.wpilibj.simulation.DriverStationSim;
 import edu.wpi.first.wpilibj.simulation.SimHooks;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.Constants;
 import frc.robot.subsystems.drive.Drive;
+import frc.robot.subsystems.superstructure.Superstructure;
+import frc.robot.subsystems.turret.Turret;
 import frc.robot.util.AllianceFlipUtil;
 import frc.robot.util.FaultReporter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Stream;
+import org.json.simple.JSONArray;
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -535,5 +547,191 @@ public class AutoFactoryTest {
         FaultReporter.getInstance().getActiveFaultNames().stream()
             .anyMatch(name -> name.startsWith("PathPlanner auto unreadable: Step3_NoSuchAutoFile")),
         "no warning named the missing auto");
+  }
+
+  // ------------------------------------------------------- step 4: the marker vocabulary ----
+
+  /** The names plan section 8.2 promises a path file may use, as corrected by M13 step 4. */
+  private static final List<String> VOCABULARY =
+      List.of(
+          "Intake",
+          "StopIntake",
+          "StowIntake",
+          "SpinUp",
+          "ScoreOnMove",
+          "ScoreStationary",
+          "Eject",
+          "Home",
+          "StowTurret");
+
+  /**
+   * Builds a robot 3 m in front of the goal, where it can score.
+   *
+   * <p><b>Outputs:</b> sets {@link #robot}.
+   */
+  private void buildScoringRobot() {
+    robot =
+        new SimulatedAutoRobot(
+            new Pose2d(-3.0, 0.0, Rotation2d.kZero), SimulatedAutoRobot.pathsOf(), false);
+  }
+
+  /**
+   * Runs one registered marker, the way PathPlanner runs it, then steps the robot.
+   *
+   * @param name the marker name
+   * @param loops how many loops to step afterwards
+   *     <p><b>Outputs:</b> schedules the marker's command and runs the robot.
+   */
+  private void runMarker(String name, int loops) {
+    assertTrue(NamedCommands.hasCommand(name), name + " is not registered");
+    CommandScheduler.getInstance().schedule(NamedCommands.getCommand(name));
+    robot.step(loops);
+  }
+
+  /** Every name in the vocabulary is registered, and the robot's map holds nothing else. */
+  @Test
+  void everyMarkerIsRegistered() {
+    buildScoringRobot();
+    assertEquals(VOCABULARY, List.copyOf(robot.factory.markerVocabulary().keySet()));
+    for (String name : VOCABULARY) {
+      assertTrue(NamedCommands.hasCommand(name), name + " is not registered");
+    }
+  }
+
+  /**
+   * Intake collects, and StopIntake stops the roller but leaves the intake down.
+   *
+   * <p>StopIntake must neither raise the intake, which would dump the hopper, nor send DEFAULT,
+   * which would cancel a scoring leg the same path is running.
+   */
+  @Test
+  void intakeAndStopIntakeLeaveTheIntakeDown() {
+    buildScoringRobot();
+    runMarker("SpinUp", 2);
+    runMarker("Intake", 5);
+    assertEquals(Superstructure.IntakeMode.INTAKING, robot.superstructure.getIntakeMode());
+    runMarker("StopIntake", 5);
+    assertEquals(Superstructure.IntakeMode.DEPLOYED, robot.superstructure.getIntakeMode());
+    assertEquals(
+        Superstructure.SystemState.SPINNING_UP,
+        robot.superstructure.getSystemState(),
+        "StopIntake cancelled the shooter side's request");
+  }
+
+  /** StowIntake raises the intake. */
+  @Test
+  void stowIntakeRaisesTheIntake() {
+    buildScoringRobot();
+    runMarker("Intake", 5);
+    runMarker("StopIntake", 1);
+    runMarker("StowIntake", 5);
+    assertEquals(Superstructure.IntakeMode.STOWED, robot.superstructure.getIntakeMode());
+  }
+
+  /**
+   * Each shooter-side marker puts the superstructure in its state.
+   *
+   * <p>StowTurret included: it rests the shooter side, which stows the turret. Registered as the
+   * plan had it, a direct turret request, it was overwritten by the superstructure on the next
+   * loop.
+   */
+  @Test
+  void shooterSideMarkersReachTheirStates() {
+    buildScoringRobot();
+    runMarker("SpinUp", 3);
+    assertEquals(Superstructure.SystemState.SPINNING_UP, robot.superstructure.getSystemState());
+    runMarker("ScoreOnMove", 3);
+    assertEquals(
+        Superstructure.SystemState.SCORING_ON_THE_MOVE, robot.superstructure.getSystemState());
+    CommandScheduler.getInstance().cancelAll();
+    runMarker("StowTurret", 3);
+    assertEquals(Superstructure.SystemState.RESTING, robot.superstructure.getSystemState());
+    assertEquals(Turret.SystemState.STOWING, robot.turret.getSystemState());
+    runMarker("Eject", 3);
+    assertEquals(Superstructure.SystemState.EJECTING, robot.superstructure.getSystemState());
+    runMarker("Home", 3);
+    assertEquals(Superstructure.SystemState.HOMING, robot.superstructure.getSystemState());
+  }
+
+  /**
+   * Collects every named-command reference in a PathPlanner file's JSON.
+   *
+   * <p>PathPlanner nests commands -- sequential and parallel groups inside an auto, a command
+   * inside each event marker of a path -- and names a registered command as {@code {"type":
+   * "named", "data": {"name": ...}}}. This walks the whole tree for that shape.
+   *
+   * @param json a parsed JSON value
+   * @param names where to add each name found
+   *     <p><b>Outputs:</b> appends to {@code names}.
+   */
+  private static void collectNamedCommands(Object json, List<String> names) {
+    if (json instanceof JSONObject object) {
+      if ("named".equals(object.get("type")) && object.get("data") instanceof JSONObject data) {
+        names.add(String.valueOf(data.get("name")));
+      }
+      for (Object value : object.values()) {
+        collectNamedCommands(value, names);
+      }
+    } else if (json instanceof JSONArray array) {
+      for (Object value : array) {
+        collectNamedCommands(value, names);
+      }
+    }
+  }
+
+  /**
+   * The scanner finds a named command however deeply PathPlanner nests it.
+   *
+   * <p>The deploy scan below passes trivially while no drawn file uses a marker, which is the state
+   * M13 leaves the deploy folder in. This case is what shows the scan can see one when it is there.
+   */
+  @Test
+  void theMarkerScannerFindsNestedNames() throws Exception {
+    String auto =
+        "{\"command\": {\"type\": \"sequential\", \"data\": {\"commands\": ["
+            + "{\"type\": \"named\", \"data\": {\"name\": \"SpinUp\"}},"
+            + "{\"type\": \"parallel\", \"data\": {\"commands\": ["
+            + "{\"type\": \"path\", \"data\": {\"pathName\": \"Leave\"}},"
+            + "{\"type\": \"named\", \"data\": {\"name\": \"TagPipeline\"}}]}}]}},"
+            + "\"eventMarkers\": [{\"name\": \"m\", \"command\":"
+            + " {\"type\": \"named\", \"data\": {\"name\": \"Intake\"}}}]}";
+    List<String> names = new ArrayList<>();
+    collectNamedCommands(new JSONParser().parse(auto), names);
+    // JSONObject is a HashMap, so the order found is not the order written.
+    assertEquals(Set.of("SpinUp", "TagPipeline", "Intake"), Set.copyOf(names));
+    assertEquals(3, names.size());
+  }
+
+  /**
+   * Every marker any drawn path or auto uses is registered.
+   *
+   * <p>Section 8.2: a marker PathPlanner does not know is skipped with no error and no warning, and
+   * it is the most common "works in the GUI, not on the robot" failure. This case is the only guard
+   * that failure can have. It reads every file under the deploy folder's {@code pathplanner}
+   * directory, so it goes red the moment someone draws a marker with a typo, or one of the two
+   * names M13 retired.
+   */
+  @Test
+  void everyMarkerInTheDeployFolderIsRegistered() throws Exception {
+    buildScoringRobot();
+    Path root = Filesystem.getDeployDirectory().toPath().resolve("pathplanner");
+    List<Path> files;
+    try (Stream<Path> walk = Files.walk(root)) {
+      files =
+          walk.filter(f -> f.toString().endsWith(".path") || f.toString().endsWith(".auto"))
+              .toList();
+    }
+    assertFalse(files.isEmpty(), "found no path or auto files under " + root);
+    List<String> unregistered = new ArrayList<>();
+    for (Path file : files) {
+      List<String> names = new ArrayList<>();
+      collectNamedCommands(new JSONParser().parse(Files.readString(file)), names);
+      for (String name : names) {
+        if (!NamedCommands.hasCommand(name)) {
+          unregistered.add(root.relativize(file) + ": " + name);
+        }
+      }
+    }
+    assertEquals(List.of(), unregistered, "markers PathPlanner would silently skip");
   }
 }

@@ -25,9 +25,11 @@ import org.junit.jupiter.api.Test;
  * robot starts with the intake stowed and 8 pieces aboard, and a routine that drove off before the
  * intake came down would shed them.
  *
- * <p>The factory is built with only the intake, because that is all these cases touch and the
- * constructor still only stores its arguments. When {@code AutoFactory}'s constructor starts
- * configuring PathPlanner, these cases will need a real drivetrain or a test constructor.
+ * <p>These cases run on an intake alone, through {@link AutoRoutines#waitUntilRetaining}, because
+ * the wait reads nothing else. Until M13 step 4 they built an {@code AutoFactory} holding only the
+ * intake; once its constructor began configuring PathPlanner and registering markers against the
+ * superstructure, that stopped being possible, and the wait was split out as a function of the
+ * intake rather than giving the factory a test constructor.
  */
 public class AutoRoutinesTest {
   private static final double LOOP_SEC = 0.02;
@@ -55,15 +57,14 @@ public class AutoRoutinesTest {
   }
 
   /**
-   * Builds the routine library around an intake.
+   * Builds the intake the wait is tested on.
    *
    * @param io the intake's pivot and roller hardware
-   * @return the routines, over a factory holding only that intake
+   *     <p><b>Outputs:</b> sets {@link #intake}.
    */
-  private AutoRoutines routinesWith(IntakeIO io) {
+  private void buildIntake(IntakeIO io) {
     intake = new Intake(io, IdealPivotIO.GEOMETRY);
     intake.setDeployGuard(() -> true);
-    return new AutoRoutines(new AutoFactory(null, null, intake, null, null, null));
   }
 
   /**
@@ -112,12 +113,12 @@ public class AutoRoutinesTest {
    */
   @Test
   void aRoutineWaitsForTheIntakeToComeDown() {
-    AutoRoutines routines = routinesWith(new IdealPivotIO());
+    buildIntake(new IdealPivotIO());
     step(40);
     assertTrue(intake.isHomed(), "the intake never homed, so this case tests nothing");
     assertFalse(intake.isRetainingPieces(), "a stowed intake must not count as retaining");
 
-    Command wait = routines.waitUntilIntakeRetaining();
+    Command wait = AutoRoutines.waitUntilRetaining(intake);
     wait.initialize();
     int stowedLoops = timeoutLoops() / 2;
     assertEquals(
@@ -141,14 +142,14 @@ public class AutoRoutinesTest {
    */
   @Test
   void aFeedAssistingIntakeCountsAsRetaining() {
-    AutoRoutines routines = routinesWith(new IdealPivotIO());
+    buildIntake(new IdealPivotIO());
     step(40);
     intake.setWantedState(Intake.WantedState.FEED_ASSIST);
     step(5);
     assertEquals(Intake.SystemState.FEED_ASSISTING, intake.getSystemState());
     assertFalse(intake.isAtIntakingAngle(), "the case needs an intake off its intaking angle");
 
-    Command wait = routines.waitUntilIntakeRetaining();
+    Command wait = AutoRoutines.waitUntilRetaining(intake);
     wait.initialize();
     int loops = loopsUntilFinished(wait, timeoutLoops());
     wait.end(false);
@@ -165,9 +166,9 @@ public class AutoRoutinesTest {
    */
   @Test
   void aDeadPivotCostsTheTimeoutNotTheAuto() {
-    AutoRoutines routines = routinesWith(new IntakeIO() {});
+    buildIntake(new IntakeIO() {});
 
-    Command wait = routines.waitUntilIntakeRetaining();
+    Command wait = AutoRoutines.waitUntilRetaining(intake);
     wait.initialize();
     int loops = loopsUntilFinished(wait, 3 * timeoutLoops());
     wait.end(false);

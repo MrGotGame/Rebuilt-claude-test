@@ -4,6 +4,7 @@ import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import frc.robot.Constants;
+import frc.robot.subsystems.intake.Intake;
 import frc.robot.subsystems.superstructure.Superstructure;
 import java.util.List;
 import java.util.Set;
@@ -166,9 +167,24 @@ public class AutoRoutines {
     // isRetainingPieces() rather than "the intake is DEPLOYED": the feed-assist angle lies between
     // stow and deploy and already retains, so the wait ends as the arm passes it on the way down
     // instead of waiting for the rest of the travel.
+    return waitUntilRetaining(factory.getIntake());
+  }
+
+  /**
+   * The wait {@link #waitUntilIntakeRetaining()} builds, as a function of the intake alone.
+   *
+   * <p>Split out in M13 step 4, when the factory began configuring PathPlanner and registering its
+   * markers in its constructor. The wait reads nothing but the intake, so it can be tested on an
+   * intake alone, which is how its three cases in {@code AutoRoutinesTest} have always run.
+   *
+   * @param intake the intake to wait on
+   * @return a command that ends when the intake retains pieces, or after {@code
+   *     Constants.Auto.kIntakeRetainTimeoutSec}, whichever is first
+   */
+  static Command waitUntilRetaining(Intake intake) {
     return Commands.defer(
         () ->
-            Commands.waitUntil(factory.getIntake()::isRetainingPieces)
+            Commands.waitUntil(intake::isRetainingPieces)
                 .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()),
         Set.of());
   }

@@ -1,6 +1,7 @@
 package frc.robot.autos;
 
 import com.pathplanner.lib.auto.AutoBuilder;
+import com.pathplanner.lib.auto.NamedCommands;
 import com.pathplanner.lib.commands.PathPlannerAuto;
 import com.pathplanner.lib.config.PIDConstants;
 import com.pathplanner.lib.config.RobotConfig;
@@ -29,7 +30,9 @@ import frc.robot.util.FaultReporter;
 import frc.robot.util.LocalADStarAK;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -184,8 +187,8 @@ public class AutoFactory {
     this.vision = vision;
     checkGuiSettings();
     configureAutoBuilder();
-    // TODO: Call registerNamedCommands() last. Building any PathPlannerAuto needs the named
-    // commands already registered.
+    // Last, because building any PathPlannerAuto needs the named commands already registered.
+    registerNamedCommands();
   }
 
   /**
@@ -428,29 +431,51 @@ public class AutoFactory {
    * <p><b>Outputs:</b> populates PathPlanner's global NamedCommands registry.
    */
   private void registerNamedCommands() {
-    // TODO: Register each name below EXACTLY as spelled. These strings are typed by hand into the
-    // PathPlanner GUI, and a typo produces a silently-skipped marker rather than an error. The
-    // table in plan section 8.2 is the contract; change both in the same commit.
-    //   "Intake"            -> Commands.runOnce(() -> superstructure.setIntakeRequested(true))
-    //   "StopIntake"        -> Commands.runOnce(() -> superstructure.setIntakeRequested(false))
-    //                          (the roller stops; the intake stays DEPLOYED, so the hopper keeps
-    //                          its pieces)
-    //   "StowIntake"        -> superstructure.setWantedStateCommand(WantedState.STOW)
-    //                          (rarely: raising the intake can dump the hopper)
-    //   "SpinUp"            -> superstructure.setWantedStateCommand(WantedState.SPIN_UP)
-    //   "ScoreOnMove"       -> superstructure.scoreUntilEmptyCommand()
-    //   "ScoreStationary"   -> scoreStationaryCommand()
-    //   "Eject"             -> superstructure.setWantedStateCommand(WantedState.EJECT)
-    //   "Home"              -> superstructure.setWantedStateCommand(WantedState.HOME)
-    //   "StowTurret"        -> turret.setWantedStateCommand(Turret.WantedState.STOW)
-    //   "GamePiecePipeline" -> Commands.runOnce(() -> vision.setIntakePipeline(1))
-    //   "TagPipeline"       -> Commands.runOnce(() -> vision.setIntakePipeline(0))
+    // IMPLEMENTATION (was TODO: "Register each name below EXACTLY as spelled ... The table in plan
+    // section 8.2 is the contract; change both in the same commit.")
     //
-    // "Intake" and "StopIntake" set the intake request, which is independent of the shooter-side
-    // wanted state, so one path can intake and score at once. They used to request
-    // WantedState.INTAKE, which M10b step 7 removed, and DEFAULT, which would cancel any scoring in
-    // progress. "WaitForPiece" is gone for good: with no piece sensor there is nothing to wait
-    // for, and a marker that always times out only costs the auto time.
+    // Registered from one map, markerVocabulary(), so the names the robot registers and the names
+    // AutoFactoryTest checks every deploy file against are the same list by construction.
+    markerVocabulary().forEach(NamedCommands::registerCommand);
+  }
+
+  /**
+   * The marker names a PathPlanner file may use, each with a fresh command.
+   *
+   * <p>Added for M13 step 4. The names are typed by hand into the GUI, and PathPlanner silently
+   * skips any it does not know, so this map is a contract with every path and auto file. Plan
+   * section 8.2 is the table of it; change both in the same commit.
+   *
+   * @return marker name to command, in the order of the section 8.2 table
+   */
+  public Map<String, Command> markerVocabulary() {
+    Map<String, Command> markers = new LinkedHashMap<>();
+    // The intake is the superstructure's second, independent request, so a path can intake and
+    // score at once. StopIntake stops the roller and leaves the intake DOWN, so the hopper keeps
+    // its pieces; it must not request DEFAULT, which would cancel any scoring in progress.
+    markers.put("Intake", Commands.runOnce(() -> superstructure.setIntakeRequested(true)));
+    markers.put("StopIntake", Commands.runOnce(() -> superstructure.setIntakeRequested(false)));
+    // Rarely: raising the intake can dump the hopper.
+    markers.put(
+        "StowIntake", superstructure.setWantedStateCommand(Superstructure.WantedState.STOW));
+    markers.put("SpinUp", superstructure.setWantedStateCommand(Superstructure.WantedState.SPIN_UP));
+    markers.put("ScoreOnMove", superstructure.scoreUntilEmptyCommand());
+    markers.put("ScoreStationary", scoreStationaryCommand());
+    markers.put("Eject", superstructure.setWantedStateCommand(Superstructure.WantedState.EJECT));
+    markers.put("Home", superstructure.setWantedStateCommand(Superstructure.WantedState.HOME));
+    // Through the superstructure, not turret.setWantedStateCommand(STOW) as the plan's table had
+    // it. The superstructure sets the turret's wanted state in every handler, every loop, so a
+    // marker that commanded the turret directly was overwritten on the very next loop and did
+    // nothing at all -- and during a scoring leg, stowing the turret is not what anyone wants
+    // anyway. DEFAULT rests the shooter side, and resting stows the turret.
+    markers.put(
+        "StowTurret", superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));
+    // GamePiecePipeline and TagPipeline are NOT registered, though the plan's table listed them.
+    // Since M10b the superstructure switches the intake camera itself, on the edge into and out of
+    // intaking, so a marker could only disagree with it: GamePiecePipeline outside an intake leg
+    // would leave the camera off AprilTags, contributing nothing, with nothing to switch it back.
+    // A file that still uses either name fails AutoFactoryTest's deploy scan.
+    return markers;
   }
 
   /**
