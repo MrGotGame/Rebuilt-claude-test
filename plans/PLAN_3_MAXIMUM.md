@@ -1114,16 +1114,22 @@ public final class Constants {
     private Shot() {}
 
     /**
-     * Distance (m) -> ground-frame launch speed (m/s) needed to reach the goal. Build this table by
-     * standing still at each distance, sweeping flywheel RPM until you score, then converting RPM to
-     * surface speed. TODO: MEASURE at 8-10 distances spanning your usable range.
+     * Distances (m) the shot table is sampled at. Build it by standing still at each distance,
+     * firing bursts with measureShotTablePoint (section 4.13) and raising ShotTable/Rpm until the
+     * burst scores. TODO: MEASURE at 8-10 distances spanning your usable range.
+     *
+     * (There was a kLaunchSpeedMetersPerSec table here. The solver never read it: the ground speed a
+     * shot needs is distance / time of flight, and the RPM comes from the fit below. M11 deleted it.)
      */
     public static final double[] kDistanceBreakpointsMeters = {1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0};
 
-    public static final double[] kLaunchSpeedMetersPerSec = {0, 0, 0, 0, 0, 0, 0}; // TODO: MEASURE.
-
-    /** Distance (m) -> time of flight (s), measured from the same test. TODO: MEASURE with video at 120 fps. */
+    /** Distance (m) -> time of flight (s), from the same bursts. TODO: MEASURE with video at 120 fps. */
     public static final double[] kTimeOfFlightSec = {0, 0, 0, 0, 0, 0, 0};
+
+    /** Flywheel speed and taped distance for the next measurement burst (M11). Tuning only. */
+    public static final LoggedTunableNumber kMeasureRpm = new LoggedTunableNumber("ShotTable/Rpm", 3000.0);
+    public static final LoggedTunableNumber kMeasureTapedDistanceMeters =
+        new LoggedTunableNumber("ShotTable/TapedDistance", 0.0);
 
     /** Linear map from required muzzle speed (m/s) to flywheel RPM. TODO: fit from your shot data. */
     public static final LoggedTunableNumber kRpmPerMeterPerSec =
@@ -4194,24 +4200,23 @@ import edu.wpi.first.math.kinematics.ChassisSpeeds;
 
 public class ShootingSolver {
   private final InterpolatingDoubleTreeMap timeOfFlightTable = new InterpolatingDoubleTreeMap();
-  private final InterpolatingDoubleTreeMap launchSpeedTable = new InterpolatingDoubleTreeMap();
   private int lastIterationCount = 0;
   private double lastResidualSec = 0.0;
 
   public ShootingSolver() {
-    // TODO: Populate both InterpolatingDoubleTreeMaps by zipping
-    // Constants.Shot.kDistanceBreakpointsMeters with kTimeOfFlightSec and kLaunchSpeedMetersPerSec.
-    // Assert the three arrays are the same length and throw if not - a mismatched table is a silent
-    // aiming bug otherwise.
+    // TODO: Populate the InterpolatingDoubleTreeMap by zipping
+    // Constants.Shot.kDistanceBreakpointsMeters with kTimeOfFlightSec. Assert the two arrays are
+    // the same length and throw if not - a mismatched table is a silent aiming bug otherwise.
+    // (M11 deleted a second, launch-speed table: nothing in solve() ever read it.)
   }
 
-  public ShootingSolver(double[] distances, double[] timesOfFlight, double[] launchSpeeds) {
+  public ShootingSolver(double[] distances, double[] timesOfFlight) {
     // TODO: Test-only constructor that takes explicit tables so unit tests do not depend on
     // Constants or NetworkTables.
   }
 
   public void reloadTables() {
-    // TODO: Clear and repopulate both maps from Constants.Shot. Called from Superstructure's
+    // TODO: Clear and repopulate the map from Constants.Shot. Called from Superstructure's
     // onEnter for scoring states so a mid-match table edit takes effect without a redeploy.
   }
 
@@ -4250,9 +4255,11 @@ public class ShootingSolver {
     return 0.0;
   }
 
-  public double getLaunchSpeed(double distanceMeters) {
-    // TODO: launchSpeedTable.get(distanceMeters).
-    return 0.0;
+  public ShotParameters solveStationaryAtRpm(Pose2d robotPose, Translation2d goal, double rpm) {
+    // Added by M11: the shot that MEASURES the tables, so it cannot need them. Standing still the
+    // aim is straight down the line of sight; the speed is the operator's. Usable on an all-zero
+    // table, still range-gated, and invalid for a speed that is not a positive finite number.
+    return ShotParameters.invalid();
   }
 
   public int getLastIterationCount() {
@@ -5045,6 +5052,11 @@ public class Superstructure extends SubsystemBase {
   private void scoringStationary() {
     // TODO: Same as scoringOnTheMove but using solver.solveStationary(...) and additionally
     // requiring |chassis speed| < a tunable threshold in isReadyToScore().
+    // M11 adds a shot-table override: while setShotTableRpm(rpm) is set and SCORE_STATIONARY is
+    // the request, the solve is solver.solveStationaryAtRpm(pose, goal, rpm) instead, which needs
+    // no table. Everything else is unchanged -- same gate, tight-band first piece, burst latch,
+    // still chassis. ANY request other than SCORE_STATIONARY clears it (the measurement command's
+    // closing DEFAULT and onDisable's IDLE included), so it cannot leak into a real shot.
   }
 
   private void scoringForced() {
@@ -5927,11 +5939,20 @@ public class CharacterizationCommands {
   }
 
   public static Command measureShotTablePoint(
-      Superstructure superstructure, Shooter shooter, double rpm, double holdSec) {
-    // TODO: Hold the robot still, force the flywheel to `rpm`, fire one piece, and log
-    // "ShotTable/Distance" (from RobotState.getDistanceToGoal()) alongside the commanded RPM.
-    // This is the data-collection routine that fills Constants.Shot's three arrays; run it at each
-    // of the kDistanceBreakpointsMeters values with a tape measure on the carpet.
+      Superstructure superstructure,
+      Shooter shooter,
+      DoubleSupplier rpm,
+      DoubleSupplier tapedDistanceMeters,
+      double holdSec) {
+    // Rewritten by M11 (the original fired one piece, which section 2.4 retired). Reads the speed
+    // and the taped distance when it starts; sets Superstructure.setShotTableRpm(rpm) and requests
+    // SCORE_STATIONARY, which aims at the goal with no table and fires a whole BURST through the
+    // ordinary stationary gate. Ends when likelyEmpty() after at least one shot of THIS burst (the
+    // belief outlives a burst, and a hand-reloaded hopper does not reset it), or at holdSec. However
+    // it ends, it requests DEFAULT -- which also clears the override -- and logs one sample under
+    // ShotTable/: speed, estimated and taped distance, shots fired this burst, duration, timed out.
+    // Bound in tuning mode to the /Tuning/ShotTable/Measure dashboard toggle. The rows go through
+    // tools/fit_shot_table.py into Constants.Shot.
     return null;
   }
 }
@@ -5951,7 +5972,7 @@ public class CharacterizationCommands {
 
 #### `src/test/java/frc/robot/shooting/ShootingSolverTest.java` — `package frc.robot.shooting;` [NEW]
 
-Uses the test-only `ShootingSolver(double[], double[], double[])` constructor with a synthetic,
+Uses the test-only `ShootingSolver(double[], double[])` constructor with a synthetic,
 monotonic time-of-flight table, so the tests assert the *algorithm*, not your (currently unmeasured)
 shot data. The single most valuable assertion here is `stationarySolveMatchesMovingSolveAtZeroVelocity`:
 if that fails, the virtual-goal math has a sign error, and a sign error in the virtual goal is
@@ -5970,14 +5991,13 @@ public class ShootingSolverTest {
   private static final double kEps = 1e-6;
   private static final double[] kDistances = {1.0, 2.0, 3.0, 4.0, 5.0, 6.0};
   private static final double[] kTof = {0.30, 0.42, 0.55, 0.69, 0.84, 1.00};
-  private static final double[] kLaunchSpeeds = {8.0, 9.5, 11.0, 12.5, 14.0, 15.5};
 
   private ShootingSolver solver;
 
   @BeforeEach
   void setUp() {
-    // TODO: Constants.disableHal = true; solver = new ShootingSolver(kDistances, kTof,
-    // kLaunchSpeeds). Setting disableHal first keeps LoggedTunableNumber off NetworkTables.
+    // TODO: Constants.disableHal = true; solver = new ShootingSolver(kDistances, kTof). Setting
+    // disableHal first keeps LoggedTunableNumber off NetworkTables.
   }
 
   @Test
@@ -7726,7 +7746,10 @@ records nothing under test.)
 **M11 — Stationary shooting (1 week, lanes B + D).**
 Collect the shot tables: run `measureShotTablePoint` at each of the 8–10
 `kDistanceBreakpointsMeters`, with a tape measure and a 120 fps phone video for the time of flight.
-Fill `kLaunchSpeedMetersPerSec`, `kTimeOfFlightSec`, `kRpmPerMeterPerSec`, `kRpmIntercept`.
+Fill `kTimeOfFlightSec`, `kRpmPerMeterPerSec` and `kRpmIntercept`; `tools/fit_shot_table.py` turns
+one CSV row per burst into all three. (An earlier version of this line also listed
+`kLaunchSpeedMetersPerSec`, which the solver never read; M11 deleted it. The measurement shot needs
+no table of its own, because it runs inside `SCORE_STATIONARY` with a hand-set speed.)
 **Measure with bursts, not single pieces** (§2.4): load the hopper, fire at `kFeedRpm`, and fit to
 the whole burst. A table built from single pieces over-predicts every piece after the first, which
 leave a recovering wheel. While doing it, log `Shooter/ShotDetected` and tune `kShotDipRpm`,
@@ -7816,7 +7839,7 @@ displaces.
 | --- | --- | --- |
 | **Any climb / endgame mechanism** | Not in the hardware manifest. `Superstructure` has a `CLIMB_SAFE`-shaped hole (§2.3 names it) but no states or subsystem. | The moment a climber exists. Add it as a sixth mechanism FSM plus one `SystemState`; the interlock pattern already handles "nothing else may move." |
 | **Variable hood / adjustable launch angle** | The manifest has two fixed flywheels and no hood actuator. The shot model is therefore **1-D**: distance → (speed, time of flight). | If a hood is added, every `InterpolatingDoubleTreeMap` in `ShootingSolver` becomes a 2-D interpolation and `ShotParameters` gains a `hoodAngle`. That is a real rewrite of §6.2, not an addition. |
-| **A physics model of the shot** | No drag, no Magnus, no spin. The TOF and launch-speed tables are *measured*, which absorbs all of it empirically and exactly, at your robot's actual conditions. | Never, for a competition robot. A measured table beats a modeled one every time. |
+| **A physics model of the shot** | No drag, no Magnus, no spin. The time-of-flight table and the RPM fit are *measured*, which absorbs all of it empirically and exactly, at your robot's actual conditions. | Never, for a competition robot. A measured table beats a modeled one every time. |
 | **Turret backlash compensation** | A dead-band model needs a direction-of-travel state and adds a discontinuity the velocity feedforward fights. | Only if characterization shows backlash larger than `kToleranceRad` (1.5°). Fix it mechanically first. |
 | **A piece count (how many are in the hopper)** | The robot carries a hopper (§2.4) but has no piece sensor, so it cannot count what it holds. It counts pieces *fired* at the flywheel and keeps a `likelyEmpty()` belief; nothing is gated on either. | Only if a live count is wanted for the driver. A "hopper full" signal is not needed: the hopper holds 50 and overfilling does not jam. A count would need an entry sensor at the intake mouth, with count = 8 preloaded + in − fired and drift handling. The FSM would not change shape, only gain inputs. |
 | **Shot outcome detection** | Nothing on this robot can observe whether a piece went in. `getShotCount()` counts *fires*, not *scores*. | With a goal-side camera pipeline or a field-published score feed. Until then, hit rate is a human count from match video. |
