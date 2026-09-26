@@ -1187,6 +1187,20 @@ public class Turret extends SubsystemBase {
   }
 
   /**
+   * The velocity feedforward most recently commanded, robot-relative.
+   *
+   * <p>Added beyond the plan's method list for M12 step 2, beside {@link
+   * #getCommandedPositionRad()}, so a test can pin the sign of the chassis-rate cancellation in
+   * plan section 6.4 -- the failure that tracks perfectly standing still and flies off while the
+   * robot rotates.
+   *
+   * @return the commanded turret rate, in radians per second; zero outside the aiming states
+   */
+  public double getCommandedVelocityRadPerSec() {
+    return lastCommandedVelocityRadPerSec;
+  }
+
+  /**
    * The turret velocity, consumed by the characterization routines.
    *
    * @return turret angular velocity, in radians per second

@@ -6,7 +6,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import edu.wpi.first.hal.HAL;
 import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
+import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.simulation.SimHooks;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.Constants;
@@ -187,5 +189,52 @@ public class TurretFsmTest {
     assertFalse(
         turret.isHomed(),
         "a turret that never moved was accepted as homed; stall detection needs corroboration");
+  }
+
+  /**
+   * With the aim held still in the field and the chassis rotating, the turret is commanded to
+   * rotate equally and oppositely -- in both directions -- and a field rate adds on top.
+   *
+   * <p>Added for M12 step 2. This is the first failure mode plan section 6.4 names: with the
+   * chassis rate's sign backwards, the feedforward doubles the lag instead of cancelling it, and
+   * the turret tracks perfectly standing still and flies off the moment the robot rotates. No
+   * stationary test can see it, which is why it needs a case of its own. Both rotation directions
+   * are checked, so an absolute value or a one-sided clamp cannot pass either.
+   */
+  @Test
+  void theFeedforwardCancelsTheChassisRotation() {
+    assertTrue(Constants.Turret.kIntakeConflictMinRad.get() > Math.toRadians(30.0));
+    turret.setWantedState(Turret.WantedState.HOME);
+    step(loopsPastHomingTimeout());
+    turret.setWantedState(Turret.WantedState.AIM);
+    turret.setGoal(Rotation2d.fromDegrees(30.0), 0.0);
+    step(50);
+
+    try {
+      for (double omega : new double[] {3.0, -3.0}) {
+        for (double fieldRate : new double[] {0.0, 1.0}) {
+          turret.setGoal(Rotation2d.fromDegrees(30.0), fieldRate);
+          for (int i = 0; i < 3; i++) {
+            RobotState.getInstance()
+                .addDriveSpeedsObservation(
+                    Timer.getFPGATimestamp(), new ChassisSpeeds(0.0, 0.0, omega));
+            step(1);
+          }
+          assertEquals(Turret.SystemState.AIMING, turret.getSystemState());
+          assertEquals(
+              fieldRate - omega,
+              turret.getCommandedVelocityRadPerSec(),
+              1e-9,
+              "chassis at " + omega + " rad/s, aim sweeping at " + fieldRate + " rad/s");
+        }
+      }
+    } finally {
+      // RobotState is a process-wide singleton: leave it with the chassis stopped.
+      for (int i = 0; i < 10; i++) {
+        RobotState.getInstance()
+            .addDriveSpeedsObservation(Timer.getFPGATimestamp(), new ChassisSpeeds());
+        step(1);
+      }
+    }
   }
 }
