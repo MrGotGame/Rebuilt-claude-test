@@ -35,10 +35,12 @@ and the two latent bugs M10 found in already-merged code. The second block is M1
 growing one retrofit step at a time: step 2 added the flywheel shot detector, step 3
 the intake's resting and feed-assist states and its two geometric predicates, step 4
 the intake-camera gate, step 5 both halves of the corrected interlock,
-step 6 the indexer's jam recovery and load reading, step 7 the superstructure switchover. Several
-M10 anchors name code that later M10b steps replace (the piece guard, the isStowed turret
-guard), and those entries must be rewritten against the new code in the step that
-changes it, not deleted. Adding a milestone means adding its
+step 6 the indexer's jam recovery and load reading, step 7 the superstructure switchover.
+Step 8 deleted the single-piece model and added no defects of its own -- a deletion has
+no new behaviour to break -- but it rewrote the piece-guard entry, which named the
+deleted hasPiece(). Several M10 anchors name code that later M10b steps replace (the
+piece guard, the isStowed turret guard), and those entries must be rewritten against
+the new code in the step that changes it, not deleted. Adding a milestone means adding its
 defects to the list and re-running the whole thing, so an old mutation cannot quietly
 stop being caught.
 
@@ -63,15 +65,19 @@ IX = "src/main/java/frc/robot/subsystems/indexer/Indexer.java"
 
 MUTATIONS = [
     # Re-anchored in M10b step 7, which removed the piece half of this guard (plan section 2.4). The
-    # first entry is the fault guard's deletion as before; the second is now the reverse question --
-    # the piece guard coming back -- and it names indexer.hasPiece(), so step 8, which deletes that
-    # method, must rewrite it again rather than let it "die" as a compile error.
+    # first entry is the fault guard's deletion as before; the second is the reverse question --
+    # the piece guard coming back. Step 7 wrote it against indexer.hasPiece(); step 8 deleted that
+    # method, and a mutation that no longer compiles would "die" to the compiler and prove nothing.
+    # So it is rewritten against isLoaded(), which the constants call the hopper-era replacement
+    # for "has a piece" and which is the guard a well-meaning edit would reach for. It gates
+    # nothing by design: gating on it would mean never scoring, since it is only true while
+    # feeding.
     ("critical-fault guard deleted", SS,
      "    if (FaultReporter.getInstance().anyCritical()) {\n      return SystemState.SPINNING_UP;\n    }",
      "    if (false) {\n      return SystemState.SPINNING_UP;\n    }"),
-    ("piece guard re-added, reverting step 7's decision", SS,
+    ("piece guard re-added as a load guard, reverting step 7's decision", SS,
      "    if (FaultReporter.getInstance().anyCritical()) {\n      return SystemState.SPINNING_UP;",
-     "    if (!indexer.hasPiece() || FaultReporter.getInstance().anyCritical()) {\n      return SystemState.SPINNING_UP;"),
+     "    if (!indexer.isLoaded() || FaultReporter.getInstance().anyCritical()) {\n      return SystemState.SPINNING_UP;"),
     ("usable-solution guard deleted", SS,
      "    if (!lastShot.isUsable() || turret.isOutOfRange()) {",
      "    if (turret.isOutOfRange()) {"),
