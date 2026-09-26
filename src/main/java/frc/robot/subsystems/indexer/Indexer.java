@@ -500,13 +500,12 @@ public class Indexer extends SubsystemBase {
         systemState == SystemState.FEEDING
             && stateTimer.hasElapsed(Constants.Indexer.kDetectionSettleSec.get());
 
-    // Loaded: slowed by something, both halves required, exactly as the piece detector's fallback
-    // predicate is -- a current spike alone fires on every acceleration, a shortfall alone on every
-    // new setpoint.
+    // Loaded: working against something, read from current alone. The old piece detector also
+    // demanded a velocity shortfall, to reject the current spike of every spin-up; the settle
+    // window in `measuring` now rejects that, and a shortfall requirement would only miss a stiff
+    // loop that pushes pieces while holding its speed. See Constants.Indexer.kLoadedCurrentAmps.
     boolean loadedSample =
-        measuring
-            && inputs.statorCurrentAmps > Constants.Indexer.kLoadedCurrentAmps.get()
-            && (goalRpm - inputs.velocityRpm) > Constants.Indexer.kLoadedVelocityDropRpm.get();
+        measuring && inputs.statorCurrentAmps > Constants.Indexer.kLoadedCurrentAmps.get();
 
     // Jammed: STOPPED by something. The current threshold sits above the loaded one, so a full
     // hopper slowing the wheel is not mistaken for a jam stopping it.

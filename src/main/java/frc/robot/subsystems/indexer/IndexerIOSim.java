@@ -141,13 +141,11 @@ public class IndexerIOSim implements IndexerIO {
       statorAmps = Math.max(statorAmps, Constants.Indexer.kJamCurrentAmps.get() * loadMargin);
       velocityRpm = 0.0;
     } else if (simulatedLoad && drivenForward) {
-      // Slowed by the pile, not stopped: above the loaded current, below the jam current, and a
-      // shortfall past the loaded threshold that leaves the wheel turning well above the jam speed.
+      // Working against the pile at full speed: above the loaded current, below the jam current,
+      // and the speed left alone. That is the stiff-loop case -- a well-tuned velocity loop holds
+      // its speed and shows the load only as current -- which is exactly the case the load
+      // reading must NOT miss, so it is the one simulated.
       statorAmps = Math.max(statorAmps, Constants.Indexer.kLoadedCurrentAmps.get() * loadMargin);
-      velocityRpm =
-          Math.max(
-              Constants.Indexer.kJamVelocityRpm.get() * 2.0,
-              velocityRpm - Constants.Indexer.kLoadedVelocityDropRpm.get() * loadMargin);
     }
 
     inputs.velocityRpm = velocityRpm;

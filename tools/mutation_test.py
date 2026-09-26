@@ -252,18 +252,18 @@ MUTATIONS = [
      "      case WAITING_FOR_TURRET -> {}"),
 
     # ---- M10b step 6: the indexer's jam recovery and load reading. The load reading attacked on
-    # each of its guards (the state test at the accessor, the settle window, the shortfall half of
-    # the predicate); the unjam policy on each of its bounds (the attempt limit, the pulse length,
-    # the latch, the per-request reset) and on what it commands.
+    # each of its guards (the state test at the accessor, the settle window, the current
+    # threshold); the unjam policy on each of its bounds (the attempt limit, the pulse length, the
+    # latch, the per-request reset) and on what it commands.
     ("loaded leaks out of FEEDING through the debounce", IX,
      "    return loaded && systemState == SystemState.FEEDING;",
      "    return loaded;"),
     ("load and jam ignore the spin-up settle window", IX,
      "        systemState == SystemState.FEEDING\n            && stateTimer.hasElapsed(Constants.Indexer.kDetectionSettleSec.get());",
      "        systemState == SystemState.FEEDING;"),
-    ("loaded needs only the current half", IX,
-     "            && inputs.statorCurrentAmps > Constants.Indexer.kLoadedCurrentAmps.get()\n            && (goalRpm - inputs.velocityRpm) > Constants.Indexer.kLoadedVelocityDropRpm.get();",
-     "            && inputs.statorCurrentAmps > Constants.Indexer.kLoadedCurrentAmps.get();"),
+    ("loaded ignores the current threshold", IX,
+     "        measuring && inputs.statorCurrentAmps > Constants.Indexer.kLoadedCurrentAmps.get();",
+     "        measuring;"),
     ("unjam attempts unbounded", IX,
      "      if (unjamAttempts >= Constants.Indexer.kMaxUnjamAttempts) {",
      "      if (false) {"),

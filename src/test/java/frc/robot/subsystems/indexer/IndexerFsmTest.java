@@ -218,23 +218,103 @@ public class IndexerFsmTest {
   }
 
   /**
-   * A feed starting from rest is neither loaded nor jammed while the wheel spins up.
+   * A feed starting from rest is neither loaded nor jammed while the wheel spins up, however slowly
+   * -- and the same trace, once past the settle window, does trip the jam detector.
    *
    * <p>Spin-up draws high current at low speed, which satisfies the load test AND the jam test at
-   * once -- the transient that once made the single-piece detector count shots nobody took. The
-   * settle window is the only thing between it and a spurious unjam pulse on every burst, so this
-   * case watches every loop of the start, not the end state.
+   * once. The settle window is the only thing between that and a spurious unjam pulse at the start
+   * of every burst, so the spin-up here deliberately looks exactly like a jam, for longer than the
+   * jam debounce and shorter than the window.
+   *
+   * <p>Scripted, not simulated. The first version drove the simulated indexer, which with its
+   * placeholder inertia reaches speed inside one 20 ms loop, so no transient ever showed up and the
+   * case passed with the settle window deleted. A real indexer starting against a packed hopper is
+   * not that quick. The positive control at the end proves the scripted stall is one the detector
+   * can see at all.
    */
   @Test
-  void aSpinUpFromRestIsNeitherLoadedNorJammed() {
+  void aSlowSpinUpIsNeitherLoadedNorJammedButALaterStallIs() {
+    int settleLoops = (int) (Constants.Indexer.kDetectionSettleSec.get() / LOOP_SEC);
+    int jamDebounceLoops = (int) Math.ceil(Constants.Indexer.kJamDetectSec.get() / LOOP_SEC);
+    int spinUpLoops = settleLoops - 3;
+    assertTrue(
+        spinUpLoops > jamDebounceLoops + 2,
+        "the scripted spin-up must outlast the jam debounce, or this case tests nothing");
+
+    StallScriptIO script = new StallScriptIO(spinUpLoops);
+    CommandScheduler.getInstance().unregisterSubsystem(indexer);
+    indexer = new Indexer(script);
+
     indexer.setWantedState(Indexer.WantedState.FEED);
-    for (int i = 0; i < loadDetectionLoops(); i++) {
+    for (int i = 0; i < spinUpLoops + 30; i++) {
       step(1);
-      assertFalse(indexer.isLoaded(), "spin-up read as a load at loop " + i);
+      assertFalse(indexer.isLoaded(), "the spin-up read as a load at loop " + i);
       assertEquals(
           Indexer.SystemState.FEEDING,
           indexer.getSystemState(),
-          "spin-up read as a jam at loop " + i);
+          "the spin-up read as a jam at loop " + i);
+    }
+
+    // Positive control: the same stall, now that the window has passed, is a jam.
+    script.stalled = true;
+    boolean sawUnjam = false;
+    for (int i = 0; i < 3 * jamDebounceLoops && !sawUnjam; i++) {
+      step(1);
+      sawUnjam = indexer.getSystemState() == Indexer.SystemState.UNJAMMING;
+    }
+    assertTrue(sawUnjam, "a stall past the settle window was not detected as a jam");
+  }
+
+  /**
+   * An indexer IO that reports a scripted stall: for the first loops of any forward feed, and again
+   * whenever {@link #stalled} is set, it reads as stopped against well over the jam current;
+   * otherwise it reads as at speed and barely loaded.
+   */
+  private static final class StallScriptIO implements IndexerIO {
+    private final int spinUpLoops;
+    private double goalRpm = 0.0;
+    private int loopsFeeding = 0;
+
+    /** Set by the case to stall the wheel after the spin-up. */
+    boolean stalled = false;
+
+    /**
+     * Builds a script whose spin-up looks stalled for a given number of loops.
+     *
+     * @param spinUpLoops loops, from the start of a forward feed, that read as stalled
+     */
+    StallScriptIO(int spinUpLoops) {
+      this.spinUpLoops = spinUpLoops;
+    }
+
+    /**
+     * Reports the scripted stall or the at-speed reading.
+     *
+     * @param inputs the struct to populate
+     */
+    @Override
+    public void updateInputs(IndexerIOInputs inputs) {
+      inputs.connected = true;
+      loopsFeeding = goalRpm > 0.0 ? loopsFeeding + 1 : 0;
+      boolean stalledNow = goalRpm > 0.0 && (loopsFeeding <= spinUpLoops || stalled);
+      inputs.velocityRpm = stalledNow ? 0.5 * Constants.Indexer.kJamVelocityRpm.get() : goalRpm;
+      inputs.statorCurrentAmps = stalledNow ? 1.5 * Constants.Indexer.kJamCurrentAmps.get() : 2.0;
+    }
+
+    /**
+     * Records the commanded speed.
+     *
+     * @param velocityRpm the speed, in RPM
+     */
+    @Override
+    public void setVelocity(double velocityRpm) {
+      goalRpm = velocityRpm;
+    }
+
+    /** Records a stop. */
+    @Override
+    public void stop() {
+      goalRpm = 0.0;
     }
   }
 

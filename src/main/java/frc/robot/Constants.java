@@ -685,19 +685,21 @@ public final class Constants {
      * <p>"Loaded" is the hopper-era replacement for "has a piece". It is evaluated only while
      * FEEDING forward, where it can mean something, and it gates nothing: it only stops {@code
      * Superstructure.likelyEmpty()} from concluding the hopper is empty while the indexer is
-     * visibly still moving pieces. Both halves are required, as with the old detector, because a
-     * current spike alone fires on every acceleration.
+     * visibly still moving pieces.
      *
-     * <p>Starts at the same values as {@link #kHasPieceCurrentAmps} and {@link
-     * #kHasPieceVelocityDropRpm}, which it supersedes; those are deleted in M10b's final step.
-     * TODO: tune from Indexer/Inputs while feeding a full hopper and then an empty one.
+     * <p>CURRENT ALONE, unlike the old piece detector, which also required a velocity shortfall.
+     * The shortfall half existed only to reject acceleration -- a current spike fires on every
+     * spin-up -- and the spin-up settle window ({@link #kDetectionSettleSec}) now does that job.
+     * What the shortfall half would add is a miss: a stiff velocity loop pushing pieces holds its
+     * speed and shows the load only as extra current. The first mutation run of step 6 is what
+     * showed the half was doing nothing, and its companion constant was removed.
+     *
+     * <p>Starts at the same value as {@link #kHasPieceCurrentAmps}, which it supersedes and which
+     * is deleted in M10b's final step. TODO: tune from Indexer/Inputs while feeding a full hopper
+     * and then an empty one; the threshold belongs between the two steady currents.
      */
     public static final LoggedTunableNumber kLoadedCurrentAmps =
         new LoggedTunableNumber("Indexer/LoadedCurrent", 25.0);
-
-    /** Velocity shortfall below goal that, with {@link #kLoadedCurrentAmps}, means loaded, RPM. */
-    public static final LoggedTunableNumber kLoadedVelocityDropRpm =
-        new LoggedTunableNumber("Indexer/LoadedVelDrop", 400.0);
 
     /** Debounce on the loaded predicate, both edges, seconds. Added for M10b. */
     public static final LoggedTunableNumber kLoadedDebounceSec =
