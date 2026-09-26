@@ -168,7 +168,8 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` | **Simulation checkpoint complete** — all eleven steps done; 159 tests, 0 skipped, mutation score 98/99 (the survivor is M10's documented equivalent mutant); hardware checkpoint outstanding. Replanned 2026-09-24 (plan §2.4); change order and write-up below |
 | M11 | Stationary shooting: the shot tables, measured in bursts | `feature-still-shot` | **Code complete in simulation** — all six steps done; 166 tests, 0 skipped, mutation score 109/110 (the survivor is M10's documented equivalent mutant). **The checkpoint needs the robot**: the procedure is below |
 | M12 | Shoot on the move | `feature-sotm` | **Simulation checkpoint complete** — 171 tests, 0 skipped, mutation score 116/117 (the survivor is M10's documented equivalent mutant). **Found and fixed a double-counted velocity in the solver that dated from M3.** Hardware checkpoint outstanding |
-| M13+ | Autos, hardening | not started | — |
+| M13 | Autos: `AutoFactory`, `AutoRoutines`, `AutoSelector` | `feature-autos` | **In progress** — step order below |
+| M14 | Competition hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
@@ -670,6 +671,59 @@ is recorded under "Vacuous passes" below.
 while strafing at 2 m/s or more, with `Superstructure/Shot/VirtualGoal` leading correctly on
 AdvantageScope's 2D field and `Superstructure/Shot/Iterations` below the cap. It needs M11's
 measured tables first.
+
+### M13: autonomous routines
+
+M13 is the plan's §4.12 and §8: `AutoFactory`, `AutoRoutines` and `AutoSelector`, the paths of
+§8.4, and §8.6's verification order. M10b step 9 already moved the auto skeletons onto the hopper
+vocabulary, and implemented the two pieces that need no PathPlanner (`waitUntilIntakeRetaining()`
+and `Auto/PreloadFired`). Everything that touches PathPlanner is still a skeleton, and
+`getAutonomousCommand()` returns `Commands.none()`.
+
+**Where the work happens.** `feature-autos`, cut from `feature-sotm`, in its own sibling directory.
+`feature-sotm` contains every other branch's code and M12's solver fix, which the moving shots in
+auto depend on.
+
+**What the agent cannot do, and so what M13 leaves for Joshua.** The paths and `.auto` files are
+drawn in the PathPlanner GUI with the REBUILT field selected (§8.4), and the agent cannot drive a
+GUI. Nothing in the plan says where a piece is staged or where a scoring position is, and the field
+constants are still 0.0. So the code is built and tested against **synthetic paths built in the
+tests**, through a path-loading seam, and the real paths are drawn afterwards. The three real-field
+runs in the checkpoint need the robot.
+
+**Four things found while planning, before any code**, each checked against the code or the
+PathplannerLib 2026.1.2 jar:
+
+- **Two alliance flips that disagree.** `AutoBuilder` flips a red path with PathPlanner's own
+  `FlippingUtil`, whose field defaults to 16.54 × 8.07 m. Everything else flips with
+  `AllianceFlipUtil` over `Constants.Field`. A red auto would drive to places computed on a
+  different field from the goal it aims at. This is the plan's risk #4, which says to settle it in
+  M13.
+- **`settings.json` disagrees with `TunerConstants` on almost every drivetrain value**: wheel
+  radius, gearing, free speed, current limit and module positions. The plan's
+  `RobotConfig.fromGUISettings()` would have put a second, wrong config beside `Drive.PP_CONFIG`,
+  which is the failure the plan warns about. `Drive.PP_CONFIG` is already built from
+  `TunerConstants`, which is authoritative.
+- **`spinUpWhile(shootInPlace(...))`, as the plan writes `preloadOnly`, never fires.**
+  `setWantedStateCommand` is a one-shot, and a deadline group initialises its deadline first. So
+  the outer `SPIN_UP` lands after the inner `SCORE_STATIONARY` and overwrites it, and the preload
+  waits out its whole timeout. For the same reason, a one-shot `AUTO_SCORE_ON_MOVE` in
+  `driveAndShoot` keeps shooting into the next leg.
+- **`PathPlannerAuto.getStartingPoseFromAutoFile` does not exist** in 2026.1.2. The start pose
+  comes from `getPathGroupFromAutoFile` and the first path's `getStartingHolonomicPose()`. And
+  `fromPathFile` also throws `FileVersionException`.
+
+| # | Step | Files | Done when |
+|---|---|---|---|
+| 0 | Branch setup and baseline | — | Branch builds; 171 tests pass. |
+| 1 | **One `RobotConfig`** | `Drive`, `AutoFactory`, new `AutoFactoryTest` | `AutoFactory` uses `Drive.PP_CONFIG`, and `AutoFactory.PP_CONFIG`, a second name that was always null, is deleted. `Drive`'s private copies of mass, MOI and wheel friction read `Constants.Drivetrain` instead. `settings.json` is read only to be compared with the robot's config. Each field that disagrees is named in a warning alert, so the GUI's previews cannot quietly drift from what the robot runs. A case per compared field. |
+| 2 | **Configure `AutoBuilder`, with one flip** | `AutoFactory`, `AutoFactoryTest` | `AutoBuilder.configure` is wired to `RobotState` (pose, reset, robot-relative speeds) and to the feedforward overload of `runVelocity`. `LocalADStarAK` and the two logging callbacks are installed. The flip callback puts `FlippingUtil` on rotational symmetry and on `Constants.Field`'s size before PathPlanner reads it. On red, a path flipped by PathPlanner starts exactly where `AllianceFlipUtil` puts its blue start. |
+| 3 | **Load paths and autos, loudly** | `AutoFactory`, `AutoFactoryTest` | `followPath`, `buildAuto`, `resetPoseToPathStart` and `getStartingPose`. A missing or unreadable file gives `Commands.none()` and a warning naming it. It is a WARNING, not an error, because gate term 8 refuses to score on any error, and a missing path must not stop teleop scoring. The pose reset uses the flipped start on red. Paths come through a loader the tests can replace. |
+| 4 | **The marker vocabulary** | `AutoFactory`, `AutoFactoryTest` | The eleven §8.2 names are registered and each does what the table says. A case reads every `.path` and `.auto` under `src/main/deploy/pathplanner` and fails on any marker or named command that is not registered. That silent skip is §8.2's most common failure, and this case is the only guard it can have. |
+| 5 | **The building blocks** | `AutoRoutines`, `AutoFactory.scoreStationaryCommand`, `AutoRoutinesTest` | Each block holds its request for exactly as long as its leg, and hands back `DEFAULT` when the leg ends, rather than setting a one-shot that leaks into the next leg. `spinUpWhile` wraps only legs that make no shooter-side request of their own. The cases run over a simulated robot following synthetic paths. |
+| 6 | **The routines, in §8.6's order** | `AutoRoutines`, `AutoRoutinesTest` | `Leave`, `Preload Only`, `Center 3`, a stationary-scoring `Center 3` for §8.6 step 3, `Center 5`, then `Amp 3`, `Source 3`, `Source Steal` and `Scavenge`. The simulation checkpoint: each of the eight runs to its end over synthetic paths, `StowedWhileMoving` is never true, nothing moves before the intake retains, and `Auto/PreloadFired` reads 8 at the end of `Preload Only`. |
+| 7 | **The selector and the wiring** | `AutoSelector`, `RobotContainer`, `Robot`, new `AutoSelectorTest` | Ten chooser entries with `Do Nothing` the default, `get()` never null, the selected name tracked and logged, and the start-pose preview. `AutoSelector/StartPoseError` is under 5 cm with the robot placed on the start, and the warning fires when it is not. Also `getAutonomousCommand()`, the disabled preview, `autonomousExit`'s log, and the tuning-mode characterization entries. |
+| 8 | **Verify, then record** | harness, this file, `CONTEXT_AND_CONVENTIONS.md` | A mutation pass on the flip, the loud failures, the leg-scoped requests, and the preview alert. The list of paths and `.auto` files for Joshua to draw. **The real-field clauses (`Leave`, `Preload Only` and `Center 3` on the field) stay outstanding.** |
 
 ### The intake camera is not where the plan says it is
 
