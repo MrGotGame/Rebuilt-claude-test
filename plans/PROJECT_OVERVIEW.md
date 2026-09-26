@@ -168,7 +168,7 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` | **Simulation checkpoint complete** — all eleven steps done; 159 tests, 0 skipped, mutation score 98/99 (the survivor is M10's documented equivalent mutant); hardware checkpoint outstanding. Replanned 2026-09-24 (plan §2.4); change order and write-up below |
 | M11 | Stationary shooting: the shot tables, measured in bursts | `feature-still-shot` | **Code complete in simulation** — all six steps done; 166 tests, 0 skipped, mutation score 109/110 (the survivor is M10's documented equivalent mutant). **The checkpoint needs the robot**: the procedure is below |
 | M12 | Shoot on the move | `feature-sotm` | **Simulation checkpoint complete** — 171 tests, 0 skipped, mutation score 116/117 (the survivor is M10's documented equivalent mutant). **Found and fixed a double-counted velocity in the solver that dated from M3.** Hardware checkpoint outstanding |
-| M13 | Autos: `AutoFactory`, `AutoRoutines`, `AutoSelector` | `feature-autos` | **In progress** — step order below |
+| M13 | Autos: `AutoFactory`, `AutoRoutines`, `AutoSelector` | `feature-autos` | **Simulation checkpoint complete** — all eight routines run to their ends on both alliances; 241 tests, 0 skipped, mutation score 154/155. **The paths are not drawn yet** (list below), and the three real-field runs need the robot |
 | M14 | Competition hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
@@ -692,7 +692,8 @@ tests**, through a path-loading seam, and the real paths are drawn afterwards. T
 runs in the checkpoint need the robot.
 
 **Four things found while planning, before any code**, each checked against the code or the
-PathplannerLib 2026.1.2 jar:
+PathplannerLib 2026.1.2 jar. The third was half wrong, and the code found out; the correction is
+kept beside it rather than rewriting what was believed at the time.
 
 - **Two alliance flips that disagree.** `AutoBuilder` flips a red path with PathPlanner's own
   `FlippingUtil`, whose field defaults to 16.54 × 8.07 m. Everything else flips with
@@ -709,21 +710,94 @@ PathplannerLib 2026.1.2 jar:
   the outer `SPIN_UP` lands after the inner `SCORE_STATIONARY` and overwrites it, and the preload
   waits out its whole timeout. For the same reason, a one-shot `AUTO_SCORE_ON_MOVE` in
   `driveAndShoot` keeps shooting into the next leg.
+  **Correction (step 5): `preloadOnly` does fire.** `shootInPlace` begins with a drive stop, which
+  puts its `SCORE_STATIONARY` one step after the spin-up, and a mutation run with the plan's exact
+  form showed the preload firing. The ordering fault is real but latent: it bites a leg whose FIRST
+  action is a shooter request, such as `spinUpWhile(driveAndShoot(...))`, and a case now pins it
+  on one. The one-shot outliving its leg was right as written.
 - **`PathPlannerAuto.getStartingPoseFromAutoFile` does not exist** in 2026.1.2. The start pose
   comes from `getPathGroupFromAutoFile` and the first path's `getStartingHolonomicPose()`. And
   `fromPathFile` also throws `FileVersionException`.
 
 | # | Step | Files | Done when |
 |---|---|---|---|
-| 0 | Branch setup and baseline | — | Branch builds; 171 tests pass. |
-| 1 | **One `RobotConfig`** | `Drive`, `AutoFactory`, new `AutoFactoryTest` | `AutoFactory` uses `Drive.PP_CONFIG`, and `AutoFactory.PP_CONFIG`, a second name that was always null, is deleted. `Drive`'s private copies of mass, MOI and wheel friction read `Constants.Drivetrain` instead. `settings.json` is read only to be compared with the robot's config. Each field that disagrees is named in a warning alert, so the GUI's previews cannot quietly drift from what the robot runs. A case per compared field. |
-| 2 | **Configure `AutoBuilder`, with one flip** | `AutoFactory`, `AutoFactoryTest` | `AutoBuilder.configure` is wired to `RobotState` (pose, reset, robot-relative speeds) and to the feedforward overload of `runVelocity`. `LocalADStarAK` and the two logging callbacks are installed. The flip callback puts `FlippingUtil` on rotational symmetry and on `Constants.Field`'s size before PathPlanner reads it. On red, a path flipped by PathPlanner starts exactly where `AllianceFlipUtil` puts its blue start. |
-| 3 | **Load paths and autos, loudly** | `AutoFactory`, `AutoFactoryTest` | `followPath`, `buildAuto`, `resetPoseToPathStart` and `getStartingPose`. A missing or unreadable file gives `Commands.none()` and a warning naming it. It is a WARNING, not an error, because gate term 8 refuses to score on any error, and a missing path must not stop teleop scoring. The pose reset uses the flipped start on red. Paths come through a loader the tests can replace. |
-| 4 | **The marker vocabulary** | `AutoFactory`, `AutoFactoryTest` | The eleven §8.2 names are registered and each does what the table says. A case reads every `.path` and `.auto` under `src/main/deploy/pathplanner` and fails on any marker or named command that is not registered. That silent skip is §8.2's most common failure, and this case is the only guard it can have. |
-| 5 | **The building blocks** | `AutoRoutines`, `AutoFactory.scoreStationaryCommand`, `AutoRoutinesTest` | Each block holds its request for exactly as long as its leg, and hands back `DEFAULT` when the leg ends, rather than setting a one-shot that leaks into the next leg. `spinUpWhile` wraps only legs that make no shooter-side request of their own. The cases run over a simulated robot following synthetic paths. |
-| 6 | **The routines, in §8.6's order** | `AutoRoutines`, `AutoRoutinesTest` | `Leave`, `Preload Only`, `Center 3`, a stationary-scoring `Center 3` for §8.6 step 3, `Center 5`, then `Amp 3`, `Source 3`, `Source Steal` and `Scavenge`. The simulation checkpoint: each of the eight runs to its end over synthetic paths, `StowedWhileMoving` is never true, nothing moves before the intake retains, and `Auto/PreloadFired` reads 8 at the end of `Preload Only`. |
-| 7 | **The selector and the wiring** | `AutoSelector`, `RobotContainer`, `Robot`, new `AutoSelectorTest` | Ten chooser entries with `Do Nothing` the default, `get()` never null, the selected name tracked and logged, and the start-pose preview. `AutoSelector/StartPoseError` is under 5 cm with the robot placed on the start, and the warning fires when it is not. Also `getAutonomousCommand()`, the disabled preview, `autonomousExit`'s log, and the tuning-mode characterization entries. |
-| 8 | **Verify, then record** | harness, this file, `CONTEXT_AND_CONVENTIONS.md` | A mutation pass on the flip, the loud failures, the leg-scoped requests, and the preview alert. The list of paths and `.auto` files for Joshua to draw. **The real-field clauses (`Leave`, `Preload Only` and `Center 3` on the field) stay outstanding.** |
+| 0 | Branch setup and baseline | — | Branch builds; 171 tests pass. **Done: `8dc197c`, `feature-sotm`'s tip plus this plan.** |
+| 1 | **One `RobotConfig`** | `Drive`, `AutoFactory`, new `AutoFactoryTest` | `AutoFactory` uses `Drive.PP_CONFIG`, and `AutoFactory.PP_CONFIG`, a second name that was always null, is deleted. `Drive`'s private copies of mass, MOI and wheel friction read `Constants.Drivetrain` instead. `settings.json` is read only to be compared with the robot's config. Each field that disagrees is named in a warning alert, so the GUI's previews cannot quietly drift from what the robot runs. A case per compared field. **Done: `c69dcd8`. The shipped `settings.json` cannot even be parsed: it is an older format, and PathplannerLib 2026 fails on it with a `NullPointerException` from inside its parser, not the exceptions it declares. The warning says "unreadable" today, and a case pins that the check never throws. `Drive`'s private copies of mass, MOI and friction now read `Constants.Drivetrain`.** |
+| 2 | **Configure `AutoBuilder`, with one flip** | `AutoFactory`, `AutoFactoryTest` | `AutoBuilder.configure` is wired to `RobotState` (pose, reset, robot-relative speeds) and to the feedforward overload of `runVelocity`. `LocalADStarAK` and the two logging callbacks are installed. The flip callback puts `FlippingUtil` on rotational symmetry and on `Constants.Field`'s size before PathPlanner reads it. On red, a path flipped by PathPlanner starts exactly where `AllianceFlipUtil` puts its blue start. **Done: `82bea85`. The case first sets PathPlanner's flip back to how it ships and confirms the two DISAGREE, so it cannot pass on a coincidence. A new harness, `SimulatedAutoRobot`, runs the whole robot on the real command scheduler with `Drive` on `ModuleIOSim`; a path drives it to its end on both alliances. The controller gains moved into `Constants.Auto`.** |
+| 3 | **Load paths and autos, loudly** | `AutoFactory`, `AutoFactoryTest` | `followPath`, `buildAuto`, `resetPoseToPathStart` and `getStartingPose`. A missing or unreadable file gives `Commands.none()` and a warning naming it. It is a WARNING, not an error, because gate term 8 refuses to score on any error, and a missing path must not stop teleop scoring. The pose reset uses the flipped start on red. Paths come through a loader the tests can replace. **Done: `bb49bb0`. A case found that the `PathPlannerAuto` constructor catches a missing file ITSELF and quietly builds an empty auto, so the plan's try/catch never fires; `buildAuto` now reads the file's path group first, which does throw. The reset reads the alliance when it runs, not when the routine is built at boot.** |
+| 4 | **The marker vocabulary** | `AutoFactory`, `AutoFactoryTest` | The eleven §8.2 names are registered and each does what the table says. A case reads every `.path` and `.auto` under `src/main/deploy/pathplanner` and fails on any marker or named command that is not registered. That silent skip is §8.2's most common failure, and this case is the only guard it can have. **Done: `8dca093`. Two entries in the §8.2 table are corrected rather than registered: `StowTurret` commanded the turret directly, which the superstructure overwrites on the next loop, so it now requests `DEFAULT`; and `GamePiecePipeline`/`TagPipeline` are dropped, because since M10b the superstructure switches the camera itself on the intaking edge. The scan passes trivially while nothing is drawn, so a second case proves the scanner finds nested names. The intake wait became `AutoRoutines.waitUntilRetaining(Intake)`, so `AutoRoutinesTest` no longer builds a factory of nulls.** |
+| 5 | **The building blocks** | `AutoRoutines`, `AutoFactory.scoreStationaryCommand`, `AutoRoutinesTest` | Each block holds its request for exactly as long as its leg, and hands back `DEFAULT` when the leg ends, rather than setting a one-shot that leaks into the next leg. `spinUpWhile` wraps only legs that make no shooter-side request of their own. The cases run over a simulated robot following synthetic paths. **Done: `e504249`. `AutoFactory.holdWantedState` sets a request when a leg starts and hands back `DEFAULT` however it ends, which also stops a cancelled stationary shot leaking its request. `spinUpWhile` sets `SPIN_UP` BEFORE the inner leg, so the leg's own requests win whatever their order. `aimTurretAt` is deleted (inert, since the superstructure overwrites turret requests, and redundant, since spinning up pre-aims), and the factory no longer takes the turret. New `kPreloadTimeoutSec` (4 s).** |
+| 6 | **The routines, in §8.6's order** | `AutoRoutines`, `AutoRoutinesTest` | `Leave`, `Preload Only`, `Center 3`, a stationary-scoring `Center 3` for §8.6 step 3, `Center 5`, then `Amp 3`, `Source 3`, `Source Steal` and `Scavenge`. The simulation checkpoint: each of the eight runs to its end over synthetic paths, `StowedWhileMoving` is never true, nothing moves before the intake retains, and `Auto/PreloadFired` reads 8 at the end of `Preload Only`. **Done: `12a15bc`, `5311e8a`. It runs on BOTH alliances (risk #4). The checkpoint found a real bug in step 5: `shootInPlace` stopped the drive once, but `Drive`'s setpoint generator ramps one zero request down over several loops, so a robot arriving on a moving path rolled on and the stationary Center 3 drifted twenty metres; the stop is now held. A teleporting test pivot made "nothing moves before the intake retains" unfalsifiable, so the harness pivot now takes half a second. And a mutation showed the stationary preload hid a missing wait, so the clause became "nothing at all before the intake retains".** |
+| 7 | **The selector and the wiring** | `AutoSelector`, `RobotContainer`, `Robot`, new `AutoSelectorTest` | Ten chooser entries with `Do Nothing` the default, `get()` never null, the selected name tracked and logged, and the start-pose preview. `AutoSelector/StartPoseError` is under 5 cm with the robot placed on the start, and the warning fires when it is not. Also `getAutonomousCommand()`, the disabled preview, `autonomousExit`'s log, and the tuning-mode characterization entries. **Done: `d17b17c`. One chooser of routine NAMES replaces the skeleton's two parallel choosers, whose selections could not stay in step. `FaultReporter.periodic()` was never called, so every registered fault was silent on the dashboard; `robotPeriodic` now calls it. The characterization entries are left for M6: all eight are still `Commands.none()` skeletons. The red preview case found a harness bug (see the write-up). Booting the real `RobotContainer` in simulation reached "startup complete" with no exception and warned once per undrawn path.** |
+| 8 | **Verify, then record** | harness, this file, `CONTEXT_AND_CONVENTIONS.md` | A mutation pass on the flip, the loud failures, the leg-scoped requests, and the preview alert. The list of paths and `.auto` files for Joshua to draw. **The real-field clauses (`Leave`, `Preload Only` and `Center 3` on the field) stay outstanding.** **Done: harness `4c64aa2`; 154/155, the survivor being M10's known equivalent. 38 M13 entries, every one killed by hand in its step first; M10b's four intake-wait entries re-anchored.** |
+
+### M13, and the tests that could not have failed
+
+M13 turned the auto skeletons into eight running routines, a selector with a placement preview,
+and a PathPlanner configuration that is checked rather than trusted. The suite went from 171 tests
+to 241, and the harness from 117 entries to 155. **No path has been drawn** and nothing has run
+on a field.
+
+**Paths to draw in the PathPlanner GUI**, with the REBUILT field selected and `navgrid.json`
+regenerated first (§4.15). Names are exact; `AutoFactoryTest` fails on any marker a drawn file uses
+that is not registered, and the robot warns at boot about any of these that is missing:
+
+| Path | Used by | Ends |
+|---|---|---|
+| `Leave` | Leave | stopped, past the line |
+| `Center_Preload` | Preload Only | stopped |
+| `Center_ToPiece1`, `Center_ToPiece2`, `Center_ToPiece3` | Center 3/5, Scavenge's fallback waypoints | slow |
+| `Center_Score1`, `Center_Score2`, `Center_Score3` | Center 3/5 | **moving** |
+| `Amp_ToPiece1`, `Amp_Score1`, `Amp_ToPiece2`, `Amp_Score2` | Amp 3 | slow / moving |
+| `Source_ToPiece1`, `Source_Score1`, `Source_ToPiece2`, `Source_Score2` | Source 3 | slow / moving |
+| `Source_Steal` | Source Steal | any |
+
+Draw everything blue. Each routine starts on its first path's start, pre-aimed at the goal: that is
+the pose the preview ghost shows and the one `AutoSelector/StartPoseError` measures against. No
+`.auto` files are needed; the routines are Java. The Amp and Source names come from an earlier game
+and §8.3 already says to redraw the list around sweeps once the REBUILT layout is known. **Also
+open the project in the GUI and set the drivetrain values from `TunerConstants`**, which clears the
+"settings.json unreadable" warning.
+
+**On the field, in §8.6's order:** `Leave`, then `Preload Only` (`Auto/PreloadFired` should read 8),
+then `Center 3 (stationary)` (tuning mode only), then `Center 3`, then `Center 5`. Place the robot
+until `AutoSelector/StartPoseError` reads under 5 cm first.
+
+**The theme was not bugs in the new code. It was tests that could not have failed.** It happened
+four ways, and all four were caught only because the suite was attacked rather than trusted:
+
+- **A mechanism faster than the claim.** The test intake reports its goal on the very next loop, so
+  "nothing moves before the intake retains" held whether or not a routine waited at all.
+  `SlowPivotIO` brings the arm down in half a second, and the clause became falsifiable.
+- **A slow step hiding a missing one.** Every scoring routine opens with a stationary preload that
+  takes seconds, so the intake was always down before the first move. Deleting the wait survived
+  mutation. The clause is structural -- every routine STARTS with the wait -- so the checkpoint now
+  requires that nothing at all happen before the intake retains.
+- **A precondition read before its state existed.** Every red test flipped its start with
+  `AllianceFlipUtil` BEFORE the harness told the driver station it was red, so the flip was a
+  no-op and every red robot stood on the blue start. The routines' pose resets hid it; one path
+  case started 8 m from its path and still passed by chasing it down. The selector's red preview
+  case was the first that could not hide it.
+- **A mutation that tests a different defect.** "The gearing is not compared" was first written as
+  zeroing one side, which makes the gearing ALWAYS mismatch; a dozen cases killed it for the wrong
+  reason. Rewritten as a deletion, one case kills it.
+
+**The plan was wrong in ways only the running code could show.** `PathPlannerAuto` swallows a
+missing file, so the plan's try/catch never fires. PathPlanner flips red paths on a field from an
+earlier season. `settings.json` cannot be parsed at all, and would have been the wrong config if it
+could. Two §8.2 markers did nothing, because the superstructure overwrites them within a loop. A
+one-shot request outlives its leg, and a single drive stop does not stop a drivetrain behind a
+setpoint generator. And `FaultReporter` had never been polled, so every fault ever registered with
+it was silent on the robot. The planning note that `preloadOnly` never fired was itself wrong, and a
+mutation run is what showed it.
+
+**What the checkpoint does not show.** The moving scoring legs fire nothing in simulation: after
+each pickup the simulated turret is still ringing on its placeholder gains (M10b's finding, M6's to
+fix). Only the stationary preloads, and some of Scavenge's stops, fire. So the checkpoint proves the
+routines are wired, in order, with the right requests, to the right places. M12 proved the moving
+shot. The synthetic paths prove nothing about the real field. The eight routines fit the 15 s period
+on the synthetic field (Center 5 is the longest at 12.3 s), and the stationary diagnostic takes
+about 25 s, waiting out the ringing at every stop.
 
 ### The intake camera is not where the plan says it is
 
@@ -798,8 +872,10 @@ These affect everything downstream and are not bugs in any one branch:
   drawings or the AprilTag layout JSON.
 - **The shot tables are all zeros.** `ShootingSolver` correctly returns an invalid shot rather than
   an infinite flywheel command, but cannot aim until the tables are measured on a real field.
-- **PathPlanner is unconfigured.** `AutoFactory.configureAutoBuilder()` is unimplemented, so every
-  autonomous routine resolves to `Commands.none()` — silently.
+- **No path is drawn.** PathPlanner is configured and every routine is implemented on
+  `feature-autos` (M13), but the paths are drawn in the GUI on the REBUILT field, and until they
+  are, every routine that follows one warns at boot and does nothing but its preload. The M13
+  record lists them. `settings.json` also needs re-saving from the GUI.
 - **One camera mounting transform is still identity.** `kRobotToTurretAxis`, `kTurretToCamera`
   and `kRobotToIntakeCamera` have been **measured from CAD** and carry real values;
   `kRobotToQuest` remains `TODO: MEASURE`, because the headset is a tessellated placeholder in
@@ -899,6 +975,12 @@ These are the shapes to look for, because each one was live in committed code:
   test is the only way out.
 - **A mutation that no longer compiles** counts as a kill in a harness that treats any failed build
   as one. After deleting code, re-check every entry that names it.
+- **A precondition read before the state it depends on.** A red test flipped its start with
+  `AllianceFlipUtil` before the driver station was set to red, so every red robot stood on the blue
+  start. When a helper reads global state, check WHEN it reads it. (M13)
+- **A slow step can hide a missing one.** A stationary preload that takes seconds made deleting the
+  intake wait invisible to "nothing moves before the intake retains". Assert the structure the
+  claim is about, not only one of its consequences. (M13)
 - **A test of a correction's DIRECTION passes a correction applied twice.** The moving-shot solver
   had "lead against the motion" tests from M3 on, and it compensated the robot's velocity twice
   until M12. Test the OUTCOME the correction exists for, which here is where the piece lands.
