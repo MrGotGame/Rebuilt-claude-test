@@ -2041,6 +2041,92 @@ public class SuperstructureFsmTest {
   }
 
   /**
+   * The burst latch belongs to one burst: it is clear until the gate first opens, so the first
+   * piece meets the tight band; it sets when the gate opens; and it clears when the robot stops
+   * scoring, so the next burst starts tight again.
+   *
+   * <p>Added by step 10's mutation pass. {@link #burstLatchKeepsFeedingThroughRecovery} proves the
+   * latch holds the feed open once set and clears on a lost vision term, but no case asserted
+   * either end of its life: a latch that set as soon as every other term held, or that survived a
+   * return to rest, both passed every test while letting a burst's first piece leave a wheel that
+   * was only inside the wide band.
+   */
+  @Test
+  void theBurstLatchBelongsToOneBurst() {
+    buildFiringRobot();
+    double horizon = Constants.getLoopPeriodSec() * 2.0;
+
+    for (int burst = 0; burst < 2; burst++) {
+      superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+      for (int i = 0; i < TURRET_SETTLE_LOOPS && !superstructure.isReadyToScore(); i++) {
+        assertFalse(
+            superstructure.isBurstLatched(),
+            "burst " + burst + ": the latch set before the gate had opened, loop " + i);
+        stepWithVision(1);
+      }
+      assertTrue(superstructure.isReadyToScore(), "burst " + burst + ": the gate never opened");
+      assertTrue(
+          shooter.willBeAtSpeedIn(horizon),
+          "burst " + burst + ": the gate opened on a wheel outside the tight band");
+      stepWithVision(3);
+      assertTrue(
+          superstructure.isBurstLatched(), "burst " + burst + ": the open gate did not latch");
+
+      superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+      stepWithVision(5);
+      assertFalse(
+          superstructure.isBurstLatched(),
+          "burst " + burst + ": the latch survived the robot going back to rest");
+    }
+  }
+
+  /**
+   * Every request that shoots runs the floor roller, including the autos' and a request the
+   * superstructure has diverted because the shot is not ready.
+   *
+   * <p>Added by step 10's mutation pass. Plan section 2.4: "shot requested" means the WANTED state,
+   * so the floor roller also runs while a score request waits in WAITING_FOR_TURRET or SPINNING_UP,
+   * with the pile already packed against the stopped indexer. {@link
+   * #floorRollerLeadsAndIndexerGates} requests only SCORE_ON_MOVE, and on a robot where it is not
+   * diverted, so a roller keyed on the system state, or one that forgot AUTO_SCORE_ON_MOVE and so
+   * never led in autonomous, passed it. This robot runs the shipped all-zero shot tables, so every
+   * aimed request is diverted.
+   */
+  @Test
+  void everyShotRequestRunsTheFloorRollerEvenWhenDiverted() {
+    placeRobotAt(-3.0, 0.0);
+    homeAndSettle();
+
+    Superstructure.WantedState[] shooting = {
+      Superstructure.WantedState.SCORE_ON_MOVE,
+      Superstructure.WantedState.SCORE_STATIONARY,
+      Superstructure.WantedState.SCORE_FORCED,
+      Superstructure.WantedState.AUTO_SCORE_ON_MOVE,
+      Superstructure.WantedState.PASS,
+    };
+    boolean sawDiverted = false;
+    for (Superstructure.WantedState wanted : shooting) {
+      superstructure.setWantedState(wanted);
+      stepWithVision(5);
+      assertEquals(
+          FloorRoller.SystemState.FEEDING,
+          floorRoller.getSystemState(),
+          wanted
+              + " did not run the floor roller (superstructure "
+              + superstructure.getSystemState()
+              + ")");
+      sawDiverted |=
+          superstructure.getSystemState() == Superstructure.SystemState.WAITING_FOR_TURRET;
+
+      superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+      step(5);
+      assertEquals(
+          FloorRoller.SystemState.IDLE, floorRoller.getSystemState(), "rest ran the roller");
+    }
+    assertTrue(sawDiverted, "no request was diverted, so the WANTED-state rule was not tested");
+  }
+
+  /**
    * Steps one loop with a fresh vision fix while RobotState measures the given chassis speed.
    *
    * @param robotRelative the chassis speed to report, robot-relative
