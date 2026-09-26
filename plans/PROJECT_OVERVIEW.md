@@ -166,7 +166,7 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | — | Combine M1–M9 as the base for M10 | `integration-m1_m9` | Complete — M3 and M4 merged in; 112 tests, 103 passing, 0 failures |
 | M10 | `Superstructure`: fourteen states, both interlocks, the `readyToScore` gate | `feature-superstructure` | **Simulation checkpoint complete** — 122 tests, 0 skipped, mutation score 26/26; hardware checkpoint outstanding |
 | M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` | **Simulation checkpoint complete** — all eleven steps done; 159 tests, 0 skipped, mutation score 98/99 (the survivor is M10's documented equivalent mutant); hardware checkpoint outstanding. Replanned 2026-09-24 (plan §2.4); change order and write-up below |
-| M11 | Stationary shooting: the shot tables, measured in bursts | `feature-still-shot` | **In progress** — branched off `feature-hopper` 2026-09-25; step 0 done (159 tests). Order below. The checkpoint itself needs the robot |
+| M11 | Stationary shooting: the shot tables, measured in bursts | `feature-still-shot` | **Code complete in simulation** — all six steps done; 166 tests, 0 skipped, mutation score 109/110 (the survivor is M10's documented equivalent mutant). **The checkpoint needs the robot**: the procedure is below |
 | M12+ | Shoot-on-the-move, autos, hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
@@ -593,11 +593,39 @@ which carry identical plan files.
 | # | Step | Files | Done when |
 |---|---|---|---|
 | 0 | Branch setup and baseline | — | Branch builds; 159 tests pass. **Done: `bb2fc06`, `feature-hopper`'s tip.** |
-| 1 | **Delete the launch-speed table** | `Constants`, `ShootingSolver`, `ShootingSolverTest`, `SuperstructureFsmTest`, plan | A deletion-only commit: the constant, the solver's table, `getLaunchSpeed()` and the constructors' third array go. Build green. |
-| 2 | **The stationary RPM override** | `ShootingSolver`, `Superstructure`, `SuperstructureFsmTest` | A table-free stationary solve at a given RPM, used by `SCORE_STATIONARY` while the override is set. With all-zero tables and the override, the robot aims, spins up, opens the gate and feeds a burst. Without it, nothing changes. The override is ignored by every other request, and cleared on leaving `SCORE_STATIONARY` and on disable. |
-| 3 | **`measureShotTablePoint`, as a burst** | `CharacterizationCommands`, `RobotContainer`, `Constants` | The command sets the override, requests `SCORE_STATIONARY`, and ends on `likelyEmpty()` or its timeout. On the way out it clears the override and logs a per-burst summary under `ShotTable/`: the estimated and the taped distance, the RPM, the shots the flywheel counted, and the burst's duration. It is triggered in tuning mode from a NetworkTables toggle, on the flywheel bench harness's pattern, so no controller is needed. The plan's "fire one piece" becomes a burst (§2.4). |
-| 4 | **The fitting tool** | `tools/fit_shot_table.py` | Reads a CSV of distance, time of flight and the RPM that scored, then prints the `Constants.Shot` block: breakpoints, time-of-flight table, and the least-squares RPM fit on distance ÷ time of flight, with residuals. It checks the breakpoints ascend, and it has a self-test that recovers a known fit. |
-| 5 | **Verify, then record** | this file, `CONTEXT_AND_CONVENTIONS.md` | A mutation pass on the override's scope and clears, and on the burst summary, then the milestone row. **The M11 checkpoint (8 of 10 from three distances, and the shot count within one per burst) needs the robot and stays outstanding.** |
+| 1 | **Delete the launch-speed table** | `Constants`, `ShootingSolver`, `ShootingSolverTest`, `SuperstructureFsmTest`, plan | A deletion-only commit: the constant, the solver's table, `getLaunchSpeed()` and the constructors' third array go. Build green. **Done: `5d339e2`. The compiler found every caller; no case was deleted. The plan's five mentions of the table are corrected.** |
+| 2 | **The stationary RPM override** | `ShootingSolver`, `Superstructure`, `SuperstructureFsmTest` | A table-free stationary solve at a given RPM, used by `SCORE_STATIONARY` while the override is set. With all-zero tables and the override, the robot aims, spins up, opens the gate and feeds a burst. Without it, nothing changes. The override is ignored by every other request, and cleared on leaving `SCORE_STATIONARY` and on disable. **Done: `7bf4e59`, scope pinned in `eda005b`. Four cases. The clears ended up as ONE rule: any request other than `SCORE_STATIONARY` clears the override, and every exit makes one (the measurement's closing `DEFAULT`, disable's `IDLE`). Two separate explicit clears were written and then removed, because nothing could ever catch a mutant deleting them.** |
+| 3 | **`measureShotTablePoint`, as a burst** | `CharacterizationCommands`, `RobotContainer`, `Constants` | The command sets the override, requests `SCORE_STATIONARY`, and ends on `likelyEmpty()` or its timeout. On the way out it clears the override and logs a per-burst summary under `ShotTable/`: the estimated and the taped distance, the RPM, the shots the flywheel counted, and the burst's duration. It is triggered in tuning mode from a NetworkTables toggle, on the flywheel bench harness's pattern, so no controller is needed. The plan's "fire one piece" becomes a burst (§2.4). **Done: `d740dd1`, refined in `13ca471`. It ends on the empty belief only after a shot of its OWN, because the belief outlives a burst and a hand-reloaded hopper does not reset it, so every burst after the first would otherwise end on its opening loop. It reports this burst's shots, not the running total. A public overload takes a sink for the sample, because the logger records nothing under test.** |
+| 4 | **The fitting tool** | `tools/fit_shot_table.py` | Reads a CSV of distance, time of flight and the RPM that scored, then prints the `Constants.Shot` block: breakpoints, time-of-flight table, and the least-squares RPM fit on distance ÷ time of flight, with residuals. It checks the breakpoints ascend, and it has a self-test that recovers a known fit. **Done: `1999b36`, plus `tools/shot_table_template.csv`. Rows with fired and scored counts are kept at 8 of 10 or better, so the speeds tuned past drop out. It warns about fewer than 8 distances, a falling time of flight, and any row far off the fit. Python, so it sits outside the Gradle suite, with its own `--self-test`.** |
+| 5 | **Verify, then record** | this file, `CONTEXT_AND_CONVENTIONS.md` | A mutation pass on the override's scope and clears, and on the burst summary, then the milestone row. **The M11 checkpoint (8 of 10 from three distances, and the shot count within one per burst) needs the robot and stays outstanding.** **Done: harness `9db9412`, `886df02`; 109/110. Eleven M11 entries. The first triage killed ten; the survivor showed the override's scope was never tested apart from its clear (fixed in `eda005b`). The pass also found that M10's "disable does not clear the force-shoot override" had matched nothing since step 2 moved its anchor. It is re-anchored, not deleted.** |
+
+**Running the M11 checkpoint on the robot.** Tuning mode on (`Constants.kTuningMode`), the field's
+goal coordinates filled in (`Constants.Field`), and a pose you trust (M2's checkpoint). Then, at
+each of 8–10 taped distances:
+
+1. Set `ShotTable/TapedDistance` to the tape, and `ShotTable/Rpm` to a first guess.
+2. Load the hopper and toggle `/Tuning/ShotTable/Measure` on. One burst fires and ends by itself;
+   toggle it off again.
+3. Write one CSV row (start from `tools/shot_table_template.csv`): the tape, the speed,
+   `ShotTable/ShotsFired`, your count of what scored, and the time of flight in frames off the
+   120 fps video.
+4. Adjust the speed and repeat until a burst scores 8 of 10. Keep the misses in the CSV: the tool
+   drops them.
+
+Then run `python3 tools/fit_shot_table.py shots.csv`, paste its output into `Constants.Shot`, and
+rebuild. Check `ShotTable/EstimatedDistanceMeters` against the tape on every row; a gap there puts
+the row at the wrong distance. The checkpoint is then 8 of 10 from three distances with
+`SCORE_STATIONARY`, and `Shooter/ShotCount` within one per burst of the hand count.
+
+**Found during M11, and not changed: a burst from a spin-up stutters.** The flywheel term of the
+gate opens on a prediction mid spin-up. In simulation that was at 2,893 of 3,210 RPM, which is by
+design, because the piece takes about 40 ms to reach the wheel. It then dropped for one loop, with
+the burst latch still set, which stops the indexer mid-burst.
+`Shooter.willBeAtSpeedIn` projects speed plus acceleration times the horizon, and while the wheel is
+still accelerating hard that projection overshoots even the 300 RPM burst band. `Shooter` already
+carries this as a TODO for M12, with its fix: saturate the projection at the goal. It is raised
+here rather than fixed, because every M11 measurement burst starts from exactly this spin-up. It
+should be decided before the practice field, in M11 or at the start of M12.
 
 ### The intake camera is not where the plan says it is
 
