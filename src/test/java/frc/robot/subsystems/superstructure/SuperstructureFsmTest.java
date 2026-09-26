@@ -2249,6 +2249,19 @@ public class SuperstructureFsmTest {
         superstructure.getLastShot().flywheelRpm(),
         1e-6,
         "after a disable, the stationary shot still fired at the test speed");
+
+    // And setting it while another shot is already requested -- no request change to clear it --
+    // still leaves that shot alone. It applies only while SCORE_STATIONARY is the request.
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    stepWithVision(3);
+    superstructure.setShotTableRpm(TABLE_RPM);
+    stepWithVision(3);
+    assertNotEquals(
+        TABLE_RPM,
+        superstructure.getLastShot().flywheelRpm(),
+        1.0,
+        "an override set during a shot on the move took over the moving shot");
+    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
   }
 
   // ------------------------------------------------ M11 step 3: the shot-table measurement burst
