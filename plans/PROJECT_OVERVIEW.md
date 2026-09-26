@@ -165,7 +165,7 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | — | Camera mountings measured from CAD; intake-camera gating | `feature-cad-constants` | 3 of 4 transforms measured; 6 tests, mutation score 6/6; `kRobotToQuest` still unmeasured |
 | — | Combine M1–M9 as the base for M10 | `integration-m1_m9` | Complete — M3 and M4 merged in; 112 tests, 103 passing, 0 failures |
 | M10 | `Superstructure`: fourteen states, both interlocks, the `readyToScore` gate | `feature-superstructure` | **Simulation checkpoint complete** — 122 tests, 0 skipped, mutation score 26/26; hardware checkpoint outstanding |
-| M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` | **Replanned 2026-09-24** (plan §2.4). Branch cut from `feature-superstructure`; steps 0–9 done (154 tests pass). Step 10 not started; change order below |
+| M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` | **Simulation checkpoint complete** — all eleven steps done; 159 tests, 0 skipped, mutation score 98/99 (the survivor is M10's documented equivalent mutant); hardware checkpoint outstanding. Replanned 2026-09-24 (plan §2.4); change order and write-up below |
 | M11+ | Shot tables (now measured in bursts), shoot-on-the-move, autos, hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
@@ -470,7 +470,7 @@ the record of the single-piece design, which is the point of keeping every branc
 | 7 | **Superstructure switchover** | `Superstructure`, `RobotContainer` bindings, `Robot` init hooks, `SuperstructureFsmTest` | The one big step, and last among the behaviour changes because it consumes all of steps 2–6. `RobotContainer` has to change in the same commit, because removing `WantedState.INTAKE` breaks its binding. | `INTAKE`, `INTAKING` and `INDEXING` are removed, and so is the turret stow in `intaking()` that step 5 deferred here. (`ejecting()` keeps its stow: clearing a jam gives the turret nothing to aim at.) `STOWED` is renamed `RESTING` and `STOW` is added. It adds `setIntakeRequested`, `intakeWhileHeldCommand`, `resolveIntakeMode`, `applyFeedSide` (floor roller leads, indexer gates), `onEnable` (first enable deploys) and `StowedWhileMoving`. The piece guard and gate term 4 are gone. It adds the burst latch and `likelyEmpty()`, and `scoreUntilEmptyCommand` waits on it. `Robot.autonomousInit`/`teleopInit` call `onEnable` and `shooter.resetShotCount`. The §4.14 cases are all present. **No production code calls `hasPiece()`, `INDEX`, `HOLD` or `FloorRoller.INTAKE` any more.** **Done: `ba00fa9`, harness `a378f1c`; 83/84 on the first run, every step 7 mutation killed (the survivor is M10's known equivalent). Ten new cases, 154 tests. The gate could not open in any superstructure test while the shot tables' RPM fit is zero, so `ShootingSolver` gained an explicit-RPM constructor, the counterpart of M10's table constructor, to let the burst latch and the empty belief be tested at all. `onEnable` deploys unconditionally, not only outside HOMING/FAULTED, so an enable during the boot home is not lost.** |
 | 8 | **Delete the single-piece model** | `Indexer`, `IndexerIO*`, `FloorRoller`, `Constants`, `IndexerFsmTest`, `FloorRollerFsmTest` | Only safe now: the compiler proves step 7 left no caller. It is a deletion-only commit, so the diff reads as exactly what the replan retired. | `hasPiece`, `INDEX`/`HOLD`, `INDEXING`/`HOLDING`, the latched-sample replay and settle window, the indexer shot counter, the beam-break path and alert, `setSimulatedPiecePresent`, `FloorRoller.INTAKE`/`INTAKING`, and the old constants (`kHasBeamBreak`, `Dio.kIndexerBeamBreak`, `kHasPiece*`, `kShotDetectDebounceSec`, `kIndexRpm`, `kIndexFeedSec`) are all deleted. **`kDetectionSettleSec` stays:** a spin-up from rest reads as both "loaded" and "jammed", so step 6's detectors need the same settle window the old piece detector did. Test cases about deleted behaviour are deleted too, not adapted. Build green. **Also, found when steps 0–7 were done:** the beam-break inputs in `IndexerIO`/`IndexerIOTalonFX`, `kSimPieceDetectionMargin`, and `FloorRoller.kIntakeRpm` go too; `IndexerFsmTest.everyStateIsReachable` is rewritten for the surviving states; and the mutation-harness entry "piece guard re-added" names `hasPiece()`, so it must be rewritten, not left to fail as a compile error. `kSimLoadMargin` and the `kLoaded*`/`kJam*`/`kUnjam*` constants stay, and a search for `INTAKING` also hits the live `Intake` and `IntakeMode` states. **Done: `dbe3de9`, harness `1e2e639`. The build went green with no production code changed except by removal. 154 → 151: three cases about deleted behaviour were deleted. Four shrank instead, because what they tested outlived the piece model: `startsIdle`, the rewritten `everyStateIsReachable` (it now reaches `UNJAMMING` and `JAMMED` through a simulated jam), `deadHardwareTransitionsButDetectsNothing` (it now asserts no load where it asserted no piece), and the loaded case without `HOLD`. Two `FloorRollerFsmTest` cases used `INTAKE` only to spin the roller, so they use `FEED` now. The piece-guard mutation is rewritten against `isLoaded()`, which a well-meaning edit would reach for; a hand run confirmed tests kill it, not the compiler. 83/84; the survivor is M10's known equivalent. The plan's own deletion list had also deleted the settle window, and its floor-roller spec still had `INTAKE`; both are corrected.** |
 | 9 | **Autos: markers and skeletons** | `AutoFactory`, `AutoRoutines` | These are still skeletons (PathPlanner is unconfigured), so this is mostly the vocabulary and TODOs. It comes last because it depends on step 7's API and nothing depends on it. | `Intake`/`StopIntake` markers use `setIntakeRequested`, and `StowIntake` is added. `WaitForPiece`, `waitForPieceCommand` and `bailoutIfEmpty` are removed. `waitUntilIntakeRetaining()` opens every routine, and `driveIntakeAndShoot` and `Auto/PreloadFired` are added. **Done: `c8464f2`, harness `3d2e48e`; 87/88, all four step 9 mutations killed on the first run (the survivor is M10's known equivalent). Nothing runs differently yet: `getAutonomousCommand()` still returns `Commands.none()`. Two pieces need no PathPlanner and are implemented, not left as TODOs. `waitUntilIntakeRetaining()` keys on `isRetainingPieces()`, because the feed-assist angle already retains, and reads its timeout at run time. `logPreloadFiredCommand()` is a single log line, untestable because the logger records nothing under test. `AutoFactory` now holds the shooter instead of the indexer, whose only auto role was `hasPiece`; `getIntake()` replaces `getIndexer()`. New suite `AutoRoutinesTest`, three cases over a real intake. The preload shot's old one-piece 2.0 s timeout is gone from the TODOs.** |
-| 10 | **Verify, then record** | `docs`, this file, `CONTEXT_AND_CONVENTIONS.md` | Evidence before claims. | A mutation pass aimed at the four places a plausible bug survives happy-path tests: the `likelyEmpty()` accumulator (gate-closed time must not count), the burst latch, the band predicate's direction, and the floor-roller-leads rule. The simulation checkpoint from plan §10.2 M10b is run. Then the milestone table, the branch table, and a short M10b write-up in the style of the M8–M10 sections, including what surprised us. |
+| 10 | **Verify, then record** | `docs`, this file, `CONTEXT_AND_CONVENTIONS.md` | Evidence before claims. | A mutation pass aimed at the four places a plausible bug survives happy-path tests: the `likelyEmpty()` accumulator (gate-closed time must not count), the burst latch, the band predicate's direction, and the floor-roller-leads rule. The simulation checkpoint from plan §10.2 M10b is run. Then the milestone table, the branch table, and a short M10b write-up in the style of the M8–M10 sections, including what surprised us. **Done: `5b7c80f`, `315bfc4`, `855da7f`, harness `0edcaf6`; 98/99. Checking the suite against plan §4.14 found two cases the plan asks for with no counterpart (`feedAssistRocksAndNeverBlocksTheTurret`, `misconfiguredFeedAssistYieldsToTurret`); the misconfigured-feed-assist guard had no test and no mutation at all. The §10.2 checkpoint runs as one continuous JUnit match, `theHopperCheckpointHoldsAcrossOneMatch`, because AdvantageScope cannot be driven from the agent's sandbox. Eleven targeted mutations killed seven on the first triage; the four survivors were two test gaps (both ends of the burst latch's life, and the floor roller's wanted-state rule including `AUTO_SCORE_ON_MOVE`), closed by two more cases. One of those first passed for the wrong reason (see the write-up).** |
 
 **Two ordering traps, recorded before they happen:**
 
@@ -486,6 +486,77 @@ the record of the single-piece design, which is the point of keeping every branc
 
 **Downstream.** M11 builds on `feature-hopper`, not on `feature-superstructure`, because the shot
 tables are measured in bursts through the hopper feed path.
+
+### M10b, and tests that passed for the wrong reason
+
+M10b moved the built robot from a one-piece slot to a hopper in the eleven steps above: shots
+counted at the flywheel, an intake that rests down and rocks to feed, the interlock corrected, jam
+recovery, the superstructure's two orthogonal requests, the single-piece model deleted, and the
+autos' vocabulary rewritten. The suite went from 122 tests to 159, and the mutation harness from 27
+entries to 99. Nothing has run on hardware.
+
+**The theme was not bugs in the new code. It was tests that passed without testing anything.** It
+happened five different ways, and each one is worth recognising on sight:
+
+- **Placeholder geometry.** Every intake angle constant is `0.0`, which puts stow, deploy and
+  feed-assist at one point. The conflict band then has no direction and the rock has no amplitude,
+  so every assertion about either passes. When step 5 reversed M10's interlock, the old interlock
+  tests did not fail; they went vacuous. The fix, on M8's precedent, was to make the geometry a
+  constructor argument and test against a realistic one (`IdealPivotIO.GEOMETRY`).
+- **A gate that cannot open.** The shot tables' RPM fit is zero until M11, so the readiness gate
+  never opens and nothing downstream of it can be tested: the burst latch, the empty belief, the
+  feed side. `ShootingSolver` gained an explicit-RPM test constructor (step 7).
+- **A simulator faster than the robot.** The simulated flywheel recovers about 180 RPM inside the
+  loop that injects a shot, so three shot-detector conditions survived mutation (step 2). The
+  simulated indexer reaches speed in one loop, so its spin-up settle window was never exercised
+  (step 6). Both were closed with scripted IO doubles that behave the way the real mechanism will.
+- **A kill that is really a compile error.** Step 8 deleted `hasPiece()`, which one mutation still
+  named. The harness counts any failed build as a kill, so that entry would have kept scoring while
+  testing nothing. It was rewritten against `isLoaded()`, and a hand run confirmed tests kill it,
+  not the compiler.
+- **A latch cleared by the wrong condition.** Step 10's case asserted the burst latch clears when
+  the robot stops scoring, and it did clear, so the mutant that deletes the latch's state check
+  survived. Going back to rest stows the turret, the turret term fails, and that clears the latch
+  whatever the state check does. Ending each burst in a pre-spin instead keeps every other term
+  true, and the mutant died. **When several conditions can each clear a latch, a test that sees it
+  cleared proves only that something cleared it.**
+
+**Built code carried three latent defects, and each was found by asking it a new question.** The
+M5 intake judged arrival against the *previous* loop's goal, so every change of request reported a
+false arrival for one loop, including a false `STOWED` that M10's interlock read (step 3). M10's
+interlock had the conflict backwards: it treated the *deployed* intake as the one in the turret's
+way (step 5). And the indexer's "loaded" reading leaked out of `FEEDING` for a debounce window after
+every feed ended (step 6).
+
+**The plan was wrong in small, specific ways, and the code is what found them.** Its deletion list
+retired `kDetectionSettleSec`, which the new load and jam readings need (step 1). Its load rule had
+a velocity-shortfall half that mutation showed did nothing, so the rule became current-only (step
+6). Widening the intake-camera gate was a step of its own because, without it, the camera would
+have quietly switched off for most of a match once the intake rests down (step 4). The auto
+marker `StopIntake` mapped to `DEFAULT`, which would have cancelled any scoring in progress (step
+9). Each correction went back into the plan. The settle window's took until step 8 to reach the
+plan's deletion list, which is how that list came to contradict the code for a while. Separately,
+the suite lacked two cases the plan does list. One of them was the only test the guard for a
+mis-tuned feed-assist angle could ever have, since that guard never fires on correct constants
+(step 10).
+
+**The simulated turret rings for about eight seconds.** On its placeholder gains it oscillates
+±0.17 rad about a 180° goal before it holds inside tolerance. No earlier case saw it, because every
+other firing case points the shot straight ahead. The step 10 checkpoint waits it out with a named
+window. It is the same unmeasured-gains ringing already recorded for the intake pivot, and M6 is
+where it gets fixed.
+
+What M10b has **not** established is anything about hardware. The conflict band's edge and the
+rocking period are still unmeasured. The intake's homing direction is probably backwards (see
+`CONTEXT_AND_CONVENTIONS.md`). The autos still do not run, because PathPlanner is unconfigured and
+`getAutonomousCommand()` returns nothing. Three things are covered only indirectly:
+- The rock's low-power fallback is tested only on the pure function, because `PowerBudget` is
+  still the M14 stub.
+- `Auto/PreloadFired` has no test.
+- The checkpoint clause about seven separately-logged gate booleans was checked by reading the
+  code, not asserted.
+
+The last two exist only as log output, and the logger records nothing under test.
 
 ### The intake camera is not where the plan says it is
 
@@ -649,6 +720,18 @@ These are the shapes to look for, because each one was live in committed code:
   are also what a game piece looks like. Gate on a settling window, not on a longer debounce.
 - `onEnter` **never fires for the state a machine boots into**, because no transition occurs. Entry
   actions for the initial state must be run explicitly in the constructor.
+- **Placeholder geometry of `0.0` collapses a band or a range to a point.** It has no direction and
+  no width, so every assertion about which side something is on passes. Test against a realistic
+  injected geometry, never the shipped placeholders. This is the same shape as M8's
+  identity-transform trap, and M10b hit it in both halves of the interlock.
+- **A simulated plant faster than the real one hides every transient.** If the sim reaches its goal
+  inside one loop, a settle window or a recovery condition is never exercised. Use a scripted IO
+  that behaves the way the mechanism will.
+- **A latch that several conditions can clear.** Seeing it cleared proves only that something
+  cleared it. Drive it through a state where every other condition still holds, so the one under
+  test is the only way out.
+- **A mutation that no longer compiles** counts as a kill in a harness that treats any failed build
+  as one. After deleting code, re-check every entry that names it.
 
 ### Shared singletons make tests order-dependent, and merges expose it
 
