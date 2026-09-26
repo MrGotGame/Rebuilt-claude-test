@@ -136,9 +136,11 @@ MUTATIONS = [
     ("forced-shot count raised on entry to any scoring state", SS,
      "        if (state == SystemState.SCORING_FORCED) {\n          forcedShotCount++;",
      "        if (true) {\n          forcedShotCount++;"),
+    # Re-anchored in M11: step 2 put the shot-table override's note between the two statements this
+    # entry used to span, and the entry then matched nothing -- reported as BAD ANCHOR, not scored.
     ("disable does not clear the force-shoot override", SS,
-     "    ignoreShotTolerances = false;\n\n    // A stale solution",
-     "    // A stale solution"),
+     "    ignoreShotTolerances = false;\n\n    // The shot-table override (M11 step 2)",
+     "    // The shot-table override (M11 step 2)"),
     ("disable does not park the machine", SS,
      "    setWantedState(WantedState.IDLE);\n  }",
      "  }"),
