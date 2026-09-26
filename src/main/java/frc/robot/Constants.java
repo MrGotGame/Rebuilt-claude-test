@@ -1396,8 +1396,24 @@ public final class Constants {
     public static final LoggedTunableNumber kScoreTimeoutSec =
         new LoggedTunableNumber("Auto/ScoreTimeout", 8.0);
 
+    /**
+     * How long a pickup leg keeps the intake running after its path ends, seconds, so pieces at the
+     * mouth come aboard. A fixed dwell: with no piece sensor the routine cannot know it worked.
+     */
     public static final LoggedTunableNumber kIntakeSettleSec =
         new LoggedTunableNumber("Auto/IntakeSettle", 0.25);
+
+    /**
+     * Upper bound on the stationary preload burst, seconds. Added for M13 step 5.
+     *
+     * <p>Shorter than {@link #kScoreTimeoutSec}, which is sized for a FULL 50-piece hopper. The
+     * preload is exactly 8 pieces, and {@code Preload Only} is the routine chosen when vision is
+     * down -- when the readiness gate may never open at all. Waiting out the full-hopper bound
+     * there would cost half the period before the robot even left. TODO: MEASURE the time from
+     * enable to the eighth shot at the starting line, and add a second.
+     */
+    public static final LoggedTunableNumber kPreloadTimeoutSec =
+        new LoggedTunableNumber("Auto/PreloadTimeout", 4.0);
 
     /**
      * How long an auto waits for the intake to reach a piece-retaining angle before it drives

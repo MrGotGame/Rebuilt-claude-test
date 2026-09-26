@@ -182,7 +182,7 @@ final class SimulatedAutoRobot {
                 new double[] {0.50, 0.80, 1.10},
                 () -> FIRING_RPM_PER_MPS,
                 () -> 0.0));
-    factory = new AutoFactory(drive, superstructure, intake, shooter, turret, vision, paths);
+    factory = new AutoFactory(drive, superstructure, intake, shooter, vision, paths);
     routines = new AutoRoutines(factory);
 
     placeAt(start);

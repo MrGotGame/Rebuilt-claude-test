@@ -23,7 +23,6 @@ import frc.robot.subsystems.drive.Drive;
 import frc.robot.subsystems.intake.Intake;
 import frc.robot.subsystems.shooter.Shooter;
 import frc.robot.subsystems.superstructure.Superstructure;
-import frc.robot.subsystems.turret.Turret;
 import frc.robot.subsystems.vision.Vision;
 import frc.robot.util.AllianceFlipUtil;
 import frc.robot.util.FaultReporter;
@@ -84,7 +83,6 @@ public class AutoFactory {
   private final Superstructure superstructure;
   private final Intake intake;
   private final Shooter shooter;
-  private final Turret turret;
   private final Vision vision;
   private final PathSource paths;
 
@@ -140,21 +138,19 @@ public class AutoFactory {
    * <p>Construct this exactly once, from {@code RobotContainer}, after {@code
    * RobotState.initialize()}.
    *
+   * <p>It no longer takes the turret (M13 step 5). Its only turret users were a marker and a
+   * routine helper that commanded the turret directly, and the superstructure overwrites every
+   * turret request on the next loop, so both did nothing; both now go through the superstructure.
+   *
    * @param drive the drivetrain
    * @param superstructure the cross-mechanism state machine
    * @param intake the pivoting intake
    * @param shooter the flywheel, whose shot count is the only piece count the robot has
-   * @param turret the turret
    * @param vision the vision subsystem
    */
   public AutoFactory(
-      Drive drive,
-      Superstructure superstructure,
-      Intake intake,
-      Shooter shooter,
-      Turret turret,
-      Vision vision) {
-    this(drive, superstructure, intake, shooter, turret, vision, DEPLOY);
+      Drive drive, Superstructure superstructure, Intake intake, Shooter shooter, Vision vision) {
+    this(drive, superstructure, intake, shooter, vision, DEPLOY);
   }
 
   /**
@@ -166,7 +162,6 @@ public class AutoFactory {
    * @param superstructure the cross-mechanism state machine
    * @param intake the pivoting intake
    * @param shooter the flywheel, whose shot count is the only piece count the robot has
-   * @param turret the turret
    * @param vision the vision subsystem
    * @param paths where to read paths and autos from
    */
@@ -175,7 +170,6 @@ public class AutoFactory {
       Superstructure superstructure,
       Intake intake,
       Shooter shooter,
-      Turret turret,
       Vision vision,
       PathSource paths) {
     this.paths = paths;
@@ -183,7 +177,6 @@ public class AutoFactory {
     this.superstructure = superstructure;
     this.intake = intake;
     this.shooter = shooter;
-    this.turret = turret;
     this.vision = vision;
     checkGuiSettings();
     configureAutoBuilder();
@@ -574,15 +567,42 @@ public class AutoFactory {
    * @return the scoring command
    */
   public Command scoreStationaryCommand() {
-    // TODO: superstructure.setWantedStateCommand(SCORE_STATIONARY)
-    //     .andThen(Commands.waitUntil(superstructure::likelyEmpty))
-    //     .withTimeout(Constants.Auto.kScoreTimeoutSec.get())
-    //     .andThen(superstructure.setWantedStateCommand(DEFAULT));
-    // Read the timeout inside Commands.defer, as Superstructure.scoreUntilEmptyCommand() does, so
-    // a retuned kScoreTimeoutSec takes effect without a reboot. (It used to wait for
-    // !indexer.hasPiece(); M10b deleted the piece model, and likelyEmpty() is the belief that
-    // replaced it.)
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "superstructure.setWantedStateCommand(SCORE_STATIONARY)
+    // .andThen(Commands.waitUntil(superstructure::likelyEmpty))
+    // .withTimeout(Constants.Auto.kScoreTimeoutSec.get())
+    // .andThen(superstructure.setWantedStateCommand(DEFAULT)); Read the timeout inside
+    // Commands.defer").
+    //
+    // The request is HELD for the wait and handed back as DEFAULT when the wait ends, rather than
+    // set once and followed by a DEFAULT in sequence. The sequence leaks the request if anything
+    // cancels it partway -- a routine's own timeout around it, for one -- and the robot then goes
+    // on
+    // requesting a stationary shot through the next leg of the auto, which is one it is driving.
+    return Commands.deadline(
+        Commands.defer(
+            () ->
+                Commands.waitUntil(superstructure::likelyEmpty)
+                    .withTimeout(Constants.Auto.kScoreTimeoutSec.get()),
+            Set.of()),
+        holdWantedState(Superstructure.WantedState.SCORE_STATIONARY));
+  }
+
+  /**
+   * Holds a shooter-side request for as long as the command runs, then hands back {@code DEFAULT}.
+   *
+   * <p>Added for M13 step 5. The superstructure's own {@code setWantedStateCommand} is a one-shot,
+   * which is right for a button but wrong for an auto leg: a request set once outlives the leg it
+   * was set for and carries into the next one. Every auto building block that asks the shooter side
+   * for something asks through this, so the request lasts exactly as long as the leg, however the
+   * leg ends -- finished, timed out or cancelled.
+   *
+   * @param wanted the request to hold
+   * @return a command that never ends by itself; run it beside something that does
+   */
+  public Command holdWantedState(Superstructure.WantedState wanted) {
+    return Commands.startEnd(
+        () -> superstructure.setWantedState(wanted),
+        () -> superstructure.setWantedState(Superstructure.WantedState.DEFAULT));
   }
 
   /**
@@ -718,14 +738,5 @@ public class AutoFactory {
    */
   public Intake getIntake() {
     return intake;
-  }
-
-  /**
-   * The turret, used by routines that pre-position it during a long drive.
-   *
-   * @return the turret
-   */
-  public Turret getTurret() {
-    return turret;
   }
 }

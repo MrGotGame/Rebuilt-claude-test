@@ -1,6 +1,5 @@
 package frc.robot.autos;
 
-import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import frc.robot.Constants;
@@ -8,6 +7,7 @@ import frc.robot.subsystems.intake.Intake;
 import frc.robot.subsystems.superstructure.Superstructure;
 import java.util.List;
 import java.util.Set;
+import java.util.function.DoubleSupplier;
 
 /**
  * The composable routine builder.
@@ -27,6 +27,12 @@ import java.util.Set;
  * the move -- which is where shoot-while-moving in autonomous actually happens; and {@link
  * #driveIntakeAndShoot} does both at once. The turret and the solver do not care that the chassis
  * velocity came from PathPlanner rather than a joystick.
+ *
+ * <p>M13 step 5 fixed one rule for all of them: a block HOLDS whatever it asks of the shooter side
+ * for exactly the length of its leg and hands back {@code DEFAULT} when the leg ends, however it
+ * ends. The skeleton's one-shot requests outlived their legs. There is no {@code aimTurretAt}: the
+ * superstructure overwrites any direct turret request on the next loop, and {@link #spinUpWhile}
+ * already pre-aims, because spinning up aims the turret at the solved shot.
  *
  * <p>M10b step 9 (plan section 2.4) put these on the hopper model. The robot starts with the intake
  * stowed and 8 pieces aboard, and pieces fall out of a stowed intake, so every routine opens with
@@ -59,15 +65,28 @@ public class AutoRoutines {
    * @return the composed command
    */
   public Command driveAndIntake(String pathName) {
-    // TODO: Commands.deadline(factory.followPath(pathName),
-    // superstructure.intakeWhileHeldCommand())
-    //   .andThen(Commands.deadline(Commands.waitSeconds(Constants.Auto.kIntakeSettleSec.get()),
-    //       superstructure.intakeWhileHeldCommand())).
-    // The deadline group ends when the PATH ends; the dwell gives pieces still at the mouth time to
-    // come aboard. A fixed dwell, not a wait for a piece: there is no piece sensor, so the routine
-    // cannot know whether the pickup worked and does not pretend to. When the intake request is
-    // released the roller stops and the intake stays DOWN.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "Commands.deadline(factory.followPath(pathName),
+    // superstructure.intakeWhileHeldCommand()).andThen(Commands.deadline(Commands.waitSeconds(
+    // Constants.Auto.kIntakeSettleSec.get()), superstructure.intakeWhileHeldCommand())).")
+    //
+    // One intake request spanning the path AND the dwell, rather than the TODO's two back to back:
+    // the same effect, with no instant between them in which the request is released. The dwell is
+    // read when it starts, so a retune takes effect without a reboot. Releasing the request at the
+    // end stops the roller and leaves the intake DOWN (section 2.4); it asks nothing of the shooter
+    // side, so a spin-up around this leg carries straight through it.
+    return Commands.deadline(
+        Commands.sequence(factory.followPath(pathName), intakeSettle()),
+        superstructure.intakeWhileHeldCommand());
+  }
+
+  /**
+   * The fixed dwell at the end of a pickup leg.
+   *
+   * @return a wait of {@code Constants.Auto.kIntakeSettleSec}, read when it starts
+   */
+  private Command intakeSettle() {
+    return Commands.defer(
+        () -> Commands.waitSeconds(Constants.Auto.kIntakeSettleSec.get()), Set.of());
   }
 
   /**
@@ -82,12 +101,16 @@ public class AutoRoutines {
    * @return the composed command
    */
   public Command driveIntakeAndShoot(String pathName) {
-    // TODO: Commands.deadline(factory.followPath(pathName),
-    //     superstructure.intakeWhileHeldCommand(),
-    //     superstructure.setWantedStateCommand(Superstructure.WantedState.AUTO_SCORE_ON_MOVE))
-    //   .andThen(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT)).
-    // Pieces are fired as they arrive; the intake stays down throughout and after.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "Commands.deadline(factory.followPath(pathName),
+    // superstructure.intakeWhileHeldCommand(), superstructure.setWantedStateCommand(
+    // AUTO_SCORE_ON_MOVE)).andThen(superstructure.setWantedStateCommand(DEFAULT)).")
+    //
+    // holdWantedState in place of the one-shot and the trailing DEFAULT: the same outcome when the
+    // path finishes, and still DEFAULT when something cancels the leg partway.
+    return Commands.deadline(
+        factory.followPath(pathName),
+        superstructure.intakeWhileHeldCommand(),
+        factory.holdWantedState(Superstructure.WantedState.AUTO_SCORE_ON_MOVE));
   }
 
   /**
@@ -97,25 +120,38 @@ public class AutoRoutines {
    * @return the composed command
    */
   public Command driveAndShoot(String pathName) {
-    // TODO: Commands.deadline(factory.followPath(pathName),
-    //     superstructure.setWantedStateCommand(Superstructure.WantedState.AUTO_SCORE_ON_MOVE));
-    // This is shoot-on-the-move in autonomous: the path supplies the chassis velocity, RobotState
-    // measures it, and the solver's virtual-goal offset handles the rest.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "Commands.deadline(factory.followPath(pathName),
+    // superstructure.setWantedStateCommand(Superstructure.WantedState.AUTO_SCORE_ON_MOVE));")
+    //
+    // Held, not set once. The TODO's one-shot left AUTO_SCORE_ON_MOVE standing after the path, so
+    // the robot kept shooting into the next pickup leg, and any spin-up wrapped around that leg was
+    // overwritten. The leg now scores for exactly as long as its path. This is shoot-on-the-move in
+    // autonomous, with nothing auto-specific in it: the path supplies the chassis velocity,
+    // RobotState measures it, and the solver's virtual goal does the rest (section 8.5).
+    return Commands.deadline(
+        factory.followPath(pathName),
+        factory.holdWantedState(Superstructure.WantedState.AUTO_SCORE_ON_MOVE));
   }
 
   /**
-   * Stops and takes a stationary shot. Used for a preload on routines that start pre-aimed.
+   * Stops and takes a stationary shot. Used for the preload, from a pre-aimed start.
    *
-   * @param timeoutSec how long to allow for the shot, in seconds
+   * @param timeoutSec how long to allow for the shot, seconds, read when the shot starts
    * @return the composed command
    */
-  public Command shootInPlace(double timeoutSec) {
-    // TODO: Commands.runOnce(drive::stop) followed by
-    // factory.scoreStationaryCommand().withTimeout(timeoutSec).
-    // Only worth it for the 8-piece preload, where standing still for the burst beats solving a
-    // moving shot for each piece.
-    return Commands.none();
+  public Command shootInPlace(DoubleSupplier timeoutSec) {
+    // IMPLEMENTATION (was TODO: "Commands.runOnce(drive::stop) followed by
+    // factory.scoreStationaryCommand().withTimeout(timeoutSec).")
+    //
+    // The timeout is a supplier read when the shot starts, not a number fixed when the routine is
+    // built at boot, so a retuned bound takes effect without a reboot. The stop requires the
+    // drivetrain, so it also ends whatever else was driving it; a stationary shot needs the chassis
+    // still, and the gate will not open until it is.
+    return Commands.sequence(
+        Commands.runOnce(factory.getDrive()::stop, factory.getDrive()),
+        Commands.defer(
+            () -> factory.scoreStationaryCommand().withTimeout(timeoutSec.getAsDouble()),
+            Set.of()));
   }
 
   /**
@@ -125,11 +161,24 @@ public class AutoRoutines {
    * @return the composed command
    */
   public Command spinUpWhile(Command inner) {
-    // TODO: Commands.deadline(inner,
-    //     superstructure.setWantedStateCommand(Superstructure.WantedState.SPIN_UP));
-    // The flywheel is then already at speed when the shooting segment begins, which saves roughly
-    // 0.8 s per cycle -- often the difference between a four- and a five-piece auto.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "Commands.deadline(inner,
+    // superstructure.setWantedStateCommand(Superstructure.WantedState.SPIN_UP));")
+    //
+    // The TODO's form had two faults. Its SPIN_UP was a one-shot, so it outlived the leg: the
+    // flywheel went on spinning, and the turret aiming, after the pickup ended. And a deadline
+    // group starts its deadline FIRST, so a leg whose first action is a shooter-side request --
+    // spinUpWhile(driveAndShoot(...)), say -- had that request overwritten, in the same instant, by
+    // the outer SPIN_UP, and never scored. The plan's own preloadOnly escaped the second fault only
+    // by accident: shootInPlace begins with a drive stop, which puts its SCORE_STATIONARY one step
+    // later. (M13's planning notes said preloadOnly never fired; a mutation run showed it did.)
+    //
+    // So SPIN_UP is set BEFORE the inner command starts, not beside it. Anything the inner leg asks
+    // of the shooter side then simply replaces it, whatever order the leg does things in, and a
+    // pickup leg, which asks nothing, runs spinning. Whatever the inner leg left standing is handed
+    // back as DEFAULT when it ends.
+    return Commands.sequence(
+            superstructure.setWantedStateCommand(Superstructure.WantedState.SPIN_UP), inner)
+        .finallyDo(() -> superstructure.setWantedState(Superstructure.WantedState.DEFAULT));
   }
 
   /**
@@ -140,10 +189,24 @@ public class AutoRoutines {
    * @return the composed command
    */
   public Command sequenceOf(List<String> pathNames, boolean shootBetween) {
-    // TODO: Fold pathNames into a sequence alternating driveAndIntake and driveAndShoot, or plain
-    // followPath when shootBetween is false. This exists so that adding an N-piece routine is a
-    // matter of listing path names, with zero new control-flow code.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "Fold pathNames into a sequence alternating driveAndIntake and
+    // driveAndShoot, or plain followPath when shootBetween is false.")
+    //
+    // With shootBetween, the paths alternate pickup, score, pickup, score, starting with a pickup,
+    // and each pickup runs spinning up (section 8.5), so the flywheel is at speed as the scoring
+    // path begins. Built into a fresh array each call, for the same reason every routine is fresh.
+    Command[] legs = new Command[pathNames.size()];
+    for (int i = 0; i < legs.length; i++) {
+      String path = pathNames.get(i);
+      if (!shootBetween) {
+        legs[i] = factory.followPath(path);
+      } else if (i % 2 == 0) {
+        legs[i] = spinUpWhile(driveAndIntake(path));
+      } else {
+        legs[i] = driveAndShoot(path);
+      }
+    }
+    return Commands.sequence(legs);
   }
 
   /**
@@ -187,18 +250,6 @@ public class AutoRoutines {
             Commands.waitUntil(intake::isRetainingPieces)
                 .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()),
         Set.of());
-  }
-
-  /**
-   * Pre-positions the turret during a long drive so the next shot does not wait on turret travel.
-   *
-   * @param fieldAngle the field-relative azimuth to pre-aim at
-   * @return the composed command
-   */
-  public Command aimTurretAt(Rotation2d fieldAngle) {
-    // TODO: Commands.runOnce(() -> factory.getTurret().setGoal(fieldAngle, 0.0))
-    //   .andThen(Commands.waitUntil(factory.getTurret()::atGoal).withTimeout(1.0)).
-    return Commands.none();
   }
 
   // ------------------------------------------------------------------------------- routines ----
