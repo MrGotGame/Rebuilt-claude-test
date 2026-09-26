@@ -2135,7 +2135,8 @@ public class Drive extends SubsystemBase {
       ModuleIO brModuleIO) {
     // TODO: KEEP the template constructor's module construction, HAL.report, and
     // PhoenixOdometryThread.getInstance().start(). REMOVE the AutoBuilder.configure block (it moves
-    // to AutoFactory). ADD: construct SwerveSetpointGenerator(AutoFactory.PP_CONFIG,
+    // to AutoFactory). ADD: construct SwerveSetpointGenerator(Drive.PP_CONFIG (M13: it lives
+    // here, built from TunerConstants, because this constructor needs it first),
     // Constants.Drivetrain.kMaxModuleAzimuthRadPerSec) and seed previousSetpoint from the current
     // module states. KEEP the SysIdRoutine block verbatim.
   }
@@ -5193,6 +5194,29 @@ public class Superstructure extends SubsystemBase {
 
 ### 4.12 Autos
 
+> **Corrected by M13** (`feature-autos`). The skeletons below are kept as written, as the record of
+> the plan; the implementation differs in these ways, each for a reason found in the code:
+>
+> - **There is no `AutoFactory.PP_CONFIG`.** The one config is `Drive.PP_CONFIG`, built from
+>   `TunerConstants`, because the setpoint generator needs it in `Drive`'s constructor. `settings.json`
+>   is not loaded: it is compared with `Drive.PP_CONFIG` and a warning names each difference
+>   (`loadRobotConfig` became `checkGuiSettings`). The shipped file could not even be parsed.
+> - **The flip callback is `AutoFactory.shouldFlipPaths()`**, which sets PathPlanner's
+>   `FlippingUtil` to rotational symmetry over `Constants.Field` first (§8.1, risk #4).
+> - **`AutoFactory` does not take the turret**, and `AutoRoutines` has no `aimTurretAt`: the
+>   superstructure overwrites any direct turret request on the next loop. Spinning up pre-aims.
+> - **Every shooter-side request is held for its leg** (`AutoFactory.holdWantedState`) and handed
+>   back as `DEFAULT` when the leg ends, however it ends. `spinUpWhile` sets `SPIN_UP` before the
+>   inner leg rather than beside it. `shootInPlace` holds the drive stopped for the whole shot and
+>   takes its bound as a supplier (`Constants.Auto.kPreloadTimeoutSec` for the preload).
+> - **`getStartingPoseFromAutoFile` does not exist** in 2026.1.2. Paths come through a
+>   `PathSource`; `buildAuto` reads the file's path group first, because the `PathPlannerAuto`
+>   constructor swallows a missing file.
+> - **`AutoSelector` has one chooser, of names**, not two parallel choosers. The preview takes a
+>   routine's start from its first path, so no companion `.auto` files are needed.
+> - Added: `centerThreePieceStationary()` (§8.6 step 3), `getPathEndingPose`, `pathfindTo`,
+>   `getPreloadFired`, and Scavenge sweeps each cycle rather than driving back to shoot.
+
 #### `src/main/java/frc/robot/autos/AutoFactory.java` — `package frc.robot.autos;` [NEW]
 
 Owns everything PathPlanner needs to exist, in one place, so `Drive` stays a drivetrain and not a
@@ -6393,8 +6417,11 @@ public class SuperstructureFsmTest {
 
 #### `src/main/deploy/pathplanner/settings.json` [MODIFY]
 
-`RobotConfig.fromGUISettings()` reads this file at runtime, and `Drive`'s `SwerveSetpointGenerator`
-uses the same object. Every number in it that is wrong makes path following wrong in a way that
+**Corrected by M13:** this file is NOT the robot's config. `Drive.PP_CONFIG`, built from
+`TunerConstants`, is; `AutoFactory` reads this file only to compare it, and a warning names each
+value that differs. The GUI still previews paths with it, which is why it should match. (The plan
+had `RobotConfig.fromGUISettings()` read this file at runtime for `Drive`'s
+`SwerveSetpointGenerator` too. The file shipped in a format PathplannerLib 2026 cannot parse.) Every number in it that is wrong makes path following wrong in a way that
 looks like a tuning problem. Edit it through the PathPlanner GUI (Settings tab), never by hand, then
 commit the result. The fields that must change from the template's defaults:
 
@@ -7246,8 +7273,8 @@ AutoBuilder.configure(
     (speeds, feedforwards) -> drive.runVelocity(speeds, feedforwards),       // (4)
     new PPHolonomicDriveController(new PIDConstants(5.0, 0.0, 0.0),
                                    new PIDConstants(5.0, 0.0, 0.0)),
-    AutoFactory.PP_CONFIG,
-    AllianceFlipUtil::shouldFlip,
+    Drive.PP_CONFIG,                                                          // (5)
+    AutoFactory::shouldFlipPaths,                                             // (6)
     drive);
 ```
 
@@ -7269,6 +7296,14 @@ Plus two lines the template already has and that must be **kept**:
 without it, pathfinding is nondeterministic and your replays diverge) and the two
 `PathPlannerLogging` callbacks that publish `Odometry/Trajectory` and
 `Odometry/TrajectorySetpoint`.
+
+5. **M13:** `Drive.PP_CONFIG`, not an `AutoFactory` field, because `Drive`'s constructor needs it
+   before `AutoFactory` exists. It is built from `TunerConstants`, which is authoritative.
+   `settings.json` is only compared against it, and a warning names each value that differs.
+6. **M13:** not `AllianceFlipUtil::shouldFlip`. PathPlanner flips paths with its own `FlippingUtil`,
+   which ships mirrored on a 16.54 × 8.07 m field; `shouldFlipPaths()` sets it to rotational
+   symmetry over `Constants.Field` before answering, so a red path lands where `AllianceFlipUtil`
+   puts everything else. Without it, red autos drive on one field and aim at a goal on another.
 
 **`PP_CONFIG` is shared with `Drive`'s `SwerveSetpointGenerator`.** If those two ever hold different
 `RobotConfig` objects, the setpoint generator will clip the speeds PathPlanner commands and every
@@ -7293,9 +7328,12 @@ to the programming laptop.
 | `ScoreStationary` | `factory.scoreStationaryCommand()` | Preload shot only |
 | `Eject` | `setWantedStateCommand(EJECT)` | Jam recovery |
 | `Home` | `setWantedStateCommand(HOME)` | Never in a real routine; useful when testing |
-| `StowTurret` | `turret.setWantedStateCommand(STOW)` | Before a path that passes near a wall |
-| `GamePiecePipeline` | `vision.setIntakePipeline(1)` | Before a `dynamicScavenge` leg |
-| `TagPipeline` | `vision.setIntakePipeline(0)` | After it — **always** pair these two |
+| `StowTurret` | `setWantedStateCommand(DEFAULT)` | Before a path that passes near a wall. **M13:** was `turret.setWantedStateCommand(STOW)`, which the superstructure overwrote on the next loop; resting stows the turret |
+
+**M13 removed `GamePiecePipeline` and `TagPipeline`.** Since M10b the superstructure switches the
+intake camera itself, on the edge into and out of intaking, so a marker could only disagree with it,
+and `GamePiecePipeline` outside an intake leg would leave the camera off AprilTags. `AutoFactoryTest`
+fails on any drawn file that still uses a name not in this table.
 
 **Rule for students:** add a marker name here *and* to this table in the same commit. An unregistered
 marker is the most common "my auto works in the GUI but not on the robot" failure, and it produces
@@ -7318,9 +7356,14 @@ The chooser has ten entries. Eight are real routines; `Do Nothing` is the defaul
 | 7 | Source Steal | `sourceSideSteal()` | source side | 2–4 | very high | alliance coordination |
 | 8 | Scavenge | `dynamicScavenge()` | center | 2–4 | high | intake-camera game-piece pipeline + pathfinding + navgrid |
 | 9 | Characterization | placeholder | — | — | — | `kTuningMode` |
+| — | Center 3 (stationary) | `centerThreePieceStationary()` | center | 3 | low | `kTuningMode`; §8.6 step 3 (added by M13) |
 
-Each routine 1–8 has a companion `.auto` file with the **same name**, whose only job is to declare
-the starting pose so `AutoSelector.logStartingPose()` can draw the preview ghost. Draw it in the GUI
+**M13:** the characterization entries are added by M6, as each routine stops being a skeleton.
+
+**Corrected by M13: no companion `.auto` files are needed.** A routine starts where its first path
+does, and the preview reads that. (The plan had each routine 1–8 carry a companion `.auto` file with
+the **same name**, whose only job was to declare the starting pose so
+`AutoSelector.logStartingPose()` could draw the preview ghost.) Draw it in the GUI
 with the correct start pose and a single trivial path; the Java routine is what actually runs. (If
 you prefer pure-GUI authoring for the simple ones, `AutoFactory.buildAuto("Leave")` runs the `.auto`
 directly — both paths through the code are supported, and mixing them per-routine is fine.)
@@ -7391,7 +7434,8 @@ what the whole architecture buys:
 AutoRoutines.driveAndShoot("Center_Score1")
   = Commands.deadline(
         factory.followPath("Center_Score1"),                           // PathPlanner drives
-        superstructure.setWantedStateCommand(AUTO_SCORE_ON_MOVE));     // the FSM shoots
+        factory.holdWantedState(AUTO_SCORE_ON_MOVE));                  // the FSM shoots
+  // M13: held for the leg and handed back as DEFAULT, not set once; a one-shot outlived the path
 ```
 
 `RobotState` measures the chassis velocity the same way whether it came from a joystick or from
@@ -7422,7 +7466,7 @@ Three auto-specific details that *are* real:
 1. `Leave` runs and ends where the path says (proves `AutoBuilder`, `RobotConfig`, pose reset).
 2. `Preload Only` scores (proves the shot table at one distance, and the stationary solver).
 3. `Center 3` with `ScoreStationary` substituted for `ScoreOnMove` (proves pickup and sequencing
-   without the moving shot).
+   without the moving shot). M13 made this a chooser entry, `Center 3 (stationary)`, in tuning mode.
 4. `Center 3` as written (proves shoot-on-the-move under PathPlanner velocity).
 5. `Center 5` (proves it repeats, which is a different claim).
 6. Everything else.
@@ -7801,7 +7845,10 @@ in §8.6 exactly.
 and none moves before the intake is deployed (check `Superstructure/StowedWhileMoving` is never true);
 `Auto/PreloadFired` reads 8 at the end of `Preload Only`; `Leave`, `Preload Only` and `Center 3` run
 on the real field; `AutoSelector/StartPoseError` is under 5 cm when the robot is placed correctly and the warning
-alert fires when it is not.
+alert fires when it is not. (M13 ran the simulation clauses as `AutoCheckpointTest`, on synthetic
+paths and on both alliances, and the selector's as `AutoSelectorTest`. "Starts with the wait" is
+checked as nothing at all happening before the intake retains: movement alone could not see a
+missing wait behind a stationary preload.)
 
 ---
 
