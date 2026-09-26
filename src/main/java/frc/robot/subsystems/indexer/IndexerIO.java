@@ -4,12 +4,11 @@ import com.ctre.phoenix6.configs.Slot0Configs;
 import org.littletonrobotics.junction.AutoLog;
 
 /**
- * Hardware contract for the indexer: a single Kraken X60, plus an optional beam break.
+ * Hardware contract for the indexer: a single Kraken X60.
  *
- * <p>The beam break is optional hardware. With {@code Constants.Indexer.kHasBeamBreak == false} the
- * subsystem falls back to detecting a game piece from a current spike plus a velocity dip. Having
- * both paths behind one interface means deciding to add a sensor in week 5 is a one-line constant
- * change rather than a refactor.
+ * <p>There is no piece sensor. The optional beam break this interface once carried was deleted in
+ * M10b step 8, with the single-piece model it served (plan section 2.4); what the indexer knows
+ * about the hopper it reads from its own current and speed.
  */
 public interface IndexerIO {
   /** Everything the indexer hardware reports, captured once per loop and logged for replay. */
@@ -22,8 +21,6 @@ public interface IndexerIO {
     public double statorCurrentAmps = 0.0;
     public double supplyCurrentAmps = 0.0;
     public double tempCelsius = 0.0;
-    public boolean beamBreakTripped = false;
-    public boolean beamBreakConnected = false;
   }
 
   /**

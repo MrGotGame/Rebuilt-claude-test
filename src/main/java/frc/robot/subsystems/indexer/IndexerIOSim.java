@@ -10,17 +10,16 @@ import edu.wpi.first.wpilibj.simulation.DCMotorSim;
 import frc.robot.Constants;
 
 /**
- * Simulated indexer, including a synthetic game piece.
+ * Simulated indexer, including a synthetic hopper load and jam.
  *
- * <p>The piece simulation matters: it lets the current-spike detection path be exercised on a
- * laptop exactly as it will run on the robot, which is the only way to debug that logic before the
- * mechanism exists.
+ * <p>The load and jam simulation matters: it lets jam recovery and the load reading be exercised on
+ * a laptop exactly as they will run on the robot, which is the only way to debug that logic before
+ * the mechanism exists.
  */
 public class IndexerIOSim implements IndexerIO {
   private final DCMotorSim sim;
   private final PIDController controller = new PIDController(0.0, 0.0, 0.0);
   private boolean closedLoop = false;
-  private boolean simulatedPiecePresent = false;
   private boolean simulatedLoad = false;
   private boolean simulatedJam = false;
   private double appliedVolts = 0.0;
@@ -46,7 +45,8 @@ public class IndexerIOSim implements IndexerIO {
   }
 
   /**
-   * Advances the model one loop period and fills the input struct, including the synthetic piece.
+   * Advances the model one loop period and fills the input struct, including the synthetic load and
+   * jam.
    *
    * @param inputs the struct to populate
    */
@@ -56,7 +56,9 @@ public class IndexerIOSim implements IndexerIO {
     // simulatedPiecePresent, add a synthetic current offset that pushes statorCurrentAmps above
     // kHasPieceCurrentAmps AND a velocity droop of more than kHasPieceVelocityDropRpm, so BOTH
     // halves of the detection predicate are exercised. Set beamBreakTripped =
-    // simulatedPiecePresent and beamBreakConnected = Constants.Indexer.kHasBeamBreak.")
+    // simulatedPiecePresent and beamBreakConnected = Constants.Indexer.kHasBeamBreak.") The
+    // synthetic piece and the beam break were deleted in M10b step 8; the hopper's load and a jam
+    // replace them below.
     //
     // DEVIATION FROM THE TODO, deliberate, and the same one FloorRollerIOSim and ShooterIOSim make:
     // the TODO's "standard sim update" runs the simulated controller on RADIANS PER SECOND.
@@ -89,47 +91,16 @@ public class IndexerIOSim implements IndexerIO {
     inputs.positionRotations = sim.getAngularPositionRotations();
     inputs.appliedVolts = outputVolts;
 
-    // The two values the synthetic piece perturbs, taken from the model first and then loaded.
+    // The two values the synthetic load and jam perturb, taken from the model first.
     // DCMotorSim reports the draw of the single modelled motor, so no halving is needed here (the
     // flywheel's sim models two motors as one plant and does halve it).
     double velocityRpm =
         Units.radiansPerSecondToRotationsPerMinute(sim.getAngularVelocityRadPerSec());
     double statorAmps = Math.abs(sim.getCurrentDrawAmps());
 
-    if (simulatedPiecePresent) {
-      // Both halves of the fallback predicate in Indexer.updatePieceDetection are driven, not just
-      // the current spike. Driving only one half would let a bug that dropped the other half from
-      // the predicate pass every simulation run, which is the kind of test that is worse than no
-      // test at all.
-      //
-      // The perturbation is applied at the REPORTING boundary rather than as a load torque on the
-      // plant, and that is a deliberate lie worth understanding. DCMotorSim has no external-torque
-      // input, so the alternative would be to feed the drooped velocity back into the controller --
-      // but the controller has no integrator windup limit to stop it, so it would simply push
-      // harder until the reported velocity reached the setpoint again and the droop vanished from
-      // (goal - measured), destroying the very stimulus this hook exists to create. Plan section
-      // 9.2 is explicit that game pieces are not simulated without maple-sim; this is that limit.
-      double margin = Constants.Indexer.kSimPieceDetectionMargin;
-      statorAmps += Constants.Indexer.kHasPieceCurrentAmps.get() * margin;
-
-      // The droop always OPPOSES motion, which is why it is signed off the measured velocity rather
-      // than simply subtracted. Subtracting it outright would make an ejecting indexer (a negative
-      // RPM goal) read as spinning even faster backwards, so (goalRpm - velocityRpm) would go
-      // positive and sim would report a held piece in exactly the state the real robot reports
-      // none -- a sim/real divergence in the one state where the operator is relying on the
-      // mechanism to empty itself.
-      //
-      // The droop is also capped at the current speed so it can never reverse the reported sign: a
-      // piece that loads the indexer more than it can drive stalls the wheel at zero, it does not
-      // run it backwards.
-      double droopRpm =
-          Math.min(
-              Math.abs(velocityRpm), Constants.Indexer.kHasPieceVelocityDropRpm.get() * margin);
-      velocityRpm -= Math.copySign(droopRpm, velocityRpm);
-    }
-
-    // M10b step 6: the hopper's load and a jam, perturbed at the same reporting boundary and for
-    // the same reason as the synthetic piece above -- DCMotorSim has no external-torque input.
+    // M10b step 6: the hopper's load and a jam, perturbed at the reporting boundary rather than as
+    // a load torque on the plant, because DCMotorSim has no external-torque input. Plan section 9.2
+    // is explicit that game pieces are not simulated without maple-sim; this is that limit.
     // Both act only while the wheel is driven FORWARD, toward the flywheel, which is the only
     // direction the hopper pushes against. A reverse unjam pulse therefore reads normally, and a
     // jam is cleared only when the case clears it, never by the pulse itself: that is what lets a
@@ -160,45 +131,15 @@ public class IndexerIOSim implements IndexerIO {
     // a plot of this field in simulation is obviously constant rather than looking like a sensor
     // reading zero -- which is what a genuinely disconnected Talon reports.
     inputs.tempCelsius = 25.0;
-
-    // The beam break follows the same injected piece, so flipping Constants.Indexer.kHasBeamBreak
-    // switches which detection path Indexer takes in simulation with no other change. That is the
-    // point: the sensor-present and sensor-absent paths are both reachable on a laptop, and the
-    // fallback path is the one that needs the practice because it is the one nobody can bench test
-    // until the mechanism is built.
-    inputs.beamBreakConnected = Constants.Indexer.kHasBeamBreak;
-    inputs.beamBreakTripped = simulatedPiecePresent;
-  }
-
-  /**
-   * Test hook that places or removes a simulated game piece.
-   *
-   * @param present true to simulate a held piece
-   *     <p><b>Outputs:</b> sets the synthetic piece flag read by {@link #updateInputs}.
-   */
-  public void setSimulatedPiecePresent(boolean present) {
-    // IMPLEMENTATION (was TODO: "simulatedPiecePresent = present. Called by the simulation keyboard
-    // bindings, or by maple-sim's intake callback, so a student can drive a full intake-to-shoot
-    // cycle on a laptop.")
-    //
-    // This is the deliverable plan section 9.2 asks for, not a convenience: game pieces are not
-    // simulated, so without an injection hook the FSM states that depend on hasPiece -- HOLDING,
-    // the INDEXING -> HOLDING transition, and every shot the counter is supposed to count -- are
-    // unreachable on a laptop and would first be exercised on the robot, in a pit, under time
-    // pressure.
-    //
-    // Nothing caches the flag: updateInputs reads it fresh every loop, so a binding can drop a
-    // piece in and take it out again mid-loop-sequence without any state to reset.
-    simulatedPiecePresent = present;
   }
 
   /**
    * Test hook: the hopper is pressing pieces into the indexer.
    *
-   * <p>Added for M10b step 6. While set and driven forward, the indexer reports the current and
-   * shortfall of a wheel slowed by a load, which is what {@code Indexer.isLoaded()} looks for. It
-   * is the hopper-era counterpart of {@link #setSimulatedPiecePresent(boolean)}, which step 8
-   * deletes: there is no longer one piece to be present or absent, only a pile that is or is not
+   * <p>Added for M10b step 6. While set and driven forward, the indexer reports the current of a
+   * wheel working against a load, which is what {@code Indexer.isLoaded()} looks for. It is the
+   * hopper-era counterpart of the single-piece model's {@code setSimulatedPiecePresent}, deleted in
+   * step 8: there is no longer one piece to be present or absent, only a pile that is or is not
    * pushing.
    *
    * @param loaded true to simulate a loaded feed
@@ -285,7 +226,7 @@ public class IndexerIOSim implements IndexerIO {
     // DCMotorSim keeps integrating the plant and the wheel spins down against its own back-EMF. The
     // real indexer is configured NeutralModeValue.Brake, so it stops considerably faster. The
     // difference is not worth modelling -- WPILib's sim classes have no brake mode -- but it does
-    // mean a piece-retention problem seen on the robot will not reproduce in simulation, so do not
+    // mean a hopper-retention problem seen on the robot will not reproduce in simulation, so do not
     // conclude from a clean sim run that brake mode is working.
     closedLoop = false;
     appliedVolts = 0.0;

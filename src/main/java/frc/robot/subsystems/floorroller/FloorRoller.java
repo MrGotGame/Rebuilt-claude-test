@@ -22,7 +22,6 @@ public class FloorRoller extends SubsystemBase {
   /** What the operator or superstructure has asked the floor roller to do. */
   public enum WantedState {
     IDLE,
-    INTAKE,
     FEED,
     EJECT,
     CHARACTERIZE
@@ -31,7 +30,6 @@ public class FloorRoller extends SubsystemBase {
   /** What the floor roller is actually doing right now. */
   public enum SystemState {
     IDLE,
-    INTAKING,
     FEEDING,
     EJECTING,
     CHARACTERIZING
@@ -182,9 +180,10 @@ public class FloorRoller extends SubsystemBase {
     // No guards, and specifically no FAULTED state -- which is a real decision rather than an
     // omission. Every other mechanism can fault because it can fail to reach a goal it must reach:
     // a flywheel that never spins up cannot shoot, a pivot that never homes does not know where it
-    // is. A floor roller stalling against a game piece is NORMAL, and it is what intaking looks
-    // like for a few tenths of a second on every pickup. A stall-timeout fault here would fire
-    // during successful intakes and train the drive team to ignore the alert list.
+    // is. A floor roller stalling against game pieces is NORMAL: it leads the indexer, so it
+    // stalls against the stopped indexer every time a requested shot waits on the gate (plan
+    // section 2.4). A stall-timeout fault here would fire on every such wait and train the drive
+    // team to ignore the alert list.
     //
     // The cross-mechanism illegal combinations this roller participates in live in exactly one
     // place, Superstructure.applyState (plan section 2.1). Duplicating any of them here would give
@@ -192,7 +191,6 @@ public class FloorRoller extends SubsystemBase {
     // nobody remembered to update.
     return switch (wantedState) {
       case IDLE -> SystemState.IDLE;
-      case INTAKE -> SystemState.INTAKING;
       case FEED -> SystemState.FEEDING;
       case EJECT -> SystemState.EJECTING;
       case CHARACTERIZE -> SystemState.CHARACTERIZING;
@@ -207,11 +205,12 @@ public class FloorRoller extends SubsystemBase {
   private void applyState() {
     // IMPLEMENTATION (was TODO: "switch (systemState) dispatching io.setVelocity with kIntakeRpm /
     // kFeedRpm / kEjectRpm, io.stop() for IDLE, or io.setOpenLoop(characterizationVolts) for
-    // CHARACTERIZING.")
+    // CHARACTERIZING.") INTAKING and kIntakeRpm were deleted in M10b step 8: the floor roller
+    // runs only to feed the indexer, never while intaking (plan section 2.4).
     //
     // The tunables are read every loop rather than latched on entry, so that a speed edited under
     // /Tuning takes effect while the roller is already running. That is the whole workflow for
-    // finding an intake speed: hold the button, turn the number up until pieces stop bouncing out.
+    // finding a feed speed: hold the button, turn the number up until the indexer never waits.
     switch (systemState) {
       case IDLE -> {
         // A genuine stop rather than a closed-loop hold at zero. Unlike the flywheel, there is
@@ -220,7 +219,6 @@ public class FloorRoller extends SubsystemBase {
         goalRpm = 0.0;
         io.stop();
       }
-      case INTAKING -> commandVelocity(Constants.FloorRoller.kIntakeRpm.get());
       case FEEDING -> commandVelocity(Constants.FloorRoller.kFeedRpm.get());
       case EJECTING -> commandVelocity(Constants.FloorRoller.kEjectRpm.get());
       case CHARACTERIZING -> {

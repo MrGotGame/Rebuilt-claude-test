@@ -148,11 +148,6 @@ public final class Constants {
 
     /** WCP ThroughBore on the turret gearbox output. */
     public static final int kTurretAbsEncoder = 1;
-
-    /**
-     * TODO: optional beam break; delete this and set Indexer.kHasBeamBreak false if not installed.
-     */
-    public static final int kIndexerBeamBreak = 2;
   }
 
   // -------------------------------------------------------------------------------- the field ----
@@ -593,8 +588,6 @@ public final class Constants {
     public static final boolean kInverted = false;
     public static final double kStatorLimitAmps = 60.0;
 
-    public static final LoggedTunableNumber kIntakeRpm =
-        new LoggedTunableNumber("FloorRoller/IntakeRpm", 2500.0);
     public static final LoggedTunableNumber kFeedRpm =
         new LoggedTunableNumber("FloorRoller/FeedRpm", 3000.0);
     public static final LoggedTunableNumber kEjectRpm =
@@ -618,7 +611,7 @@ public final class Constants {
     public static final double kMoiKgM2 = 0.001;
   }
 
-  /** The indexer that holds a piece and feeds it into the flywheel on command. */
+  /** The indexer that holds the hopper back and feeds it into the flywheel on command. */
   public static final class Indexer {
     private Indexer() {}
 
@@ -628,11 +621,6 @@ public final class Constants {
     public static final boolean kInverted = false;
     public static final double kStatorLimitAmps = 50.0;
 
-    /** TODO: flip to true if you install a beam break; piece detection gets far more reliable. */
-    public static final boolean kHasBeamBreak = false;
-
-    public static final LoggedTunableNumber kIndexRpm =
-        new LoggedTunableNumber("Indexer/IndexRpm", 1200.0);
     public static final LoggedTunableNumber kFeedRpm =
         new LoggedTunableNumber("Indexer/FeedRpm", 3500.0);
     public static final LoggedTunableNumber kEjectRpm =
@@ -641,42 +629,22 @@ public final class Constants {
     public static final LoggedTunableNumber kKv = new LoggedTunableNumber("Indexer/Kv", 0.12);
 
     /**
-     * Current-spike piece detection threshold, amps. Used only when {@link #kHasBeamBreak} is
-     * false.
+     * How long after entering FEEDING the load and jam readings are ignored, seconds.
      *
-     * <p>TODO: tune on the robot by watching Indexer/Inputs/currentAmps while feeding a piece.
-     */
-    public static final LoggedTunableNumber kHasPieceCurrentAmps =
-        new LoggedTunableNumber("Indexer/HasPieceCurrent", 25.0);
-
-    public static final LoggedTunableNumber kHasPieceVelocityDropRpm =
-        new LoggedTunableNumber("Indexer/HasPieceVelDrop", 400.0);
-
-    /**
-     * How long after a speed change the load predicate is ignored.
+     * <p>A wheel spinning up from rest draws high current at low speed, which reads as {@link
+     * #kLoadedCurrentAmps} "loaded" AND as {@link #kJamCurrentAmps} "jammed" at once; without this
+     * window every burst would start with a spurious unjam pulse. Ignoring the wheel until it has
+     * had time to settle removes the failure by construction rather than by timing margin.
      *
-     * <p>Spin-up from rest satisfies both halves of the load test at once -- high current AND a
-     * large shortfall against the goal -- so an empty indexer told to FEED reported a phantom piece
-     * and then "lost" it on reaching speed, which the shot counter recorded as a shot. Debouncing
-     * was relied on to outlast that transient and did not. Ignoring the predicate until the wheel
-     * has had time to settle removes the failure by construction rather than by timing margin.
-     *
-     * <p>Survives the M10b hopper retrofit, which deletes the piece detector it was written for.
-     * The same spin-up transient would fool both of M10b's replacements -- high current at low
-     * speed reads as {@link #kLoadedCurrentAmps} "loaded" AND as {@link #kJamCurrentAmps} "jammed"
-     * -- so {@code isLoaded()} and jam detection also ignore the wheel for this long after every
-     * goal change.
+     * <p>Written for the single-piece detector, where the same transient made an empty indexer
+     * report a phantom piece and count a shot that never happened. That detector was deleted in
+     * M10b step 8; this constant survived because its replacements need it.
      *
      * <p>TODO: MEASURE -- read the spin-up duration from Indexer/Inputs and set this comfortably
      * above it.
      */
     public static final LoggedTunableNumber kDetectionSettleSec =
         new LoggedTunableNumber("Indexer/DetectionSettleSec", 0.4);
-
-    public static final LoggedTunableNumber kHasPieceDebounceSec =
-        new LoggedTunableNumber("Indexer/HasPieceDebounce", 0.06);
-    public static final LoggedTunableNumber kShotDetectDebounceSec =
-        new LoggedTunableNumber("Indexer/ShotDebounce", 0.08);
 
     /**
      * Stator current above which the feeding indexer counts as pushing against something, amps.
@@ -694,9 +662,10 @@ public final class Constants {
      * speed and shows the load only as extra current. The first mutation run of step 6 is what
      * showed the half was doing nothing, and its companion constant was removed.
      *
-     * <p>Starts at the same value as {@link #kHasPieceCurrentAmps}, which it supersedes and which
-     * is deleted in M10b's final step. TODO: tune from Indexer/Inputs while feeding a full hopper
-     * and then an empty one; the threshold belongs between the two steady currents.
+     * <p>Started at the same value as the single-piece detector's {@code kHasPieceCurrentAmps},
+     * which it superseded and which M10b step 8 deleted. TODO: tune from Indexer/Inputs while
+     * feeding a full hopper and then an empty one; the threshold belongs between the two steady
+     * currents.
      */
     public static final LoggedTunableNumber kLoadedCurrentAmps =
         new LoggedTunableNumber("Indexer/LoadedCurrent", 25.0);
@@ -751,10 +720,10 @@ public final class Constants {
     /**
      * How long an EJECT request runs before the machine parks itself back in IDLE, seconds.
      *
-     * <p>A duration rather than a sensor test on purpose: the whole reason to eject is that the
-     * piece is jammed or the wrong piece, which is exactly the situation in which piece detection
-     * cannot be trusted to tell you when it has gone. A bounded run also stops a held EJECT button
-     * from grinding the indexer against a stuck piece for the rest of the match.
+     * <p>A duration rather than a sensor test on purpose: the robot has no piece sensor, and the
+     * whole reason to eject is a jam, which is exactly the situation in which the load reading
+     * cannot be trusted to tell you when it has cleared. A bounded run also stops a held EJECT
+     * button from grinding the indexer against a stuck piece for the rest of the match.
      *
      * <p>TODO: tune on the robot. Watch Indexer/Inputs/velocityRpm while ejecting a piece and take
      * the time from the reversal to the piece clearing, plus a margin.
@@ -766,24 +735,13 @@ public final class Constants {
     public static final double kMoiKgM2 = 0.001;
 
     /**
-     * How far past the piece-detection thresholds IndexerIOSim's synthetic piece pushes,
-     * dimensionless.
-     *
-     * <p>Expressed as a multiple of {@link #kHasPieceCurrentAmps} and {@link
-     * #kHasPieceVelocityDropRpm} rather than as absolute amps and RPM, so that retuning either
-     * threshold on the robot cannot silently stop the simulated piece from being detected -- which
-     * would present as "the sim stopped working" long after the change that caused it.
-     */
-    public static final double kSimPieceDetectionMargin = 1.5;
-
-    /**
      * How far past the load and jam thresholds IndexerIOSim's synthetic load and jam push,
      * dimensionless. Added for M10b step 6.
      *
-     * <p>The same idea as {@link #kSimPieceDetectionMargin}, which step 8 deletes along with the
-     * piece detector it serves: expressed as a multiple of the thresholds rather than as absolute
-     * amps and RPM, so retuning a threshold on the robot cannot silently stop the simulation from
-     * reaching the state it was meant to exercise.
+     * <p>Expressed as a multiple of the thresholds rather than as absolute amps and RPM, so
+     * retuning a threshold on the robot cannot silently stop the simulation from reaching the state
+     * it was meant to exercise. (The same idea as the single-piece model's {@code
+     * kSimPieceDetectionMargin}, which M10b step 8 deleted.)
      */
     public static final double kSimLoadMargin = 1.5;
   }
@@ -1205,17 +1163,6 @@ public final class Constants {
      */
     public static final LoggedTunableNumber kEmptyConfirmSec =
         new LoggedTunableNumber("Superstructure/EmptyConfirm", 0.75);
-
-    /**
-     * How long the floor roller keeps feeding after a piece has been detected, seconds.
-     *
-     * <p>The plan asks the INDEXING state to run the floor roller "briefly", and this is that word
-     * made measurable. It exists so the roller cannot be left running indefinitely by an operator
-     * holding the intake button down with a piece already aboard, which would grind the next piece
-     * against the first one.
-     */
-    public static final LoggedTunableNumber kIndexFeedSec =
-        new LoggedTunableNumber("Superstructure/IndexFeedSec", 0.5);
   }
 
   // ------------------------------------------------------------------------------- the vision ----

@@ -186,7 +186,8 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void autonomousExit() {
-    // TODO: Log the final estimated pose and the indexer's shot count.
+    // TODO: Log the final estimated pose and the shooter's shot count. (The skeleton said the
+    // indexer's; M10b moved shot counting to the flywheel, and step 8 deleted the indexer's.)
   }
 
   /**

@@ -81,7 +81,6 @@ public class FloorRollerFsmTest {
   /** Every SystemState is reachable, which is clause 2 of the M5 checkpoint. */
   @Test
   void everyStateIsReachable() {
-    assertStateReached(FloorRoller.WantedState.INTAKE, FloorRoller.SystemState.INTAKING);
     assertStateReached(FloorRoller.WantedState.FEED, FloorRoller.SystemState.FEEDING);
     assertStateReached(FloorRoller.WantedState.EJECT, FloorRoller.SystemState.EJECTING);
     assertStateReached(
@@ -92,18 +91,18 @@ public class FloorRollerFsmTest {
   /** The roller actually closes the loop: commanded a speed, it converges and reports at-speed. */
   @Test
   void reachesCommandedSpeedUnderClosedLoop() {
-    floorRoller.setWantedState(FloorRoller.WantedState.INTAKE);
+    floorRoller.setWantedState(FloorRoller.WantedState.FEED);
 
     // 100 loops is two seconds of simulated time, which is far longer than a roller of this
     // inertia needs; the test is asserting convergence, not spin-up time.
     step(100);
 
-    assertEquals(FloorRoller.SystemState.INTAKING, floorRoller.getSystemState());
+    assertEquals(FloorRoller.SystemState.FEEDING, floorRoller.getSystemState());
     assertTrue(
         floorRoller.atSpeed(),
         "roller did not converge on its goal; measured " + floorRoller.getVelocityRpm());
     assertEquals(
-        Constants.FloorRoller.kIntakeRpm.get(),
+        Constants.FloorRoller.kFeedRpm.get(),
         floorRoller.getVelocityRpm(),
         Constants.FloorRoller.kToleranceRpm.get(),
         "converged velocity outside the tolerance band");
@@ -133,11 +132,11 @@ public class FloorRollerFsmTest {
     CommandScheduler.getInstance().unregisterSubsystem(floorRoller);
     floorRoller = new FloorRoller(new FloorRollerIO() {});
 
-    floorRoller.setWantedState(FloorRoller.WantedState.INTAKE);
+    floorRoller.setWantedState(FloorRoller.WantedState.FEED);
     step(100);
 
     assertEquals(
-        FloorRoller.SystemState.INTAKING,
+        FloorRoller.SystemState.FEEDING,
         floorRoller.getSystemState(),
         "the state machine must still run when the mechanism cannot");
     assertFalse(

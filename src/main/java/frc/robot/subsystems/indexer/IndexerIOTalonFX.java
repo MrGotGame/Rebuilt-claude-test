@@ -20,13 +20,11 @@ import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.units.measure.Current;
 import edu.wpi.first.units.measure.Temperature;
 import edu.wpi.first.units.measure.Voltage;
-import edu.wpi.first.wpilibj.DigitalInput;
 import frc.robot.Constants;
 
-/** Real-hardware indexer: one Kraken X60 on the RIO bus, with an optional beam break on DIO. */
+/** Real-hardware indexer: one Kraken X60 on the RIO bus. */
 public class IndexerIOTalonFX implements IndexerIO {
   private final TalonFX motor;
-  private final DigitalInput beamBreak;
   private final VelocityVoltage velocityRequest = new VelocityVoltage(0.0);
   private final VoltageOut voltageRequest = new VoltageOut(0.0);
   private final StatusSignal<Angle> position;
@@ -44,15 +42,13 @@ public class IndexerIOTalonFX implements IndexerIO {
   private double lastAppliedCurrentScalar = 1.0;
 
   /**
-   * Constructs the Talon, the optional beam break, and the status signals.
+   * Constructs the Talon and the status signals.
    *
    * <p>NOTE: device and signal construction is pre-filled because these fields are final. Your work
    * is the configuration, in the TODO.
    */
   public IndexerIOTalonFX() {
     motor = new TalonFX(Constants.Can.kIndexerId, Constants.Can.kRioCanBus);
-    beamBreak =
-        Constants.Indexer.kHasBeamBreak ? new DigitalInput(Constants.Dio.kIndexerBeamBreak) : null;
     position = motor.getPosition();
     velocity = motor.getVelocity();
     appliedVolts = motor.getMotorVoltage();
@@ -75,11 +71,11 @@ public class IndexerIOTalonFX implements IndexerIO {
 
     // BRAKE, and this is the one configuration line where the indexer deliberately differs from the
     // floor roller, which coasts. This mechanism is the last thing holding a game piece before the
-    // flywheel, often on a slight downhill into the shooter, and the failure it prevents is a piece
-    // walking out of the robot between auto and teleop, or during the pause after a match-ending
-    // disable, when nothing is driving the motor at all. The cost is that a jammed piece cannot be
-    // pulled out by hand without back-driving the gearbox; that is the right trade for a mechanism
-    // that is supposed to retain exactly one piece.
+    // flywheel, often on a slight downhill into the shooter, and the failure it prevents is the
+    // hopper emptying into the flywheel between auto and teleop, or during the pause after a
+    // match-ending disable, when nothing is driving the motor at all. The cost is that a jammed
+    // piece cannot be pulled out by hand without back-driving the gearbox; that is the right trade
+    // for the mechanism that gates the hopper.
     config.MotorOutput.NeutralMode = NeutralModeValue.Brake;
     config.MotorOutput.Inverted =
         Constants.Indexer.kInverted
@@ -90,9 +86,8 @@ public class IndexerIOTalonFX implements IndexerIO {
 
     // 50 Hz on everything the state machine reads, matching the floor roller: one fresh sample per
     // robot loop is all any consumer can use, and nine devices share the roboRIO bus. Stator
-    // current is in that set rather than at a lower rate because it is half of the piece-detection
-    // predicate when no beam break is installed -- a stale current sample there would delay the
-    // INDEXING -> HOLDING transition and let the indexer keep pulling on a piece it already has.
+    // current is in that set rather than at a lower rate because the load and jam readings are
+    // built on it -- a stale current sample would delay the jam response by a loop.
     //
     // Temperature is the exception at 4 Hz: a motor takes tens of seconds to heat up, so paying
     // more for it is bus budget spent on a number that cannot change between frames.
@@ -113,7 +108,7 @@ public class IndexerIOTalonFX implements IndexerIO {
   }
 
   /**
-   * Samples the motor and the beam break.
+   * Samples the motor.
    *
    * @param inputs the struct to populate
    */
@@ -121,7 +116,7 @@ public class IndexerIOTalonFX implements IndexerIO {
   public void updateInputs(IndexerIOInputs inputs) {
     // IMPLEMENTATION (was TODO: "refreshAll on the six signals, feed isOK() through
     // connectedDebounce, fill every field. For the beam break: guard on beamBreak != null, then
-    // inputs.beamBreakTripped = !beamBreak.get().")
+    // inputs.beamBreakTripped = !beamBreak.get().") The beam break was deleted in M10b step 8.
     //
     // The local refresh is kept even though these signals are also in PhoenixUtil's shared batch,
     // for two reasons. First, the StatusCode is the measurement that drives inputs.connected: the
@@ -151,30 +146,6 @@ public class IndexerIOTalonFX implements IndexerIO {
     inputs.statorCurrentAmps = statorCurrent.getValueAsDouble();
     inputs.supplyCurrentAmps = supplyCurrent.getValueAsDouble();
     inputs.tempCelsius = temp.getValueAsDouble();
-
-    if (beamBreak == null) {
-      // Both fields are written on every path, per the IndexerIO contract. Reporting tripped =
-      // false here rather than leaving the previous value is what makes Indexer fall through to the
-      // current-and-velocity path instead of latching onto a stale "piece present".
-      inputs.beamBreakConnected = false;
-      inputs.beamBreakTripped = false;
-    } else {
-      // beamBreakConnected means "configured and constructed", NOT "electrically healthy". A
-      // three-wire beam break whose signal lead falls off reads as a constant level, and no DIO
-      // channel can tell that apart from a sensor honestly reporting that level, so this flag
-      // cannot be made to mean more than it does. What it does buy is the case that actually
-      // happens: kHasBeamBreak flipped true in code while no sensor is installed, which Indexer
-      // turns into an alert instead of a robot that silently believes it is always loaded.
-      inputs.beamBreakConnected = true;
-
-      // TODO: VERIFY your sensor's polarity on the bench before trusting this inversion. Most beam
-      // breaks are active-low -- the output is pulled low while the beam is BROKEN, so a piece
-      // present reads false at the DIO pin and this negation turns it into "tripped" -- but not all
-      // are, and getting it backwards means the robot believes it always has a piece, which pins
-      // hasPiece() true and opens every scoring gate on an empty indexer. Check it by putting a
-      // piece in the indexer with the robot enabled and reading Indexer/Inputs/beamBreakTripped.
-      inputs.beamBreakTripped = !beamBreak.get();
-    }
   }
 
   /**
@@ -187,11 +158,8 @@ public class IndexerIOTalonFX implements IndexerIO {
     // IMPLEMENTATION (was TODO: "motor.setControl(velocityRequest.withVelocity(velocityRpm /
     // 60.0)).")
     //
-    // Negative values are passed straight through rather than clamped: EJECT is a negative RPM
-    // goal. A zero request is passed through as well, and is meaningful here in a way it is not on
-    // the floor roller -- Indexer's HOLDING state commands a closed-loop zero so that the P term
-    // actively resists a piece trying to roll out, which is weaker than a stall but stronger than
-    // the brake alone.
+    // Negative values are passed straight through rather than clamped: EJECT and an unjam pulse
+    // are negative RPM goals.
     motor.setControl(velocityRequest.withVelocity(velocityRpm / 60.0));
   }
 
@@ -223,7 +191,7 @@ public class IndexerIOTalonFX implements IndexerIO {
     // partial configuration group in place; applying a full configuration object here would reset
     // every other group -- current limits and the brake neutral mode included -- for at least one
     // loop, every time somebody nudged a gain on the dashboard. Losing brake mode for a loop while
-    // holding a piece is exactly the failure this mechanism exists to prevent.
+    // holding the hopper back is exactly the failure this mechanism exists to prevent.
     tryUntilOk(5, () -> motor.getConfigurator().apply(gains, 0.25));
   }
 
@@ -238,8 +206,8 @@ public class IndexerIOTalonFX implements IndexerIO {
     // .MEDIUM.")
     //
     // MEDIUM means this scalar moves after the intake and floor roller have already given up amps
-    // but before the flywheel and turret do. The ordering is deliberate: a robot that cannot pick a
-    // piece up can still shoot the one it is holding, so the indexer keeps its current until the
+    // but before the flywheel and turret do. The ordering is deliberate: a robot that cannot pick
+    // pieces up can still shoot the ones it is holding, so the indexer keeps its current until the
     // pickup mechanisms have already been throttled.
     //
     // The 5% deadband is what makes this safe to call every loop from Indexer.periodic(). Without
@@ -262,9 +230,7 @@ public class IndexerIOTalonFX implements IndexerIO {
     //
     // stopMotor() issues a neutral request, which with NeutralModeValue.Brake configured above
     // leaves the indexer braked rather than coasting. That is the desired behavior here and the
-    // reason Indexer's IDLE state can use it: a piece resting in a braked indexer stays there.
-    // Deliberately NOT setVelocity(0.0) -- that is a closed-loop hold, which Indexer uses for its
-    // separate HOLDING state when it wants the P term actively fighting a piece that is moving.
+    // reason Indexer's IDLE state can use it: a braked indexer holds the hopper back.
     motor.stopMotor();
   }
 
@@ -313,9 +279,8 @@ public class IndexerIOTalonFX implements IndexerIO {
     // here would be a guessed electrical limit with nothing to check it against. Add it alongside a
     // measured number if the PDH channel ever trips.
     //
-    // Note that the stator limit is also what keeps current-spike piece detection meaningful. If
-    // this limit were ever raised far above kHasPieceCurrentAmps the spike would still be detected,
-    // but the indexer would be free to keep pulling hard on a piece it has already detected; the
-    // two numbers should be retuned together.
+    // Note that the stator limit also bounds what the load and jam readings can see. Both
+    // kLoadedCurrentAmps and kJamCurrentAmps must sit below it, or a stalled wheel would be held
+    // at the limit without ever reading as jammed; retune them together.
   }
 }

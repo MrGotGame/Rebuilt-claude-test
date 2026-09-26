@@ -16,32 +16,15 @@ import org.junit.jupiter.api.Test;
  * Transition tests for the indexer, covering the half of M5's per-mechanism checkpoint that does
  * not need a robot.
  *
- * <p>The indexer is the one M5 mechanism whose interesting states depend on a game piece, and plan
- * section 9.2 is explicit that game pieces are not simulated. {@link
- * IndexerIOSim#setSimulatedPiecePresent(boolean)} exists precisely so those paths can be exercised
- * anyway, and this suite is its first real consumer.
+ * <p>The indexer's interesting states depend on what the hopper is doing to it, and plan section
+ * 9.2 is explicit that game pieces are not simulated. {@link
+ * IndexerIOSim#setSimulatedLoad(boolean)} and {@link IndexerIOSim#setSimulatedJam(boolean)} exist
+ * so those paths can be exercised anyway. The single-piece cases this suite started with -- piece
+ * detection, holding, the indexer's own shot counter -- were deleted with that model in M10b step
+ * 8.
  */
 public class IndexerFsmTest {
   private static final double LOOP_SEC = 0.02;
-
-  /**
-   * Loops needed for a piece to be detected, derived from the constants rather than guessed.
-   *
-   * <p>Detection has to clear two gates in series: the settling window that skips the spin-up
-   * transient, and then the debouncer. A fixed guess sat right on that boundary and made this suite
-   * fail intermittently, which is the worst possible failure mode for a test -- it reads as
-   * flakiness and gets ignored. Deriving it means retuning either constant cannot silently
-   * re-introduce that.
-   *
-   * @return loops to step before asserting on piece detection
-   */
-  private static int detectionLoops() {
-    return (int)
-            ((Constants.Indexer.kDetectionSettleSec.get()
-                    + Constants.Indexer.kHasPieceDebounceSec.get())
-                / LOOP_SEC)
-        + 15;
-  }
 
   private IndexerIOSim sim;
   private Indexer indexer;
@@ -80,33 +63,33 @@ public class IndexerFsmTest {
     }
   }
 
-  /** Nothing is held at boot, and an empty indexer does not invent a piece. */
+  /** The machine boots idle, and stays there with nothing requested. */
   @Test
-  void startsIdleAndEmpty() {
-    step(detectionLoops());
+  void startsIdle() {
+    step(loadDetectionLoops());
     assertEquals(Indexer.SystemState.IDLE, indexer.getSystemState());
-    assertFalse(indexer.hasPiece(), "an empty indexer must not report a piece");
-    assertEquals(0, indexer.getShotCount());
   }
 
   /** Every SystemState is reachable, which is clause 2 of the M5 checkpoint. */
   @Test
   void everyStateIsReachable() {
-    indexer.setWantedState(Indexer.WantedState.INDEX);
-    step(5);
-    assertEquals(Indexer.SystemState.INDEXING, indexer.getSystemState());
-
-    // HOLDING is only reachable with a piece aboard, which is what the sim hook is for.
-    sim.setSimulatedPiecePresent(true);
-    step(detectionLoops());
-    assertEquals(
-        Indexer.SystemState.HOLDING,
-        indexer.getSystemState(),
-        "a piece arriving during INDEX must promote the machine to HOLDING");
-
     indexer.setWantedState(Indexer.WantedState.FEED);
-    step(5);
+    step(loadDetectionLoops());
     assertEquals(Indexer.SystemState.FEEDING, indexer.getSystemState());
+
+    // UNJAMMING and JAMMED are only reachable against a jam, which is what the sim hook is for.
+    sim.setSimulatedJam(true);
+    boolean sawUnjamming = false;
+    for (int i = 0; i < 400 && indexer.getSystemState() != Indexer.SystemState.JAMMED; i++) {
+      step(1);
+      sawUnjamming |= indexer.getSystemState() == Indexer.SystemState.UNJAMMING;
+    }
+    assertTrue(sawUnjamming, "a jam during FEED must reverse the wheel in UNJAMMING");
+    assertEquals(
+        Indexer.SystemState.JAMMED,
+        indexer.getSystemState(),
+        "a jam the pulses cannot clear must latch JAMMED");
+    sim.setSimulatedJam(false);
 
     indexer.setWantedState(Indexer.WantedState.EJECT);
     step(5);
@@ -119,56 +102,6 @@ public class IndexerFsmTest {
     indexer.setWantedState(Indexer.WantedState.IDLE);
     step(5);
     assertEquals(Indexer.SystemState.IDLE, indexer.getSystemState());
-  }
-
-  /**
-   * A piece fed out counts exactly one shot, and the count does not drift afterwards.
-   *
-   * <p>The drift half matters as much as the increment. The shot counter is armed by a latch rather
-   * than by an instantaneous edge, so a latch that never clears would keep counting every loop the
-   * indexer spent empty.
-   */
-  @Test
-  void shotCountIncrementsExactlyOncePerPiece() {
-    sim.setSimulatedPiecePresent(true);
-    indexer.setWantedState(Indexer.WantedState.INDEX);
-    step(detectionLoops());
-    assertTrue(indexer.hasPiece(), "the injected piece was never detected");
-
-    indexer.setWantedState(Indexer.WantedState.FEED);
-    step(5);
-
-    sim.setSimulatedPiecePresent(false);
-    step(detectionLoops());
-    assertEquals(1, indexer.getShotCount(), "feeding one piece out must count exactly one shot");
-
-    step(100);
-    assertEquals(1, indexer.getShotCount(), "the shot count drifted while the indexer sat empty");
-  }
-
-  /** Feeding an empty indexer counts nothing, however long it runs. */
-  @Test
-  void feedingAnEmptyIndexerCountsNothing() {
-    indexer.setWantedState(Indexer.WantedState.FEED);
-    step(150);
-    assertEquals(0, indexer.getShotCount(), "an empty indexer counted a shot it never had");
-  }
-
-  /** The held piece survives HOLDING, where the wheel is deliberately stopped. */
-  @Test
-  void aHeldPieceIsNotLostWhileHolding() {
-    sim.setSimulatedPiecePresent(true);
-    indexer.setWantedState(Indexer.WantedState.INDEX);
-    step(detectionLoops());
-
-    indexer.setWantedState(Indexer.WantedState.HOLD);
-    step(150);
-
-    // The failure this guards is subtle and was fixed during implementation: detection reads the
-    // load on a TURNING wheel, so a naive predicate reports "no piece" the moment HOLDING stops it,
-    // the machine drops back to INDEXING, and the piece is ground at 50 Hz for the rest of a match.
-    assertTrue(indexer.hasPiece(), "the held piece was lost once the wheel stopped");
-    assertEquals(Indexer.SystemState.HOLDING, indexer.getSystemState());
   }
 
   // ------------------------------------------------------------- M10b step 6: jams and load ----
@@ -186,8 +119,8 @@ public class IndexerFsmTest {
 
   /**
    * "Loaded" means a FEED pushing against something, and nothing else: it is false with no load,
-   * false while held or idle with the load present, false while ejecting, and true only while
-   * feeding into the load.
+   * false while idle with the load present, false while ejecting, and true only while feeding into
+   * the load.
    *
    * <p>The not-feeding cases are the point. The old piece detector had to answer its question for a
    * stopped wheel and needed a whole replay mechanism to do it; this reading refuses to answer
@@ -206,9 +139,7 @@ public class IndexerFsmTest {
     assertEquals(Indexer.SystemState.FEEDING, indexer.getSystemState(), "a load is not a jam");
 
     for (Indexer.WantedState notFeeding :
-        new Indexer.WantedState[] {
-          Indexer.WantedState.HOLD, Indexer.WantedState.IDLE, Indexer.WantedState.EJECT
-        }) {
+        new Indexer.WantedState[] {Indexer.WantedState.IDLE, Indexer.WantedState.EJECT}) {
       indexer.setWantedState(notFeeding);
       for (int i = 0; i < 30; i++) {
         step(1);
@@ -416,18 +347,17 @@ public class IndexerFsmTest {
 
   /** With hardware that never moves, the machine still transitions but detects nothing. */
   @Test
-  void deadHardwareTransitionsButDetectsNoPiece() {
+  void deadHardwareTransitionsButDetectsNothing() {
     CommandScheduler.getInstance().unregisterSubsystem(indexer);
     indexer = new Indexer(new IndexerIO() {});
 
-    indexer.setWantedState(Indexer.WantedState.INDEX);
-    step(detectionLoops());
+    indexer.setWantedState(Indexer.WantedState.FEED);
+    step(loadDetectionLoops());
 
     assertEquals(
-        Indexer.SystemState.INDEXING,
+        Indexer.SystemState.FEEDING,
         indexer.getSystemState(),
         "the state machine must still run when the mechanism cannot");
-    assertFalse(indexer.hasPiece(), "a dead indexer must not report a piece");
-    assertEquals(0, indexer.getShotCount());
+    assertFalse(indexer.isLoaded(), "a dead indexer must not report a load");
   }
 }
