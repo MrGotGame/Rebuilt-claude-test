@@ -11,6 +11,7 @@ import edu.wpi.first.wpilibj2.command.button.Trigger;
 import frc.robot.autos.AutoFactory;
 import frc.robot.autos.AutoRoutines;
 import frc.robot.autos.AutoSelector;
+import frc.robot.commands.CharacterizationCommands;
 import frc.robot.commands.DriveCommands;
 import frc.robot.generated.TunerConstants;
 import frc.robot.subsystems.drive.Drive;
@@ -85,6 +86,9 @@ public class RobotContainer {
    * built in {@link #configureShooterTuningBindings()}.
    */
   private LoggedNetworkBoolean benchSpinUp;
+
+  /** Tuning-mode trigger for one shot-table measurement burst (M11); null outside tuning mode. */
+  private LoggedNetworkBoolean measureShotTable;
 
   private final AutoFactory autoFactory;
   private final AutoRoutines autoRoutines;
@@ -189,6 +193,7 @@ public class RobotContainer {
     configureButtonBindings();
     configureCharacterizationBindings();
     configureShooterTuningBindings();
+    configureShotTableBindings();
   }
 
   /**
@@ -399,6 +404,37 @@ public class RobotContainer {
         // walks out of. To stop the wheel completely, disable the robot. COAST is deliberately not
         // reachable from here -- it is a pit and brownout state that M10 will command.
         .onFalse(shooter.setWantedStateCommand(Shooter.WantedState.IDLE));
+  }
+
+  /**
+   * Binds the shot-table measurement burst to a dashboard toggle, while tuning only (M11 step 3).
+   *
+   * <p>Follows the flywheel bench harness above: a NetworkTables boolean rather than a controller
+   * button, so a practice-field session needs nothing plugged into the Driver Station, and the
+   * whole loop -- speed, taped distance, trigger -- lives in one AdvantageScope pane. Unlike the
+   * bench harness it goes through the superstructure, because a burst moves the turret, the
+   * flywheel, the indexer and the floor roller together.
+   *
+   * <p><b>Outputs:</b> when tuning mode is on, publishes {@code /Tuning/ShotTable/Measure} and
+   * registers one trigger against it.
+   */
+  private void configureShotTableBindings() {
+    if (!Constants.kTuningMode) {
+      return;
+    }
+    measureShotTable = new LoggedNetworkBoolean("/Tuning/ShotTable/Measure", false);
+
+    // Rising edge only: one toggle is one burst, and the burst ends on its own when the hopper
+    // reads empty. Leaving the toggle on does not repeat it; toggle off and on for the next one.
+    // The time limit is the auto scoring bound, which is sized to empty a full 50-piece hopper.
+    new Trigger(measureShotTable)
+        .onTrue(
+            CharacterizationCommands.measureShotTablePoint(
+                superstructure,
+                shooter,
+                Constants.Shot.kMeasureRpm,
+                Constants.Shot.kMeasureTapedDistanceMeters,
+                Constants.Auto.kScoreTimeoutSec.get()));
   }
 
   /**

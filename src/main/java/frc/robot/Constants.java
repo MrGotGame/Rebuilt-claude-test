@@ -1057,6 +1057,24 @@ public final class Constants {
     public static final LoggedTunableNumber kRpmIntercept =
         new LoggedTunableNumber("Shot/RpmIntercept", 0.0);
 
+    /**
+     * Flywheel speed for the next shot-table measurement burst, RPM. Added for M11.
+     *
+     * <p>Read when a burst starts ({@code /Tuning/ShotTable/Measure} in tuning mode), so the M11
+     * loop is: stand at a taped distance, set this, toggle, count what scores, adjust, repeat.
+     */
+    public static final LoggedTunableNumber kMeasureRpm =
+        new LoggedTunableNumber("ShotTable/Rpm", 3000.0);
+
+    /**
+     * The taped distance of the next shot-table burst, meters. Added for M11.
+     *
+     * <p>Logged beside the pose estimate's distance, so a disagreement between the tape and the
+     * estimate -- which would put every table row at the wrong distance -- shows up in the data.
+     */
+    public static final LoggedTunableNumber kMeasureTapedDistanceMeters =
+        new LoggedTunableNumber("ShotTable/TapedDistance", 0.0);
+
     /** Hard cap on solver iterations, so a non-converging solve cannot stall the loop. */
     public static final int kMaxSolverIterations = 6;
 

@@ -20,6 +20,8 @@ import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import edu.wpi.first.wpilibj2.command.Subsystem;
 import frc.robot.Constants;
 import frc.robot.RobotState;
+import frc.robot.commands.CharacterizationCommands;
+import frc.robot.commands.CharacterizationCommands.ShotTableSample;
 import frc.robot.shooting.ShootingSolver;
 import frc.robot.shooting.TurretUnwrapper;
 import frc.robot.subsystems.drive.Drive;
@@ -2255,6 +2257,156 @@ public class SuperstructureFsmTest {
     stepWithVision(3);
     assertEquals(
         tableRpm, superstructure.getLastShot().flywheelRpm(), 1e-6, "the clear was ignored");
+  }
+
+  // ------------------------------------------------ M11 step 3: the shot-table measurement burst
+  // ----
+
+  /**
+   * Builds the shipped, unmeasured robot -- all-zero tables -- facing the goal from 3 m, and homes
+   * it. The robot M11 is actually measured on.
+   *
+   * <p><b>Outputs:</b> replaces every subsystem; sets {@link #firingShooter}.
+   */
+  private void buildUnmeasuredRobot() {
+    intakeGeometry = IdealPivotIO.GEOMETRY;
+    firingShooter = new ShooterIOSim();
+    buildRobot(
+        new ShootingSolver(),
+        new IdealPivotIO(),
+        new IndexerIOSim(),
+        new TurretIOSim(),
+        firingShooter,
+        new FloorRollerIOSim());
+    placeRobotAt(-3.0, 0.0);
+    homeAndSettle();
+  }
+
+  /**
+   * Runs a started command by hand, with fresh vision, until it finishes or a limit is reached;
+   * while the indexer feeds, a piece leaves every ten loops until {@code pieces} have gone.
+   *
+   * @param command a command that has already been initialised
+   * @param pieces how many pieces the hopper holds
+   * @param maxLoops how many loops to allow
+   * @return the loops it took to finish, or {@code maxLoops + 1} if it never did
+   */
+  private int runBurst(Command command, int pieces, int maxLoops) {
+    int fired = 0;
+    int feedingLoops = 0;
+    for (int loop = 1; loop <= maxLoops; loop++) {
+      stepWithVision(1);
+      if (indexer.getSystemState() == Indexer.SystemState.FEEDING && fired < pieces) {
+        if (++feedingLoops % 10 == 0) {
+          firingShooter.injectShot();
+          fired++;
+        }
+      }
+      command.execute();
+      if (command.isFinished()) {
+        return loop;
+      }
+    }
+    return maxLoops + 1;
+  }
+
+  /**
+   * A measurement burst on the unmeasured robot fires the whole hopper, ends when it reads empty,
+   * reports what it fired, and leaves the robot at rest with the override cleared.
+   *
+   * <p>This is the M11 practice-field loop, end to end in simulation: set the speed and the taped
+   * distance, trigger, and read one row of data back. It is also the case that proves the override
+   * really is the thing letting an unmeasured robot fire: the report's speed is the one asked for.
+   */
+  @Test
+  void aShotTableBurstFiresTheHopperAndReportsIt() {
+    buildUnmeasuredRobot();
+    List<ShotTableSample> samples = new ArrayList<>();
+    double holdSec = 20.0;
+    Command burst =
+        CharacterizationCommands.measureShotTablePoint(
+            superstructure, shooter, () -> TABLE_RPM, () -> 3.05, holdSec, samples::add);
+
+    burst.initialize();
+    int loops = runBurst(burst, 8, (int) (holdSec / LOOP_SEC) + 50);
+    burst.end(false);
+
+    assertTrue(loops < holdSec / LOOP_SEC, "the burst ran to its time limit instead of emptying");
+    assertEquals(1, samples.size(), "one burst must report exactly once");
+    ShotTableSample sample = samples.get(0);
+    assertEquals(8, sample.shotsFired(), "the burst did not count the eight pieces it fired");
+    assertEquals(TABLE_RPM, sample.rpm(), 1e-9);
+    assertEquals(3.05, sample.tapedDistanceMeters(), 1e-9);
+    assertEquals(3.0, sample.estimatedDistanceMeters(), 1e-6, "the estimated distance is wrong");
+    assertFalse(sample.timedOut());
+
+    assertFalse(superstructure.isShotTableOverrideActive(), "the burst left its override behind");
+    step(3);
+    assertEquals(
+        Superstructure.SystemState.RESTING,
+        superstructure.getSystemState(),
+        "the burst did not hand the robot back to rest");
+  }
+
+  /**
+   * A burst that starts with the hopper already believed empty -- from the burst before, with the
+   * hopper reloaded by hand, which resets nothing -- still waits for its own pieces.
+   *
+   * <p>The first burst here fires nothing, so it runs to its time limit and leaves the belief set.
+   * The second then has three pieces. Ending on the belief alone would end it on its first loop,
+   * having measured nothing, and on the practice field that is every burst after the first.
+   */
+  @Test
+  void aShotTableBurstIgnoresTheLastBurstsEmptyBelief() {
+    buildUnmeasuredRobot();
+    List<ShotTableSample> samples = new ArrayList<>();
+    double holdSec = 4.0;
+
+    Command empty =
+        CharacterizationCommands.measureShotTablePoint(
+            superstructure, shooter, () -> TABLE_RPM, () -> 3.0, holdSec, samples::add);
+    empty.initialize();
+    int loops = runBurst(empty, 0, TURRET_SETTLE_LOOPS);
+    empty.end(false);
+    assertEquals(
+        (int) Math.round(holdSec / LOOP_SEC), loops, 2, "an empty hopper did not end on the limit");
+    assertTrue(samples.get(0).timedOut(), "an empty burst must report that it timed out");
+    assertEquals(0, samples.get(0).shotsFired());
+    assertTrue(superstructure.likelyEmpty(), "precondition: the belief is left set");
+
+    Command reloaded =
+        CharacterizationCommands.measureShotTablePoint(
+            superstructure, shooter, () -> TABLE_RPM, () -> 3.0, holdSec, samples::add);
+    reloaded.initialize();
+    runBurst(reloaded, 3, TURRET_SETTLE_LOOPS);
+    reloaded.end(false);
+    assertEquals(3, samples.get(1).shotsFired(), "the reloaded burst ended on the stale belief");
+    assertFalse(samples.get(1).timedOut(), "the reloaded burst did not end on its own belief");
+  }
+
+  /**
+   * A cancelled burst still clears its override, rests the robot and reports.
+   *
+   * <p>Cancelling is how a practice-field operator stops a burst that is going wrong, and it is the
+   * path most likely to be forgotten: a cancelled command skips its own finish condition.
+   */
+  @Test
+  void aCancelledShotTableBurstStillCleansUp() {
+    buildUnmeasuredRobot();
+    List<ShotTableSample> samples = new ArrayList<>();
+    Command burst =
+        CharacterizationCommands.measureShotTablePoint(
+            superstructure, shooter, () -> TABLE_RPM, () -> 3.0, 20.0, samples::add);
+    burst.initialize();
+    stepWithVision(10);
+    burst.execute();
+    assertTrue(superstructure.isShotTableOverrideActive(), "precondition: the burst is running");
+
+    burst.end(true);
+    assertFalse(superstructure.isShotTableOverrideActive(), "a cancel left the override set");
+    assertEquals(1, samples.size(), "a cancelled burst must still report");
+    step(3);
+    assertEquals(Superstructure.SystemState.RESTING, superstructure.getSystemState());
   }
 
   /**
