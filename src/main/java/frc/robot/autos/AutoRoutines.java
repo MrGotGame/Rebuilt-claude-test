@@ -1,13 +1,17 @@
 package frc.robot.autos;
 
+import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import frc.robot.Constants;
 import frc.robot.subsystems.intake.Intake;
 import frc.robot.subsystems.superstructure.Superstructure;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.DoubleSupplier;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * The composable routine builder.
@@ -43,6 +47,8 @@ import java.util.function.DoubleSupplier;
 public class AutoRoutines {
   private final AutoFactory factory;
   private final Superstructure superstructure;
+  private final Function<Pose2d, Command> pathfinder;
+  private final Supplier<Optional<Pose2d>> gamePieces;
 
   /**
    * Builds the routine library.
@@ -50,8 +56,29 @@ public class AutoRoutines {
    * @param factory the configured PathPlanner factory
    */
   public AutoRoutines(AutoFactory factory) {
+    this(factory, factory::pathfindTo, () -> factory.getVision().getGamePieceFieldPose());
+  }
+
+  /**
+   * Builds the routine library with a given pathfinder and game-piece source.
+   *
+   * <p>Added for M13 step 6, for the scavenge routine. PathPlanner's AD* pathfinder plans on a
+   * background thread against real time, which a test's paused clock cannot drive, and the camera's
+   * game-piece fix depends on constants that are still unmeasured. The tests hand in a
+   * straight-line follower and a supplier of their own.
+   *
+   * @param factory the configured PathPlanner factory
+   * @param pathfinder builds a command that drives to a pose, given in current-alliance coordinates
+   * @param gamePieces where the intake camera currently sees a game piece, if anywhere
+   */
+  AutoRoutines(
+      AutoFactory factory,
+      Function<Pose2d, Command> pathfinder,
+      Supplier<Optional<Pose2d>> gamePieces) {
     this.factory = factory;
     this.superstructure = factory.getSuperstructure();
+    this.pathfinder = pathfinder;
+    this.gamePieces = gamePieces;
     // Deliberately builds NO Command here. Commands are built lazily in the accessors so that each
     // chooser selection gets a fresh instance.
   }
@@ -144,14 +171,19 @@ public class AutoRoutines {
     // factory.scoreStationaryCommand().withTimeout(timeoutSec).")
     //
     // The timeout is a supplier read when the shot starts, not a number fixed when the routine is
-    // built at boot, so a retuned bound takes effect without a reboot. The stop requires the
-    // drivetrain, so it also ends whatever else was driving it; a stationary shot needs the chassis
-    // still, and the gate will not open until it is.
-    return Commands.sequence(
-        Commands.runOnce(factory.getDrive()::stop, factory.getDrive()),
+    // built at boot, so a retuned bound takes effect without a reboot.
+    //
+    // The stop is HELD for the whole shot, not issued once as the TODO had it. M13's checkpoint
+    // found why: a path that ends moving leaves the drivetrain on its last output, and Drive's
+    // setpoint generator ramps a single zero request down over several loops, not at once. So after
+    // one stop the chassis rolled on, the stationary gate never opened, and the simulated robot
+    // drifted twenty metres through two full timeouts. On the robot the joystick default command
+    // would usually have caught it, which is exactly why it must not be relied on. Requiring the
+    // drivetrain also ends whatever else was driving it.
+    return Commands.deadline(
         Commands.defer(
-            () -> factory.scoreStationaryCommand().withTimeout(timeoutSec.getAsDouble()),
-            Set.of()));
+            () -> factory.scoreStationaryCommand().withTimeout(timeoutSec.getAsDouble()), Set.of()),
+        Commands.run(factory.getDrive()::stop, factory.getDrive()));
   }
 
   /**
@@ -271,10 +303,32 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command driveForward() {
-    // TODO: waitUntilIntakeRetaining() -> factory.followPath("Leave"). If this one works,
-    // AutoBuilder, RobotConfig and the pose reset are all wired correctly; if it does not, nothing
-    // else in this file will.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "waitUntilIntakeRetaining() -> factory.followPath(\"Leave\").")
+    //
+    // With the pose reset first, which section 8.6 step 1 says this routine proves: if Leave ends
+    // where the path says, AutoBuilder, the robot config and the reset are all wired correctly.
+    return Commands.sequence(
+        factory.resetPoseToPathStart("Leave"),
+        waitUntilIntakeRetaining(),
+        factory.followPath("Leave"));
+  }
+
+  /**
+   * The opening every scoring routine shares: adopt the start, wait for the intake, fire the
+   * preload standing still, and record how many pieces the flywheel counted.
+   *
+   * <p>Added for M13 step 6. The robot starts pre-aimed with 8 pieces aboard, so the preload is one
+   * stationary burst, bounded by {@code kPreloadTimeoutSec} rather than the full-hopper bound.
+   *
+   * @param startPath the path whose start the robot is placed on
+   * @return the opening
+   */
+  private Command openWithPreload(String startPath) {
+    return Commands.sequence(
+        factory.resetPoseToPathStart(startPath),
+        waitUntilIntakeRetaining(),
+        spinUpWhile(shootInPlace(Constants.Auto.kPreloadTimeoutSec)),
+        factory.logPreloadFiredCommand());
   }
 
   /**
@@ -283,14 +337,14 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command preloadOnly() {
-    // TODO: resetPoseToPathStart("Center_Preload") -> waitUntilIntakeRetaining() ->
-    // spinUpWhile(shootInPlace(<long enough for all 8 pieces -- the old 2.0 s was a one-piece
-    // timeout>)) ->
-    // factory.logPreloadFiredCommand() -> followPath("Center_Preload"). This routine depends on
-    // nothing but odometry, which is exactly why it is the one to select when the cameras are
-    // misbehaving. Auto/PreloadFired should read 8; see logPreloadFiredCommand() for what it means
-    // when it does not.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "resetPoseToPathStart(\"Center_Preload\") ->
+    // waitUntilIntakeRetaining() -> spinUpWhile(shootInPlace(...)) ->
+    // factory.logPreloadFiredCommand() -> followPath(\"Center_Preload\").")
+    //
+    // Depends on nothing but odometry and one stationary shot, which is why it is the routine to
+    // choose when the cameras are misbehaving. Auto/PreloadFired should read 8 afterwards.
+    return Commands.sequence(
+        openWithPreload("Center_Preload"), factory.followPath("Center_Preload"));
   }
 
   /**
@@ -299,14 +353,39 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command centerThreePiece() {
-    // TODO: resetPose -> waitUntilIntakeRetaining() -> shootInPlace ->
-    // factory.logPreloadFiredCommand() -> driveAndIntake("Center_ToPiece1") ->
-    // driveAndShoot("Center_Score1") -> driveAndIntake("Center_ToPiece2") ->
-    // driveAndShoot("Center_Score2"). There is no bailout after a pickup: a missed pickup cannot be
-    // detected without a piece sensor, and a moving scoring leg over an empty hopper costs no stop.
-    // Once the field layout is known, consider driveIntakeAndShoot sweeps in place of the
-    // pickup/score pairs (plan section 8.3).
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "resetPose -> waitUntilIntakeRetaining() -> shootInPlace ->
+    // factory.logPreloadFiredCommand() -> driveAndIntake(\"Center_ToPiece1\") ->
+    // driveAndShoot(\"Center_Score1\") -> driveAndIntake(\"Center_ToPiece2\") ->
+    // driveAndShoot(\"Center_Score2\").")
+    //
+    // The robot starts on Center_ToPiece1's start, which is the shooting position, and the pickups
+    // are spun up (sequenceOf does that), so each scoring path begins at speed and aimed.
+    return Commands.sequence(
+        openWithPreload("Center_ToPiece1"),
+        sequenceOf(
+            List.of("Center_ToPiece1", "Center_Score1", "Center_ToPiece2", "Center_Score2"), true));
+  }
+
+  /**
+   * {@link #centerThreePiece()} with every scoring leg taken standing still. Section 8.6 step 3.
+   *
+   * <p>Added for M13 step 6. Section 8.6 says to run Center 3 with {@code ScoreStationary} in place
+   * of {@code ScoreOnMove} before running it as written: if the moving version then fails, the
+   * fault is in the moving-shot math, and not in the pickups or the sequencing. This is that
+   * routine, as a chooser entry, so the step can actually be run. Each scoring path is driven
+   * first, then the shot is taken where it ends.
+   *
+   * @return the routine
+   */
+  public Command centerThreePieceStationary() {
+    return Commands.sequence(
+        openWithPreload("Center_ToPiece1"),
+        spinUpWhile(driveAndIntake("Center_ToPiece1")),
+        factory.followPath("Center_Score1"),
+        shootInPlace(Constants.Auto.kScoreTimeoutSec),
+        spinUpWhile(driveAndIntake("Center_ToPiece2")),
+        factory.followPath("Center_Score2"),
+        shootInPlace(Constants.Auto.kScoreTimeoutSec));
   }
 
   /**
@@ -315,11 +394,20 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command centerFivePiece() {
-    // TODO: centerThreePiece() extended with driveAndIntake("Center_ToPiece3") ->
-    // driveAndShoot("Center_Score3"), and never a stop on a scoring leg.
-    // Expect to need kAccelCompensationScalar above 0 for this one: the path's acceleration
-    // segments are precisely where the moving shots go wide.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "centerThreePiece() extended with
+    // driveAndIntake(\"Center_ToPiece3\") -> driveAndShoot(\"Center_Score3\"), and never a stop on
+    // a scoring leg.")
+    return Commands.sequence(
+        openWithPreload("Center_ToPiece1"),
+        sequenceOf(
+            List.of(
+                "Center_ToPiece1",
+                "Center_Score1",
+                "Center_ToPiece2",
+                "Center_Score2",
+                "Center_ToPiece3",
+                "Center_Score3"),
+            true));
   }
 
   /**
@@ -328,10 +416,14 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command ampSideThreePiece() {
-    // TODO: The left/amp-side mirror of centerThreePiece using the Amp_* paths, opening with
-    // waitUntilIntakeRetaining() like every routine. Write it BLUE-ONLY; AllianceFlipUtil and
-    // AutoBuilder's shouldFlip callback handle red automatically.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "The left/amp-side mirror of centerThreePiece using the Amp_*
+    // paths ... Write it BLUE-ONLY.")
+    //
+    // The names are the plan's, and they come from an earlier game: REBUILT has no amp. Section
+    // 8.3's own TODO is to redraw this list around sweeps once the field layout is known.
+    return Commands.sequence(
+        openWithPreload("Amp_ToPiece1"),
+        sequenceOf(List.of("Amp_ToPiece1", "Amp_Score1", "Amp_ToPiece2", "Amp_Score2"), true));
   }
 
   /**
@@ -340,9 +432,11 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command sourceSideThreePiece() {
-    // TODO: The right/source-side mirror using the Source_* paths, opening with
-    // waitUntilIntakeRetaining() like every routine.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "The right/source-side mirror using the Source_* paths.")
+    return Commands.sequence(
+        openWithPreload("Source_ToPiece1"),
+        sequenceOf(
+            List.of("Source_ToPiece1", "Source_Score1", "Source_ToPiece2", "Source_Score2"), true));
   }
 
   /**
@@ -351,10 +445,13 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command sourceSideSteal() {
-    // TODO: waitUntilIntakeRetaining(), then drive across on "Source_Steal" with the intake
-    // requested, and return to shoot -- a natural driveIntakeAndShoot sweep on the way back. Only
-    // run this when the alliance has agreed to it beforehand.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "waitUntilIntakeRetaining(), then drive across on
+    // \"Source_Steal\" with the intake requested, and return to shoot -- a natural
+    // driveIntakeAndShoot sweep on the way back.")
+    //
+    // One sweep over the whole out-and-back path: the intake runs throughout, and the gate fires
+    // whatever is aboard whenever a shot is good. Only run this when the alliance has agreed.
+    return Commands.sequence(openWithPreload("Source_Steal"), driveIntakeAndShoot("Source_Steal"));
   }
 
   /**
@@ -363,13 +460,35 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command dynamicScavenge() {
-    // TODO: waitUntilIntakeRetaining(), then loop up to Constants.Auto.kMaxScavengeCycles: if
-    // vision.getGamePieceFieldPose() is present, AutoBuilder.pathfindToPose(that pose,
-    // AutoFactory.defaultPathfindConstraints(), 0.0) under superstructure.intakeWhileHeldCommand();
-    // otherwise drive to the next static waypoint. Then driveAndShoot back.
-    // This depends on the intake Limelight's game-piece pipeline being properly tuned, so keep it
-    // behind its own chooser entry that students can simply avoid at an early event.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "waitUntilIntakeRetaining(), then loop up to
+    // Constants.Auto.kMaxScavengeCycles: if vision.getGamePieceFieldPose() is present,
+    // AutoBuilder.pathfindToPose(that pose, AutoFactory.defaultPathfindConstraints(), 0.0) under
+    // superstructure.intakeWhileHeldCommand(); otherwise drive to the next static waypoint. Then
+    // driveAndShoot back.")
+    //
+    // Each cycle is a sweep, intaking and scoring on the move at once, rather than a pickup
+    // followed by a drive back: on a hopper robot with a turret there is nowhere to drive back TO,
+    // since the gate fires from wherever a shot is good. The static waypoints are the ends of the
+    // Center pickup paths, where the staged pieces are. Where to go is decided when each cycle
+    // starts, not when the routine is built, because that is when the camera has something to say
+    // and the alliance is known.
+    Command[] cycles = new Command[Constants.Auto.kMaxScavengeCycles];
+    for (int i = 0; i < cycles.length; i++) {
+      String waypointPath = "Center_ToPiece" + (i + 1);
+      cycles[i] =
+          Commands.deadline(
+              Commands.defer(
+                  () ->
+                      gamePieces
+                          .get()
+                          .or(() -> factory.getPathEndingPose(waypointPath))
+                          .map(pathfinder)
+                          .orElseGet(Commands::none),
+                  Set.of(factory.getDrive())),
+              superstructure.intakeWhileHeldCommand(),
+              factory.holdWantedState(Superstructure.WantedState.AUTO_SCORE_ON_MOVE));
+    }
+    return Commands.sequence(openWithPreload("Center_ToPiece1"), Commands.sequence(cycles));
   }
 
   /**

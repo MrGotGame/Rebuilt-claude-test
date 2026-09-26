@@ -90,6 +90,7 @@ final class SimulatedAutoRobot {
 
   final Drive drive;
   final Intake intake;
+  final SlowPivotIO pivotIo;
   final FloorRoller floorRoller;
   final Indexer indexer;
   final Turret turret;
@@ -154,7 +155,8 @@ final class SimulatedAutoRobot {
             new ModuleIOSim(TunerConstants.FrontRight),
             new ModuleIOSim(TunerConstants.BackLeft),
             new ModuleIOSim(TunerConstants.BackRight));
-    intake = new Intake(new IdealPivotIO(), IdealPivotIO.GEOMETRY);
+    pivotIo = new SlowPivotIO();
+    intake = new Intake(pivotIo, IdealPivotIO.GEOMETRY);
     floorRoller = new FloorRoller(new FloorRollerIOSim());
     indexer = new Indexer(new IndexerIOSim());
     turret = new Turret(new TurretIOSim());
@@ -218,6 +220,9 @@ final class SimulatedAutoRobot {
         Superstructure.IntakeMode.STOWED,
         superstructure.getIntakeMode(),
         "the robot must start the match with the intake stowed");
+    // From here the pivot takes real time to move, so "nothing moves before the intake retains"
+    // is a claim a routine can fail. See SlowPivotIO.
+    pivotIo.slow = true;
     loops = 0;
     stowedWhileMovingLoops = 0;
     firstMovingLoop = -1;

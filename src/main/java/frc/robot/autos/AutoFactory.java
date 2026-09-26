@@ -33,6 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import org.littletonrobotics.junction.Logger;
@@ -620,7 +621,29 @@ public class AutoFactory {
   public Command logPreloadFiredCommand() {
     // Read when the command RUNS, not when it is built: routines are built once, when the chooser
     // is populated at robot init, and a count captured then would always be zero.
-    return Commands.runOnce(() -> Logger.recordOutput("Auto/PreloadFired", shooter.getShotCount()));
+    //
+    // M13 step 6 also keeps the count, readable through getPreloadFired(). The logger records
+    // nothing under test, so without it the checkpoint's "Auto/PreloadFired reads 8" could only be
+    // checked by eye in AdvantageScope.
+    return Commands.runOnce(
+        () -> {
+          preloadFired = OptionalInt.of(shooter.getShotCount());
+          Logger.recordOutput("Auto/PreloadFired", preloadFired.getAsInt());
+        });
+  }
+
+  /** The count {@link #logPreloadFiredCommand()} last logged, or empty if it has not run. */
+  private OptionalInt preloadFired = OptionalInt.empty();
+
+  /**
+   * What {@code Auto/PreloadFired} last read.
+   *
+   * <p>Added for M13 step 6, so the checkpoint's clause on it can be asserted.
+   *
+   * @return the shot count logged after the last preload burst, or empty if no preload has run
+   */
+  public OptionalInt getPreloadFired() {
+    return preloadFired;
   }
 
   /**
@@ -682,6 +705,42 @@ public class AutoFactory {
   }
 
   /**
+   * The alliance-flipped pose at which a path ends.
+   *
+   * <p>Added for M13 step 6: the vision-driven scavenge falls back to the ends of the pickup paths,
+   * where the staged pieces are, when the camera sees nothing. Call it when the pose is needed, not
+   * when a routine is built, since the flip depends on the alliance.
+   *
+   * @param pathName the path file's name, without extension
+   * @return where the path ends on the current alliance, facing its goal end state's rotation, or
+   *     empty if it cannot be read
+   */
+  public Optional<Pose2d> getPathEndingPose(String pathName) {
+    return loadPath(pathName)
+        .map(
+            path -> {
+              List<Pose2d> poses = path.getPathPoses();
+              return new Pose2d(
+                  poses.get(poses.size() - 1).getTranslation(), path.getGoalEndState().rotation());
+            })
+        .map(AllianceFlipUtil::apply);
+  }
+
+  /**
+   * Drives to a field pose by the pathfinder, avoiding the obstacles in {@code navgrid.json}.
+   *
+   * <p>Added for M13 step 6, for the vision-driven scavenge. The pose is already on the current
+   * alliance: a game piece seen by the camera is where it is, and a static waypoint is flipped by
+   * the caller. That is why this uses {@code pathfindToPose} and not {@code pathfindToPoseFlipped}.
+   *
+   * @param target where to go, in field coordinates for the current alliance
+   * @return the pathfinding command, ending stopped at the target
+   */
+  public Command pathfindTo(Pose2d target) {
+    return AutoBuilder.pathfindToPose(target, defaultPathfindConstraints(), 0.0);
+  }
+
+  /**
    * The alliance-flipped starting pose of a path, for the pre-match preview.
    *
    * <p>Added for M13 step 3. A routine built in {@code AutoRoutines} starts where its first path
@@ -738,5 +797,14 @@ public class AutoFactory {
    */
   public Intake getIntake() {
     return intake;
+  }
+
+  /**
+   * The vision subsystem, so the scavenge routine can ask where the camera sees a game piece.
+   *
+   * @return the vision subsystem
+   */
+  public Vision getVision() {
+    return vision;
   }
 }
