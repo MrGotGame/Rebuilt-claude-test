@@ -46,7 +46,12 @@ feed-assist guard, which had none.
 
 A third block is M11's: the table-free measurement shot, the override that
 selects it inside SCORE_STATIONARY and the one rule that clears it, and the
-measurement burst's end condition and the numbers it reports. Several M10 anchors name code that later M10b steps replace (the
+measurement burst's end condition and the numbers it reports.
+
+A fourth is M12's: the flywheel projection's saturation (the stutter fix), the
+turret feedforward's chassis-rate sign, and the moving shot itself -- including
+the double-counted velocity M12's simulated checkpoint found in the solver, put
+back. Several M10 anchors name code that later M10b steps replace (the
 piece guard, the isStowed turret guard), and those entries must be rewritten against
 the new code in the step that changes it, not deleted. Adding a milestone means adding its
 defects to the list and re-running the whole thing, so an old mutation cannot quietly
@@ -73,6 +78,7 @@ IX = "src/main/java/frc/robot/subsystems/indexer/Indexer.java"
 AR = "src/main/java/frc/robot/autos/AutoRoutines.java"
 SV = "src/main/java/frc/robot/shooting/ShootingSolver.java"
 CC = "src/main/java/frc/robot/commands/CharacterizationCommands.java"
+TR = "src/main/java/frc/robot/subsystems/turret/Turret.java"
 
 MUTATIONS = [
     # Re-anchored in M10b step 7, which removed the piece half of this guard (plan section 2.4). The
@@ -475,6 +481,33 @@ MUTATIONS = [
     ("a burst never reports a timeout", CC,
      "              timer.hasElapsed(holdSec)));",
      "              false));"),
+
+    # ---- M12: shooting on the move. The stutter fix first -- removed, made strict so a wheel that
+    # has ARRIVED still projects out of the band, and applied to every projection so a wheel that
+    # cannot reach its goal reads ready. Then the feedforward's chassis term, flipped and dropped:
+    # plan section 6.4's first failure mode. Then the moving shot: the velocity subtracted twice
+    # again (the bug the checkpoint found), and the virtual goal leading WITH the motion.
+    ("the flywheel projection is no longer saturated", SH,
+     "    if ((inputs.velocityRpm - goalRpm) * (projectedRpm - goalRpm) <= 0.0) {",
+     "    if (false) {"),
+    ("a wheel exactly at its goal is not saturated", SH,
+     "    if ((inputs.velocityRpm - goalRpm) * (projectedRpm - goalRpm) <= 0.0) {",
+     "    if ((inputs.velocityRpm - goalRpm) * (projectedRpm - goalRpm) < 0.0) {"),
+    ("every projection is saturated", SH,
+     "    if ((inputs.velocityRpm - goalRpm) * (projectedRpm - goalRpm) <= 0.0) {",
+     "    if (true) {"),
+    ("the feedforward adds the chassis rate", TR,
+     "        goalFieldAngularVelocityRadPerSec\n            - RobotState.getInstance().getFieldRelativeSpeeds().omegaRadiansPerSecond;",
+     "        goalFieldAngularVelocityRadPerSec\n            + RobotState.getInstance().getFieldRelativeSpeeds().omegaRadiansPerSecond;"),
+    ("the feedforward ignores the chassis rate", TR,
+     "        goalFieldAngularVelocityRadPerSec\n            - RobotState.getInstance().getFieldRelativeSpeeds().omegaRadiansPerSecond;",
+     "        goalFieldAngularVelocityRadPerSec;"),
+    ("the moving shot counts the robot's velocity twice", SV,
+     "    Translation2d muzzleVelocity = new Translation2d(distance / tof, lineOfSight.getAngle());",
+     "    Translation2d muzzleVelocity =\n        new Translation2d(distance / tof, lineOfSight.getAngle()).minus(velocity);"),
+    ("the virtual goal leads with the motion", SV,
+     "          goal.minus(velocity.times(tof))",
+     "          goal.plus(velocity.times(tof))"),
 ]
 
 
