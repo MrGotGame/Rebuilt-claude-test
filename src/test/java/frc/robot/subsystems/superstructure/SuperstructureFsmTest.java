@@ -9,6 +9,7 @@ import edu.wpi.first.hal.HAL;
 import edu.wpi.first.math.VecBuilder;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
@@ -23,6 +24,7 @@ import frc.robot.RobotState;
 import frc.robot.commands.CharacterizationCommands;
 import frc.robot.commands.CharacterizationCommands.ShotTableSample;
 import frc.robot.shooting.ShootingSolver;
+import frc.robot.shooting.ShotFlightModel;
 import frc.robot.shooting.TurretUnwrapper;
 import frc.robot.subsystems.drive.Drive;
 import frc.robot.subsystems.drive.GyroIO;
@@ -337,8 +339,19 @@ public class SuperstructureFsmTest {
    */
   private static ShootingSolver firingSolver() {
     return new ShootingSolver(
-        new double[] {1.0, 4.0, 7.0}, new double[] {0.50, 0.80, 1.10}, () -> 250.0, () -> 0.0);
+        new double[] {1.0, 4.0, 7.0},
+        new double[] {0.50, 0.80, 1.10},
+        () -> FIRING_RPM_PER_MPS,
+        () -> 0.0);
   }
+
+  /**
+   * The firing solver's RPM fit: flywheel RPM per meter per second of muzzle speed, zero offset.
+   */
+  private static final double FIRING_RPM_PER_MPS = 250.0;
+
+  /** The solver the robot {@link #buildFiringRobotUnhomed} built, for its iteration count. */
+  private ShootingSolver firingShotSolver;
 
   /** The simulated flywheel under the robot {@link #buildFiringRobot()} built. */
   private ShooterIOSim firingShooter;
@@ -381,8 +394,9 @@ public class SuperstructureFsmTest {
     intakeGeometry = geometry;
     firingShooter = new ShooterIOSim();
     firingPivot = new IdealPivotIO();
+    firingShotSolver = firingSolver();
     buildRobot(
-        firingSolver(),
+        firingShotSolver,
         firingPivot,
         new IndexerIOSim(),
         new TurretIOSim(),
@@ -2433,6 +2447,208 @@ public class SuperstructureFsmTest {
     assertEquals(1, samples.size(), "a cancelled burst must still report");
     step(3);
     assertEquals(Superstructure.SystemState.RESTING, superstructure.getSystemState());
+  }
+
+  // -------------------------------------------------- M12 step 3: the checkpoint, in simulation
+  // ----
+
+  /** Radius of the orbit the M12 checkpoint strafes around the goal on, meters. */
+  private static final double ORBIT_RADIUS_METERS = 3.0;
+
+  /** The plan's checkpoint speed: strafing at 2 m/s or more. */
+  private static final double ORBIT_SPEED_METERS_PER_SEC = 2.0;
+
+  /** Where on the orbit the robot is, as the angle of the robot seen from the goal. */
+  private double orbitAngleRad;
+
+  /**
+   * The robot's field velocity on the orbit at the current angle.
+   *
+   * @return tangential velocity, counter-clockwise around the goal, in meters per second
+   */
+  private Translation2d orbitVelocity() {
+    return new Translation2d(
+        ORBIT_SPEED_METERS_PER_SEC, new Rotation2d(orbitAngleRad + Math.PI / 2));
+  }
+
+  /**
+   * Advances one loop along a circle around the goal while facing it: a strafe that stays
+   * perpendicular to the line of sight, at a constant range, for as long as the case likes.
+   *
+   * <p>The pose is placed rather than integrated from odometry, and the chassis speed is fed to
+   * RobotState the way the drivetrain reports it, robot-relative, with the rotation that keeps the
+   * robot facing the goal. Both are exactly consistent with the motion, which is all the solver,
+   * the gate and the turret read.
+   *
+   * <p><b>Outputs:</b> moves the robot, feeds RobotState a speed sample and a vision fix, and
+   * steps.
+   */
+  private void stepOrbiting() {
+    double omega = ORBIT_SPEED_METERS_PER_SEC / ORBIT_RADIUS_METERS;
+    orbitAngleRad += omega * LOOP_SEC;
+    Translation2d goal = Constants.Field.goalTranslation();
+    Rotation2d heading = new Rotation2d(orbitAngleRad + Math.PI);
+    Translation2d position =
+        goal.plus(new Translation2d(ORBIT_RADIUS_METERS, new Rotation2d(orbitAngleRad)));
+    RobotState.getInstance()
+        .resetPose(
+            new Pose2d(position, heading),
+            Rotation2d.kZero,
+            new SwerveModulePosition[] {
+              new SwerveModulePosition(),
+              new SwerveModulePosition(),
+              new SwerveModulePosition(),
+              new SwerveModulePosition()
+            });
+    Translation2d velocity = orbitVelocity();
+    RobotState.getInstance()
+        .addDriveSpeedsObservation(
+            Timer.getFPGATimestamp(),
+            ChassisSpeeds.fromFieldRelativeSpeeds(
+                velocity.getX(), velocity.getY(), omega, heading));
+    feedFreshVisionFix();
+    step(1);
+  }
+
+  /**
+   * Where a piece released now would land, judged from what the robot is actually DOING.
+   *
+   * <p>The release point is the robot's position, the muzzle direction is the turret's MEASURED
+   * angle plus the heading, and the muzzle speed is the flywheel's MEASURED speed back through the
+   * fit -- not the solver's commands. {@link ShotFlightModel} then follows the piece. The solver is
+   * proved right on its own in {@code ShootingSolverTest}, so any miss here is a mechanism that did
+   * not do what it was told: the turret behind its aim, or the wheel off its speed.
+   *
+   * @param robotVelocity the robot's field velocity at release, in meters per second
+   * @return the landing point, in field coordinates
+   */
+  private Translation2d landingPoint(Translation2d robotVelocity) {
+    Pose2d pose = RobotState.getInstance().getEstimatedPose();
+    return ShotFlightModel.landingPoint(
+        firingShotSolver,
+        pose.getTranslation(),
+        robotVelocity,
+        new Rotation2d(turret.getPositionRad()).plus(pose.getRotation()),
+        shooter.getVelocityRpm() / FIRING_RPM_PER_MPS);
+  }
+
+  /**
+   * The worst miss a shot inside the gate's own tolerances can have: the commanded shot with the
+   * turret off by its full {@code kToleranceRad} and the wheel off by its full tight band, in every
+   * combination of sign.
+   *
+   * <p>This is the pass mark for the checkpoint, rather than a number chosen to make it pass. A
+   * piece that lands inside it did what the gate promised; one that lands outside it was released
+   * by a gate that let through more error than its tolerances allow.
+   *
+   * @param robotVelocity the robot's field velocity at release, in meters per second
+   * @return the largest landing miss inside the tolerances, in meters
+   */
+  private double gateErrorBudget(Translation2d robotVelocity) {
+    Pose2d pose = RobotState.getInstance().getEstimatedPose();
+    var shot = superstructure.getLastShot();
+    double aimTolerance = Constants.Turret.kToleranceRad.get();
+    double speedTolerance = Constants.Shooter.kToleranceRpm.get() / FIRING_RPM_PER_MPS;
+    double worst = 0.0;
+    for (double aimSign : new double[] {-1.0, 1.0}) {
+      for (double speedSign : new double[] {-1.0, 1.0}) {
+        Translation2d landing =
+            ShotFlightModel.landingPoint(
+                firingShotSolver,
+                pose.getTranslation(),
+                robotVelocity,
+                shot.turretFieldAngle().plus(new Rotation2d(aimSign * aimTolerance)),
+                shot.flywheelRpm() / FIRING_RPM_PER_MPS + speedSign * speedTolerance);
+        worst = Math.max(worst, landing.getDistance(Constants.Field.goalTranslation()));
+      }
+    }
+    return worst;
+  }
+
+  /**
+   * Plan section 10.2's M12 checkpoint, in simulation: strafing perpendicular to the goal at 2 m/s
+   * with SCORE_ON_MOVE, every piece the gate lets go lands on the goal.
+   *
+   * <p>The robot orbits the goal at 3 m while facing it (see {@link #stepOrbiting()}), settles in a
+   * pre-spin, then scores on the move for ten seconds. A piece is released whenever the indexer is
+   * feeding and the wheel meets the tight band, at most one every ten loops so the wheel recovers
+   * between them. The checkpoint's two log clauses are asserted too: the virtual goal sits UPSTREAM
+   * of the motion by the robot's velocity times the flight time, and the solver stays under its
+   * iteration cap.
+   */
+  @Test
+  void theMovingShotLandsWhileStrafingAtTwoMetersPerSecond() {
+    buildFiringRobotUnhomed(-ORBIT_RADIUS_METERS, IdealPivotIO.GEOMETRY);
+    homeAndSettle();
+    orbitAngleRad = Math.PI;
+
+    List<Double> misses = new ArrayList<>();
+    try {
+      superstructure.setWantedState(Superstructure.WantedState.SPIN_UP);
+      for (int i = 0; i < TURRET_SETTLE_LOOPS; i++) {
+        stepOrbiting();
+      }
+
+      superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+      Translation2d goal = Constants.Field.goalTranslation();
+      double horizon = Constants.getLoopPeriodSec() * 2.0;
+      int sinceLastShot = 1000;
+      for (int i = 0; i < 500; i++) {
+        stepOrbiting();
+        sinceLastShot++;
+        var shot = superstructure.getLastShot();
+        if (shot.isUsable()) {
+          Translation2d lead = shot.virtualGoal().minus(goal);
+          Translation2d expected = orbitVelocity().times(-shot.timeOfFlightSec());
+          assertEquals(0.0, lead.minus(expected).getNorm(), 0.02, "the virtual goal is misplaced");
+          assertTrue(
+              firingShotSolver.getLastIterationCount() < Constants.Shot.kMaxSolverIterations,
+              "the solver hit its iteration cap");
+        }
+        if (indexer.getSystemState() == Indexer.SystemState.FEEDING
+            && shooter.willBeAtSpeedIn(horizon)
+            && sinceLastShot >= 10) {
+          double miss = landingPoint(orbitVelocity()).getDistance(goal);
+          double budget = gateErrorBudget(orbitVelocity());
+          assertTrue(
+              miss <= budget + 0.01,
+              "piece "
+                  + misses.size()
+                  + " missed by "
+                  + miss
+                  + " m, outside the gate's budget of "
+                  + budget
+                  + " m");
+          misses.add(miss);
+          firingShooter.injectShot();
+          sinceLastShot = 0;
+        }
+      }
+    } finally {
+      for (int i = 0; i < 50; i++) {
+        RobotState.getInstance()
+            .addDriveSpeedsObservation(Timer.getFPGATimestamp(), new ChassisSpeeds());
+        step(1);
+      }
+    }
+    // The plan's bar is 7 of 10 on the robot. Two checks here, and they catch different failures.
+    // The per-piece budget above is built around the COMMANDED shot, so it judges the mechanisms --
+    // did the turret and the wheel do what they were told -- and moves with the solver. This one
+    // judges the whole chain against the real goal: the mean miss must be well inside what the
+    // robot would have missed by with no compensation at all, its drift over the flight. With the
+    // velocity counted twice (the bug M12 step 3 fixed), the budget still passes and this fails.
+    assertTrue(misses.size() >= 20, "only " + misses.size() + " pieces in ten seconds of strafing");
+    double mean = misses.stream().mapToDouble(Double::doubleValue).average().orElse(Double.NaN);
+    double drift =
+        ORBIT_SPEED_METERS_PER_SEC * firingShotSolver.getTimeOfFlight(ORBIT_RADIUS_METERS);
+    assertTrue(
+        mean < 0.2 * drift,
+        "the mean miss, "
+            + mean
+            + " m, is not an order of magnitude inside the uncompensated "
+            + "drift of "
+            + drift
+            + " m");
   }
 
   /**
