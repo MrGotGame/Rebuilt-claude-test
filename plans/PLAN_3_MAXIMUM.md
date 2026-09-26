@@ -501,9 +501,16 @@ every piece in the burst. Two additions:
 #### What this replan deletes
 
 * **Indexer:** `hasPiece()`; the `INDEX`/`HOLD` wanted states and `INDEXING`/`HOLDING` system
-  states; the latched-sample replay and settle window that existed only to answer `hasPiece` while
-  stopped; the shot counter; the beam-break path, its alert, `Constants.Indexer.kHasBeamBreak`,
-  `Constants.Dio.kIndexerBeamBreak`; `IndexerIOSim.setSimulatedPiecePresent`.
+  states; the latched-sample replay that existed only to answer `hasPiece` while stopped; the shot
+  counter; the beam-break path, its alert, `Constants.Indexer.kHasBeamBreak`,
+  `Constants.Dio.kIndexerBeamBreak`; `IndexerIOSim.setSimulatedPiecePresent`; and the piece
+  detector's constants (`kIndexRpm`, `kHasPiece*`, `kShotDetectDebounceSec`,
+  `kSimPieceDetectionMargin`). **The spin-up settle window stays** (`kDetectionSettleSec`): a
+  wheel spinning up from rest reads as both "loaded" and "jammed", so the load and jam readings
+  need it as much as the piece detector did. An earlier version of this list deleted it too; M10b
+  step 1 found it was still needed.
+* **Floor roller:** `WantedState.INTAKE`, `SystemState.INTAKING` and `kIntakeRpm`, which lose
+  their only caller once the floor roller stops running for intaking.
 * **Superstructure:** `WantedState.INTAKE`; `SystemState.INTAKING` and `INDEXING`;
   `Constants.Superstructure.kIndexFeedSec`; the piece guard in `scoringTransition`; gate term 4.
 * **Autos:** the `WaitForPiece` marker and `waitForPieceCommand`, and `bailoutIfEmpty`. With no
@@ -935,8 +942,7 @@ public final class Constants {
     public static final boolean kInverted = false;
     public static final double kStatorLimitAmps = 60.0;
 
-    public static final LoggedTunableNumber kIntakeRpm =
-        new LoggedTunableNumber("FloorRoller/IntakeRpm", 2500.0);
+    // No kIntakeRpm: the floor roller runs only to feed the indexer (section 2.4).
     public static final LoggedTunableNumber kFeedRpm =
         new LoggedTunableNumber("FloorRoller/FeedRpm", 3000.0);
     public static final LoggedTunableNumber kEjectRpm =
@@ -960,6 +966,14 @@ public final class Constants {
         new LoggedTunableNumber("Indexer/EjectRpm", -1500.0);
     public static final LoggedTunableNumber kKp = new LoggedTunableNumber("Indexer/Kp", 0.1);
     public static final LoggedTunableNumber kKv = new LoggedTunableNumber("Indexer/Kv", 0.12);
+
+    /**
+     * How long after entering FEEDING the load and jam readings are ignored. Spin-up from rest
+     * draws high current at low speed, which reads as loaded AND jammed at once; without this
+     * every burst would open with a spurious unjam pulse. TODO: MEASURE the spin-up duration.
+     */
+    public static final LoggedTunableNumber kDetectionSettleSec =
+        new LoggedTunableNumber("Indexer/DetectionSettleSec", 0.4);
 
     /**
      * "The indexer is pushing against something" while FEEDING, past the spin-up settle window:
@@ -2943,6 +2957,9 @@ The simplest FSM in the project, and deliberately still an FSM: uniformity means
 read one subsystem can read all six, and it gives the floor roller the same timeout and logging
 behavior as everything else.
 
+> **Replanned (§2.4).** The floor roller runs only to feed the indexer, never while intaking, so it
+> has no `INTAKE` request and no `INTAKING` state. M5 built them; M10b step 8 deleted them.
+
 ```java
 package frc.robot.subsystems.floorroller;
 
@@ -2954,7 +2971,6 @@ import org.littletonrobotics.junction.AutoLogOutput;
 public class FloorRoller extends SubsystemBase {
   public enum WantedState {
     IDLE,
-    INTAKE,
     FEED,
     EJECT,
     CHARACTERIZE
@@ -2962,7 +2978,6 @@ public class FloorRoller extends SubsystemBase {
 
   public enum SystemState {
     IDLE,
-    INTAKING,
     FEEDING,
     EJECTING,
     CHARACTERIZING
@@ -2991,7 +3006,7 @@ public class FloorRoller extends SubsystemBase {
   }
 
   private void applyState() {
-    // TODO: switch dispatching io.setVelocity(kIntakeRpm / kFeedRpm / kEjectRpm), io.stop(), or
+    // TODO: switch dispatching io.setVelocity(kFeedRpm / kEjectRpm), io.stop(), or
     // io.setOpenLoop(characterizationVolts).
   }
 
