@@ -2185,17 +2185,22 @@ public class SuperstructureFsmTest {
         1e-9,
         "the goal is straight ahead, so the aim must be too");
 
-    // The gate opens on a PREDICTION, mid spin-up, and can drop again for a loop while the wheel is
-    // still accelerating hard -- Shooter.willBeAtSpeedIn's linear projection overshoots even the
-    // burst band (its own TODO, deferred to M12). So the feed is awaited for a few loops rather
-    // than
-    // asserted on a fixed one.
-    boolean fed = false;
-    for (int i = 0; i < 10 && !fed; i++) {
+    // The gate opens on a PREDICTION, mid spin-up. Until M12 step 1 it then dropped for a loop
+    // while the wheel was still accelerating hard, because Shooter.willBeAtSpeedIn's projection
+    // overshot even the burst band, and the indexer stopped mid-burst; this case had to wait up to
+    // ten loops for the feed. With the projection saturated at the goal, the gate holds from the
+    // loop it opens, and the feed starts on the next loop and never stops.
+    int fedAt = -1;
+    for (int i = 0; i < 40; i++) {
       stepWithVision(1);
-      fed = indexer.getSystemState() == Indexer.SystemState.FEEDING;
+      assertTrue(superstructure.isReadyToScore(), "the gate dropped during the spin-up, loop " + i);
+      if (indexer.getSystemState() == Indexer.SystemState.FEEDING) {
+        fedAt = fedAt < 0 ? i : fedAt;
+      } else {
+        assertTrue(fedAt < 0, "the indexer stopped mid-burst, loop " + i);
+      }
     }
-    assertTrue(fed, "the open gate never fed");
+    assertTrue(fedAt >= 0 && fedAt <= 2, "the open gate did not feed promptly: " + fedAt);
     assertTrue(superstructure.isBurstLatched(), "a measurement burst must latch like any other");
   }
 

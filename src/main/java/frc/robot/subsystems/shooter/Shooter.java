@@ -486,12 +486,25 @@ public class Shooter extends SubsystemBase {
     // speed" but "will it be at speed when the piece arrives" -- and answering the second one is
     // what removes the one-shot-low that plagues gates built on instantaneous atSpeed().
     //
-    // TODO: revisit during M12. A linear projection can overshoot the band while the wheel is
-    // accelerating hard, which reads as "not ready" a few loops before it genuinely is ready. That
-    // costs a little cadence but never fires early, so it is the safe direction to be wrong in; if
-    // the shot-on-the-move cadence needs the last few milliseconds back, the fix is to saturate the
-    // projection at the goal rather than to widen the band.
+    // M12 step 1: the projection SATURATES at the goal. The acceleration is a five-sample moving
+    // average, so it lags: as the wheel closes on its goal the real acceleration falls away while
+    // the average is still near its peak, and a straight linear projection sails past the goal and
+    // out of the band. That read as "not ready" for a loop or more AFTER the gate had already
+    // opened, which stopped the indexer mid-burst -- M11 found it on every measurement burst,
+    // because every one starts from a spin-up. (The old TODO here called it cadence lost "a few
+    // loops before it genuinely is ready"; the stall mid-burst was the part it did not foresee.)
+    //
+    // A projection that lands on the other side of the goal means the wheel reaches the goal inside
+    // the horizon, so the goal itself is the honest projection. One that does not reach the goal,
+    // or a wheel moving away from it, is left alone -- those still read "not ready".
+    //
+    // "Reaches" includes a wheel sitting exactly ON its goal, which the product below makes zero:
+    // the lagging average is still positive the loop a spin-up arrives, and a strict test would
+    // project that wheel straight back out of the band.
     double projectedRpm = inputs.velocityRpm + accelRpmPerSec * horizonSec;
+    if ((inputs.velocityRpm - goalRpm) * (projectedRpm - goalRpm) <= 0.0) {
+      projectedRpm = goalRpm;
+    }
     return Math.abs(projectedRpm - goalRpm) < toleranceRpm && goalRpm > 0.0;
   }
 
@@ -546,6 +559,19 @@ public class Shooter extends SubsystemBase {
   public double getVelocityRpm() {
     // IMPLEMENTATION (was TODO: "return inputs.velocityRpm.")
     return inputs.velocityRpm;
+  }
+
+  /**
+   * The filtered flywheel acceleration the readiness prediction projects with.
+   *
+   * <p>Added beyond the plan's method list for M12 step 1, on the precedent of the other test
+   * accessors, so a test can show a trace really makes the raw projection overshoot -- the
+   * condition the saturation in {@link #willBeAtSpeedIn(double, double)} exists for.
+   *
+   * @return the five-sample moving-average acceleration, in RPM per second
+   */
+  public double getAccelRpmPerSec() {
+    return accelRpmPerSec;
   }
 
   /**

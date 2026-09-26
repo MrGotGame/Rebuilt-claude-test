@@ -544,4 +544,74 @@ public class ShooterFsmTest {
         1e-9,
         "an over-range goal must be clamped, not commanded");
   }
+
+  // ------------------------------------------------------ M12 step 1: the saturated projection
+  // ----
+
+  /**
+   * A wheel closing on its goal is ready continuously from the first loop the prediction says so,
+   * however hard it was accelerating.
+   *
+   * <p>The trace is a closed-loop spin-up: fast, then easing into the goal. The acceleration is a
+   * five-sample moving average, so near the goal it is still near its peak, and the unsaturated
+   * projection overshot the band for several loops after first going true -- the gate opened and
+   * then dropped, stopping the indexer mid-burst. That is the stutter M11 found. The positive
+   * control proves the trace really does overshoot: the raw projection leaves the band.
+   */
+  @Test
+  void aWheelClosingOnItsGoalStaysReadyOnceReady() {
+    ScriptedShooterIO scripted = new ScriptedShooterIO(0.0);
+    rebuildOver(scripted);
+    double goal = 3000.0;
+    shooter.setGoal(goal);
+    double horizon = LOOP_SEC * 2.0;
+    scripted.then(0, 400, 800, 1200, 1600, 2000, 2400, 2750, 2950, 2990, 3000);
+    scripted.hold(goal);
+
+    boolean ready = false;
+    boolean rawOvershot = false;
+    for (int i = 0; i < 30; i++) {
+      step(1);
+      double raw = shooter.getVelocityRpm() + shooter.getAccelRpmPerSec() * horizon;
+      if (ready) {
+        rawOvershot |= Math.abs(raw - goal) >= Constants.Shooter.kToleranceRpm.get();
+        assertTrue(
+            shooter.willBeAtSpeedIn(horizon),
+            "ready, then not ready, at " + shooter.getVelocityRpm() + " RPM, loop " + i);
+      }
+      ready |= shooter.willBeAtSpeedIn(horizon);
+    }
+    assertTrue(ready, "the wheel never read ready");
+    assertTrue(rawOvershot, "the trace never overshot, so the saturation was never needed");
+  }
+
+  /**
+   * The saturation only helps a projection that reaches the goal: a wheel still well short of it,
+   * or one moving away from it, is not ready.
+   *
+   * <p>"Never fires early" was the old projection's one guarantee, and saturating it must not spend
+   * it. Both traces hold a steady slope so the average has settled on it.
+   */
+  @Test
+  void aProjectionThatDoesNotReachTheGoalIsStillNotReady() {
+    ScriptedShooterIO scripted = new ScriptedShooterIO(0.0);
+    rebuildOver(scripted);
+    shooter.setGoal(3000.0);
+    double horizon = LOOP_SEC * 2.0;
+
+    // Short: climbing 100 RPM a loop from 1000, it projects 200 RPM ahead, nowhere near 3000.
+    scripted.then(1000, 1100, 1200, 1300, 1400, 1500, 1600);
+    step(7);
+    assertFalse(shooter.willBeAtSpeedIn(horizon), "a wheel 1,400 RPM short read ready");
+
+    // Away: above the goal and still climbing.
+    scripted.then(3200, 3300, 3400, 3500, 3600, 3700, 3800);
+    step(7);
+    assertFalse(shooter.willBeAtSpeedIn(horizon), "a wheel climbing away from its goal read ready");
+
+    // Away, the other side: below the goal and falling.
+    scripted.then(2900, 2800, 2700, 2600, 2500, 2400, 2300);
+    step(7);
+    assertFalse(shooter.willBeAtSpeedIn(horizon), "a wheel falling away from its goal read ready");
+  }
 }
