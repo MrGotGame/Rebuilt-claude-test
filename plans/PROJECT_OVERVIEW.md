@@ -166,7 +166,8 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | — | Combine M1–M9 as the base for M10 | `integration-m1_m9` | Complete — M3 and M4 merged in; 112 tests, 103 passing, 0 failures |
 | M10 | `Superstructure`: fourteen states, both interlocks, the `readyToScore` gate | `feature-superstructure` | **Simulation checkpoint complete** — 122 tests, 0 skipped, mutation score 26/26; hardware checkpoint outstanding |
 | M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` | **Simulation checkpoint complete** — all eleven steps done; 159 tests, 0 skipped, mutation score 98/99 (the survivor is M10's documented equivalent mutant); hardware checkpoint outstanding. Replanned 2026-09-24 (plan §2.4); change order and write-up below |
-| M11+ | Shot tables (now measured in bursts), shoot-on-the-move, autos, hardening | not started | — |
+| M11 | Stationary shooting: the shot tables, measured in bursts | `feature-still-shot` | **In progress** — branched off `feature-hopper` 2026-09-25; step 0 done (159 tests). Order below. The checkpoint itself needs the robot |
+| M12+ | Shoot-on-the-move, autos, hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
@@ -557,6 +558,46 @@ rocking period are still unmeasured. The intake's homing direction is probably b
   code, not asserted.
 
 The last two exist only as log output, and the logger records nothing under test.
+
+### M11: stationary shooting, and what it needs before a robot
+
+M11 fills the shot tables. Most of it is done on a practice field: stand at 8–10 taped distances,
+fire bursts, count what scores, and time the flight on 120 fps video. The code has to exist before
+that day, though, and one gap made the whole milestone impossible as the code stood. **With the
+shipped all-zero tables the solver returns "invalid" for every shot, so nothing could aim or spin
+up for a measurement, not even the force-shoot override.** The routine that collects the tables
+cannot depend on the tables it is collecting.
+
+**Where the work happens.** `feature-still-shot`, cut from `feature-hopper`, in its own sibling
+directory. No integration branch was needed: `feature-hopper` already contains every code commit
+on every other branch, `integration-m1_m9` and `feature-cad-constants` included (checked commit by
+commit when the branch was cut). The only commits it lacks are each branch's own merges of `main`,
+which carry identical plan files.
+
+**Two decisions, made by the user on 2026-09-25:**
+
+- **The measurement override lives inside `SCORE_STATIONARY`, not in a new state.** While a
+  measurement runs, the stationary shot uses a hand-set RPM and aims straight down the line of
+  sight to the goal, which needs no table when the robot is still. Everything else about a
+  stationary shot is unchanged: the same gate, the same tight-band first piece and burst latch, and
+  the chassis must be still. The override is set only by the measurement command, and is cleared
+  when that command ends, when the request leaves `SCORE_STATIONARY`, and on disable. A leaked
+  override would fire every stationary shot at the last test RPM, so each of those clears gets a
+  test.
+- **`kLaunchSpeedMetersPerSec` is deleted.** The solver never read it. It takes the ground speed as
+  distance ÷ time of flight, and the flywheel speed from the linear fit on the muzzle speed. The
+  table was loaded, exposed through `getLaunchSpeed()`, and read by one test. M11's text said to
+  fill it, which would have cost a measurement that changed nothing. The model needs exactly the
+  time-of-flight table and the two fit constants.
+
+| # | Step | Files | Done when |
+|---|---|---|---|
+| 0 | Branch setup and baseline | — | Branch builds; 159 tests pass. **Done: `bb2fc06`, `feature-hopper`'s tip.** |
+| 1 | **Delete the launch-speed table** | `Constants`, `ShootingSolver`, `ShootingSolverTest`, `SuperstructureFsmTest`, plan | A deletion-only commit: the constant, the solver's table, `getLaunchSpeed()` and the constructors' third array go. Build green. |
+| 2 | **The stationary RPM override** | `ShootingSolver`, `Superstructure`, `SuperstructureFsmTest` | A table-free stationary solve at a given RPM, used by `SCORE_STATIONARY` while the override is set. With all-zero tables and the override, the robot aims, spins up, opens the gate and feeds a burst. Without it, nothing changes. The override is ignored by every other request, and cleared on leaving `SCORE_STATIONARY` and on disable. |
+| 3 | **`measureShotTablePoint`, as a burst** | `CharacterizationCommands`, `RobotContainer`, `Constants` | The command sets the override, requests `SCORE_STATIONARY`, and ends on `likelyEmpty()` or its timeout. On the way out it clears the override and logs a per-burst summary under `ShotTable/`: the estimated and the taped distance, the RPM, the shots the flywheel counted, and the burst's duration. It is triggered in tuning mode from a NetworkTables toggle, on the flywheel bench harness's pattern, so no controller is needed. The plan's "fire one piece" becomes a burst (§2.4). |
+| 4 | **The fitting tool** | `tools/fit_shot_table.py` | Reads a CSV of distance, time of flight and the RPM that scored, then prints the `Constants.Shot` block: breakpoints, time-of-flight table, and the least-squares RPM fit on distance ÷ time of flight, with residuals. It checks the breakpoints ascend, and it has a self-test that recovers a known fit. |
+| 5 | **Verify, then record** | this file, `CONTEXT_AND_CONVENTIONS.md` | A mutation pass on the override's scope and clears, and on the burst summary, then the milestone row. **The M11 checkpoint (8 of 10 from three distances, and the shot count within one per burst) needs the robot and stays outstanding.** |
 
 ### The intake camera is not where the plan says it is
 
