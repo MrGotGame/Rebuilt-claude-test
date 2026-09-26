@@ -206,7 +206,7 @@ hardware.
 | `integration-m1_m9` | — | Everything through M9 combined, and the base M10 was cut from. A merge target only; never commit onto it. |
 | `feature-superstructure` | M10 | Branched off `integration-m1_m9`. `Superstructure` with all fourteen states, both interlocks, the `readyToScore` gate, the driver bindings, and `SuperstructureFsmTest`. **122 tests, none skipped, mutation score 26/26.** Also implements `FaultReporter`, whose `getInstance()` returned null and which M10's gate dereferences, and closes an intake home-latch hole and an angular-guard hole in `TurretUnwrapper` that only a cross-mechanism client could reach. Hardware checkpoint outstanding. |
 | `feature-hopper` | M10b | Branched off `feature-superstructure`. The hopper retrofit (plan §2.4), built in the eleven-step order in `PROJECT_OVERVIEW.md`. **Complete in simulation**, all eleven steps: the hopper constants (`76eac25`), flywheel shot counting (`f4ea778`, `c9658df`), the intake's resting and feed-assist states with its band predicates (`e98bedb`), the intake-camera gate widened to the resting `DEPLOYED` state (`f5c0ac7`), the intake/turret interlock corrected in both halves (`e7ba9cc`), indexer jam recovery with a current-only load reading (`437aa7e`, `c4f1ff8`), the superstructure switchover to the hopper model (`ba00fa9`), the deletion of the single-piece model (`dbe3de9`), the autos moved onto the hopper vocabulary (`c8464f2`), and the verification pass with the §10.2 checkpoint run as one continuous JUnit match (`5b7c80f`, `315bfc4`, `855da7f`). Builds, 159 tests pass, none skipped; mutation 98/99, the survivor being M10's documented equivalent mutant. The deploy-guard half of step 3 moved to step 5. Hardware checkpoint outstanding. **M11 builds on this branch.** |
-| `feature-still-shot` | M11 | Branched off `feature-hopper` (no integration branch was needed: it already contains every other branch's code). Stationary shooting: the shot tables, measured in bursts, in the order in `PROJECT_OVERVIEW.md`. Step 0 done, 159 tests. The launch-speed table is being deleted, and the table-free measurement override lives inside `SCORE_STATIONARY` (both the user's decisions, 2026-09-25). |
+| `feature-still-shot` | M11 | Branched off `feature-hopper` (no integration branch was needed: it already contains every other branch's code). Stationary shooting, **code complete in simulation**: the launch-speed table deleted (`5d339e2`), a table-free stationary shot at a hand-set speed behind a `SCORE_STATIONARY` override (`7bf4e59`, `eda005b`), `measureShotTablePoint` as a burst on the `/Tuning/ShotTable/Measure` toggle (`d740dd1`, `13ca471`), and `tools/fit_shot_table.py` (`1999b36`). Builds, 166 tests pass; mutation 109/110. **The checkpoint needs the robot**; the procedure is in `PROJECT_OVERVIEW.md`. M12 builds on this branch. |
 
 **M4's simulation checkpoint is complete**, including deliberate failures: zeroed gains drive the
 machine to `FAULTED` after `kSpinUpTimeoutSec`, a zero goal resolves to `IDLE` instead of faulting,
@@ -252,15 +252,19 @@ whole vision and shooting stack rests on that last one.
    nothing to commit — acting on the old instruction would mean regenerating it again from Tuner X,
    which is a decision rather than a chore, and whoever reverted it may have had a reason worth
    knowing first.
-3. **Review M10b on `feature-hopper`.** The hopper retrofit (plan §2.4) is complete in
+3. **Run M11 on the practice field, after one decision.** The code is ready on
+   `feature-still-shot`, and `PROJECT_OVERVIEW.md` has the procedure. Decide first whether to fix
+   the burst stutter recorded there. `Shooter.willBeAtSpeedIn`'s projection overshoots the burst
+   band during a hard spin-up, and every measurement burst starts with one.
+4. **Review M10b on `feature-hopper`.** The hopper retrofit (plan §2.4) is complete in
    simulation: no piece sensors, the intake rests deployed and rocks to feed, and intake and
    scoring run at once. `PROJECT_OVERVIEW.md` has the step-by-step record and a write-up. What is
    left needs the robot: the exact conflict-band edge from CAD, the rocking period, and the intake
    homing direction below. M11 (shot tables, measured in bursts) builds on `feature-hopper`, not
    on `feature-superstructure`; the single-piece branches stay as the record.
-4. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
+5. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
    layer, FSM shape and logging should be read and agreed before anything is built on top.
-5. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done:
+6. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done:
    - M2's pose gate — drive a 3 m square, confirm `getPoseAt(now - 0.1)` lags correctly. **Blocks
      M7, M8, M10 and M12.**
    - Per mechanism: closed-loop motion on the robot, and every device raising an alert when
@@ -277,14 +281,14 @@ whole vision and shooting stack rests on that last one.
      intake motion the intake/turret interlock does not guard. `Intake.faulted()`'s "the arm falls
      towards stow" comment rests on the same assumption. Raised during M10b and not yet answered:
      settle it before the intake is powered.
-6. **M6 characterization.** Several placeholder gains are visibly wrong in simulation: the intake
+7. **M6 characterization.** Several placeholder gains are visibly wrong in simulation: the intake
    pivot rings for about eight seconds before settling because `kPivotKg` and `kPivotKd` are both
    0.0; the turret rings about a 180-degree goal for about eight seconds (found by M10b's
    checkpoint, which has to wait it out); and the flywheel's `kV` under-predicts so `kP` is
    compensating for a feedforward error rather than doing its own job. Measure before tuning any
    of them.
-7. **The constants rename** (section 2), ideally as its own mechanical branch.
-8. **Integration branches**, merging `feature-drive` → `claude-test` first, then
+8. **The constants rename** (section 2), ideally as its own mechanical branch.
+9. **Integration branches**, merging `feature-drive` → `claude-test` first, then
    `feature-robot-state` (fast-forwards, being stacked on drive), then
    `feature-shooting-parameters`, then the M5 mechanisms, with `feature-flywheel` and
    `feature-turret` last — they carry the most byte-identical copied files, which collapse to no
