@@ -1,0 +1,7 @@
+# M11 shot-table measurements: one row per burst, misses included.
+# Copy this file, fill it in on the practice field, then run:
+#     python3 tools/fit_shot_table.py <your copy>.csv
+# distance_m: the TAPED distance. rpm: ShotTable/Rpm for the burst.
+# tof_frames / fps: frames from release to arrival on the 120 fps video (or give tof_s instead).
+# fired: ShotTable/ShotsFired. scored: your hand count. Rows below --min-hit-rate drop out.
+distance_m,rpm,tof_frames,fps,fired,scored
