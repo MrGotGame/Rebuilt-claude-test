@@ -35,7 +35,7 @@ and the two latent bugs M10 found in already-merged code. The second block is M1
 growing one retrofit step at a time: step 2 added the flywheel shot detector, step 3
 the intake's resting and feed-assist states and its two geometric predicates, step 4
 the intake-camera gate, step 5 both halves of the corrected interlock,
-step 6 the indexer's jam recovery and load reading. Several
+step 6 the indexer's jam recovery and load reading, step 7 the superstructure switchover. Several
 M10 anchors name code that later M10b steps replace (the piece guard, the isStowed turret
 guard), and those entries must be rewritten against the new code in the step that
 changes it, not deleted. Adding a milestone means adding its
@@ -62,12 +62,16 @@ SH = "src/main/java/frc/robot/subsystems/shooter/Shooter.java"
 IX = "src/main/java/frc/robot/subsystems/indexer/Indexer.java"
 
 MUTATIONS = [
-    ("piece-and-fault guard deleted", SS,
-     "    if (!indexer.hasPiece() || FaultReporter.getInstance().anyCritical()) {\n      return SystemState.SPINNING_UP;\n    }",
+    # Re-anchored in M10b step 7, which removed the piece half of this guard (plan section 2.4). The
+    # first entry is the fault guard's deletion as before; the second is now the reverse question --
+    # the piece guard coming back -- and it names indexer.hasPiece(), so step 8, which deletes that
+    # method, must rewrite it again rather than let it "die" as a compile error.
+    ("critical-fault guard deleted", SS,
+     "    if (FaultReporter.getInstance().anyCritical()) {\n      return SystemState.SPINNING_UP;\n    }",
      "    if (false) {\n      return SystemState.SPINNING_UP;\n    }"),
-    ("critical-fault half of that guard deleted", SS,
-     "if (!indexer.hasPiece() || FaultReporter.getInstance().anyCritical()) {",
-     "if (!indexer.hasPiece()) {"),
+    ("piece guard re-added, reverting step 7's decision", SS,
+     "    if (FaultReporter.getInstance().anyCritical()) {\n      return SystemState.SPINNING_UP;",
+     "    if (!indexer.hasPiece() || FaultReporter.getInstance().anyCritical()) {\n      return SystemState.SPINNING_UP;"),
     ("usable-solution guard deleted", SS,
      "    if (!lastShot.isUsable() || turret.isOutOfRange()) {",
      "    if (turret.isOutOfRange()) {"),
@@ -91,9 +95,9 @@ MUTATIONS = [
      "    if (turret.isHomed()) {"),
     ("boot entry action removed from the constructor", SS,
      "    onEnter(systemState);", "    // onEnter(systemState);"),
-    ("exit from INTAKING no longer restores the tag pipeline", SS,
-     "      case INTAKING -> vision.setIntakePipeline(Constants.Vision.kAprilTagPipelineIndex);",
-     "      case INTAKING -> {}"),
+    ("leaving intaking no longer restores the tag pipeline", SS,
+     "    } else if (next != IntakeMode.INTAKING && intakeMode == IntakeMode.INTAKING) {\n      vision.setIntakePipeline(Constants.Vision.kAprilTagPipelineIndex);",
+     "    } else if (false) {\n      vision.setIntakePipeline(Constants.Vision.kAprilTagPipelineIndex);"),
     ("force-shoot override ignored by the gate", SS,
      "    readyToScore = ignoreShotTolerances || (shotUsable && everythingButTheSolution);",
      "    readyToScore = shotUsable && everythingButTheSolution;"),
@@ -110,8 +114,8 @@ MUTATIONS = [
      "    turret.setIntakeArcGuard(intake::isInTurretConflictBand);",
      "    turret.setIntakeArcGuard(() -> false);"),
     ("forced scoring holds instead of feeding", SS,
-     "    indexer.setWantedState(Indexer.WantedState.FEED);\n    floorRoller.setWantedState(FloorRoller.WantedState.FEED);",
-     "    indexer.setWantedState(Indexer.WantedState.HOLD);\n    floorRoller.setWantedState(FloorRoller.WantedState.IDLE);"),
+     "      case SCORING_FORCED -> true;",
+     "      case SCORING_FORCED -> false;"),
     ("forced-shot count raised on entry to any scoring state", SS,
      "        if (state == SystemState.SCORING_FORCED) {\n          forcedShotCount++;",
      "        if (true) {\n          forcedShotCount++;"),
@@ -279,6 +283,73 @@ MUTATIONS = [
     ("an unjam pulse pushes forward instead of reversing", IX,
      "      case UNJAMMING -> commandVelocity(Constants.Indexer.kUnjamRpm.get());",
      "      case UNJAMMING -> commandVelocity(Constants.Indexer.kFeedRpm.get());"),
+
+    # ---- M10b step 7: the superstructure switchover. The intake region (request, posture,
+    # feed-assist), the feed side (floor roller leads, indexer gates, reverse with an unjam), the
+    # burst latch in both directions, the empty belief on each of its conditions and resets, the
+    # auto command that waits on it, and the two posture writers (first enable, STOW). The
+    # RobotContainer bindings and the Robot hooks are NOT mutated: nothing constructs either in a
+    # test, so no mutation there could be killed.
+    ("feed side commanded in the override states too", SS,
+     "    if (!isOverrideState(systemState)) {\n      applyFeedSide();\n    }",
+     "    applyFeedSide();"),
+    ("intake request ignored", SS,
+     "    } else if (intakeRequested) {",
+     "    } else if (false) {"),
+    ("an intake request does not deploy the posture", SS,
+     "      intakePosture = IntakePosture.DEPLOYED;\n      next = IntakeMode.INTAKING;",
+     "      next = IntakeMode.INTAKING;"),
+    ("the intake rests stowed whatever its posture", SS,
+     "    IntakeMode resting =\n        intakePosture == IntakePosture.DEPLOYED ? IntakeMode.DEPLOYED : IntakeMode.STOWED;",
+     "    IntakeMode resting = IntakeMode.STOWED;"),
+    ("feed-assist ignores the gate", SS,
+     "    } else if (feedOpen && intakePosture == IntakePosture.DEPLOYED) {",
+     "    } else if (intakePosture == IntakePosture.DEPLOYED) {"),
+    ("floor roller waits for the gate instead of leading", SS,
+     "    } else if (shotRequested) {\n      roller = FloorRoller.WantedState.FEED;",
+     "    } else if (feedOpen) {\n      roller = FloorRoller.WantedState.FEED;"),
+    ("floor roller runs for intaking alone", SS,
+     "    } else if (shotRequested) {\n      roller = FloorRoller.WantedState.FEED;",
+     "    } else if (shotRequested || intakeMode == IntakeMode.INTAKING) {\n      roller = FloorRoller.WantedState.FEED;"),
+    ("floor roller does not reverse with an unjam", SS,
+     "    if (indexer.isUnjamming()) {",
+     "    if (false) {"),
+    ("indexer feeds on the request, not the gate", SS,
+     "    indexer.setWantedState(feedOpen ? Indexer.WantedState.FEED : Indexer.WantedState.IDLE);",
+     "    indexer.setWantedState(shotRequested ? Indexer.WantedState.FEED : Indexer.WantedState.IDLE);"),
+    ("burst latch never sets", SS,
+     "    } else if (gateOpenForThisState) {\n      burstLatched = true;",
+     "    } else if (gateOpenForThisState) {\n      burstLatched = false;"),
+    ("burst latch never clears", SS,
+     "    if (!burstState || !otherTermsHold) {\n      burstLatched = false;",
+     "    if (false) {\n      burstLatched = false;"),
+    ("empty clock counts any unloaded time, gate or no gate", SS,
+     "    } else if (feedOpen\n        && indexer.getSystemState() == Indexer.SystemState.FEEDING\n        && !indexer.isLoaded()) {",
+     "    } else if (!indexer.isLoaded()) {"),
+    ("empty clock runs through an unjam pulse", SS,
+     "        && indexer.getSystemState() == Indexer.SystemState.FEEDING\n        && !indexer.isLoaded()) {",
+     "        && !indexer.isJammed()\n        && !indexer.isLoaded()) {"),
+    ("a load does not hold off the empty clock", SS,
+     "        && indexer.getSystemState() == Indexer.SystemState.FEEDING\n        && !indexer.isLoaded()) {",
+     "        && indexer.getSystemState() == Indexer.SystemState.FEEDING) {"),
+    ("a shot does not reset the empty clock", SS,
+     "    if (newShot || intakeMode == IntakeMode.INTAKING) {",
+     "    if (intakeMode == IntakeMode.INTAKING) {"),
+    ("intaking does not reset the empty clock", SS,
+     "    if (newShot || intakeMode == IntakeMode.INTAKING) {",
+     "    if (newShot) {"),
+    ("likelyEmpty ignores kEmptyConfirmSec", SS,
+     "    return unproductiveFeedSec >= Constants.Superstructure.kEmptyConfirmSec.get();",
+     "    return unproductiveFeedSec > 0.0;"),
+    ("scoreUntilEmpty ignores the empty belief", SS,
+     "                Commands.waitUntil(this::likelyEmpty)",
+     "                Commands.waitUntil(() -> false)"),
+    ("the first enable does not deploy the intake", SS,
+     "  public void onEnable() {\n    intakePosture = IntakePosture.DEPLOYED;\n  }",
+     "  public void onEnable() {}"),
+    ("STOW does not retract the intake", SS,
+     "    if (wanted == WantedState.STOW) {\n      intakePosture = IntakePosture.STOWED;\n    }",
+     "    if (wanted == WantedState.STOW) {}"),
 ]
 
 
