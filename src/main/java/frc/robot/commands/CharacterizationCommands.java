@@ -361,15 +361,16 @@ public class CharacterizationCommands {
     }
 
     /**
-     * Clears the override, returns the robot to rest, and reports the burst, however it ended.
+     * Returns the robot to rest, which clears the override, and reports the burst, however it
+     * ended.
      *
      * @param interrupted true if the command was cancelled
-     *     <p><b>Outputs:</b> clears the shot-table speed, requests DEFAULT, and delivers one
-     *     sample.
+     *     <p><b>Outputs:</b> requests DEFAULT, and delivers one sample.
      */
     @Override
     public void end(boolean interrupted) {
-      superstructure.clearShotTableRpm();
+      // The DEFAULT request is also what clears the shot-table override: the superstructure drops
+      // it on any request other than SCORE_STATIONARY. One rule, so there is one thing to test.
       superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
       sink.accept(
           new ShotTableSample(

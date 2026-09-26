@@ -2249,14 +2249,6 @@ public class SuperstructureFsmTest {
         superstructure.getLastShot().flywheelRpm(),
         1e-6,
         "after a disable, the stationary shot still fired at the test speed");
-
-    // And the measurement's own clear.
-    superstructure.setShotTableRpm(TABLE_RPM);
-    stepWithVision(3);
-    superstructure.clearShotTableRpm();
-    stepWithVision(3);
-    assertEquals(
-        tableRpm, superstructure.getLastShot().flywheelRpm(), 1e-6, "the clear was ignored");
   }
 
   // ------------------------------------------------ M11 step 3: the shot-table measurement burst
@@ -2349,39 +2341,55 @@ public class SuperstructureFsmTest {
   }
 
   /**
-   * A burst that starts with the hopper already believed empty -- from the burst before, with the
-   * hopper reloaded by hand, which resets nothing -- still waits for its own pieces.
+   * Bursts after the first count only their own pieces, wait for their own pieces even though the
+   * hopper is already believed empty, and an empty hopper ends on the time limit and says so.
    *
-   * <p>The first burst here fires nothing, so it runs to its time limit and leaves the belief set.
-   * The second then has three pieces. Ending on the belief alone would end it on its first loop,
-   * having measured nothing, and on the practice field that is every burst after the first.
+   * <p>Burst A fires two pieces and ends on the belief, leaving it set. Burst B is a hopper
+   * reloaded by hand, which resets nothing, with three pieces: ending on the belief alone would end
+   * it on its first loop, having measured nothing, and on the practice field that is every burst
+   * after the first. It must also report three shots, not the five fired since boot. Burst C has
+   * nothing in it, so no shot of its own ever arrives and only the time limit can end it.
    */
   @Test
-  void aShotTableBurstIgnoresTheLastBurstsEmptyBelief() {
+  void laterShotTableBurstsMeasureOnlyThemselves() {
     buildUnmeasuredRobot();
     List<ShotTableSample> samples = new ArrayList<>();
-    double holdSec = 4.0;
+    double holdSec = 20.0;
+    int limitLoops = (int) (holdSec / LOOP_SEC) + 50;
 
-    Command empty =
+    Command a =
         CharacterizationCommands.measureShotTablePoint(
             superstructure, shooter, () -> TABLE_RPM, () -> 3.0, holdSec, samples::add);
-    empty.initialize();
-    int loops = runBurst(empty, 0, TURRET_SETTLE_LOOPS);
-    empty.end(false);
+    a.initialize();
+    runBurst(a, 2, limitLoops);
+    a.end(false);
+    assertEquals(2, samples.get(0).shotsFired());
+    assertFalse(samples.get(0).timedOut(), "burst A should have ended on its belief");
+    assertTrue(superstructure.likelyEmpty(), "precondition: burst A leaves the belief set");
+
+    Command b =
+        CharacterizationCommands.measureShotTablePoint(
+            superstructure, shooter, () -> TABLE_RPM, () -> 3.0, holdSec, samples::add);
+    b.initialize();
+    runBurst(b, 3, limitLoops);
+    b.end(false);
+    assertEquals(3, samples.get(1).shotsFired(), "burst B ended early, or counted A's pieces too");
+    assertFalse(samples.get(1).timedOut(), "burst B did not end on its own belief");
+
+    double shortHoldSec = 4.0;
+    Command c =
+        CharacterizationCommands.measureShotTablePoint(
+            superstructure, shooter, () -> TABLE_RPM, () -> 3.0, shortHoldSec, samples::add);
+    c.initialize();
+    int loops = runBurst(c, 0, TURRET_SETTLE_LOOPS);
+    c.end(false);
     assertEquals(
-        (int) Math.round(holdSec / LOOP_SEC), loops, 2, "an empty hopper did not end on the limit");
-    assertTrue(samples.get(0).timedOut(), "an empty burst must report that it timed out");
-    assertEquals(0, samples.get(0).shotsFired());
-    assertTrue(superstructure.likelyEmpty(), "precondition: the belief is left set");
-
-    Command reloaded =
-        CharacterizationCommands.measureShotTablePoint(
-            superstructure, shooter, () -> TABLE_RPM, () -> 3.0, holdSec, samples::add);
-    reloaded.initialize();
-    runBurst(reloaded, 3, TURRET_SETTLE_LOOPS);
-    reloaded.end(false);
-    assertEquals(3, samples.get(1).shotsFired(), "the reloaded burst ended on the stale belief");
-    assertFalse(samples.get(1).timedOut(), "the reloaded burst did not end on its own belief");
+        (int) Math.round(shortHoldSec / LOOP_SEC),
+        loops,
+        2,
+        "an empty hopper did not end on the time limit");
+    assertTrue(samples.get(2).timedOut(), "an empty burst must report that it timed out");
+    assertEquals(0, samples.get(2).shotsFired());
   }
 
   /**

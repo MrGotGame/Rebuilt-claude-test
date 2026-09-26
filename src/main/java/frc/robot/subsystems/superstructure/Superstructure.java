@@ -157,9 +157,11 @@ public class Superstructure extends SubsystemBase {
    * tables while they are still all zeros. Everything else about the stationary shot is unchanged:
    * the same gate, the tight-band first piece, the burst latch, and a chassis that must be still.
    *
-   * <p>A leaked override would fire every later stationary shot at the last test speed, so it is
-   * cleared three ways: by the measurement command when it ends, by any request other than
-   * SCORE_STATIONARY, and on disable.
+   * <p>A leaked override would fire every later stationary shot at the last test speed, so ANY
+   * request other than SCORE_STATIONARY clears it. That one rule covers every exit: the measurement
+   * command requests DEFAULT when it ends however it ends, and onDisable requests IDLE. A separate
+   * clear method was written and then removed in M11 step 5, because nothing called it that did not
+   * also make such a request, so a mutant deleting its effect could never have been caught.
    */
   private OptionalDouble shotTableRpm = OptionalDouble.empty();
 
@@ -1409,23 +1411,15 @@ public class Superstructure extends SubsystemBase {
    * Fires the next stationary shots at a hand-set flywheel speed, for measuring the shot tables.
    *
    * <p>Added for M11 step 2. Only {@code CharacterizationCommands.measureShotTablePoint} should
-   * call this; it applies only while {@link WantedState#SCORE_STATIONARY} is requested, and any
-   * other request clears it, as do {@link #clearShotTableRpm()} and {@link #onDisable()}.
+   * call this. It applies only while {@link WantedState#SCORE_STATIONARY} is requested, and any
+   * other request clears it -- including the DEFAULT the measurement command requests when it ends,
+   * and the IDLE that {@link #onDisable()} requests.
    *
    * @param rpm the flywheel speed to fire at, in RPM
    *     <p><b>Outputs:</b> stores the override; the next loop's stationary solve uses it.
    */
   public void setShotTableRpm(double rpm) {
     shotTableRpm = OptionalDouble.of(rpm);
-  }
-
-  /**
-   * Ends a shot-table measurement's override, so stationary shots go back to the tables.
-   *
-   * <p><b>Outputs:</b> clears the override.
-   */
-  public void clearShotTableRpm() {
-    shotTableRpm = OptionalDouble.empty();
   }
 
   /**
