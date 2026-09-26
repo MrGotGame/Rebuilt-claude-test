@@ -37,7 +37,6 @@ import org.littletonrobotics.junction.Logger;
  */
 public class ShootingSolver {
   private final InterpolatingDoubleTreeMap timeOfFlightTable = new InterpolatingDoubleTreeMap();
-  private final InterpolatingDoubleTreeMap launchSpeedTable = new InterpolatingDoubleTreeMap();
   private int lastIterationCount = 0;
   private double lastResidualSec = 0.0;
 
@@ -69,13 +68,14 @@ public class ShootingSolver {
     // Constants.Shot.kDistanceBreakpointsMeters with kTimeOfFlightSec and
     // kLaunchSpeedMetersPerSec. Assert the three arrays are the same length and throw if not - a
     // mismatched table is a silent aiming bug otherwise.")
+    //
+    // One table now, not two. M11 step 1 deleted the launch-speed table: solve() never read it --
+    // the ground speed a shot needs is distance / time of flight, and the flywheel speed comes from
+    // the RPM fit -- so it was a measurement that changed nothing.
     usesConstantsTables = true;
     rpmPerMeterPerSec = Constants.Shot.kRpmPerMeterPerSec;
     rpmIntercept = Constants.Shot.kRpmIntercept;
-    populate(
-        Constants.Shot.kDistanceBreakpointsMeters,
-        Constants.Shot.kTimeOfFlightSec,
-        Constants.Shot.kLaunchSpeedMetersPerSec);
+    populate(Constants.Shot.kDistanceBreakpointsMeters, Constants.Shot.kTimeOfFlightSec);
   }
 
   /**
@@ -84,17 +84,11 @@ public class ShootingSolver {
    *
    * @param distances ascending distance breakpoints, in meters
    * @param timesOfFlight time of flight at each breakpoint, in seconds
-   * @param launchSpeeds required ground-frame launch speed at each breakpoint, in meters per second
    */
-  public ShootingSolver(double[] distances, double[] timesOfFlight, double[] launchSpeeds) {
+  public ShootingSolver(double[] distances, double[] timesOfFlight) {
     // IMPLEMENTATION (was TODO: "Test-only constructor that takes explicit tables so unit tests do
     // not depend on Constants or NetworkTables.")
-    this(
-        distances,
-        timesOfFlight,
-        launchSpeeds,
-        Constants.Shot.kRpmPerMeterPerSec,
-        Constants.Shot.kRpmIntercept);
+    this(distances, timesOfFlight, Constants.Shot.kRpmPerMeterPerSec, Constants.Shot.kRpmIntercept);
   }
 
   /**
@@ -106,26 +100,24 @@ public class ShootingSolver {
    *
    * @param distances ascending distance breakpoints, in meters
    * @param timesOfFlight time of flight at each breakpoint, in seconds
-   * @param launchSpeeds required ground-frame launch speed at each breakpoint, in meters per second
    * @param rpmPerMeterPerSec flywheel RPM per meter per second of muzzle speed
    * @param rpmIntercept flywheel RPM at zero muzzle speed
    */
   public ShootingSolver(
       double[] distances,
       double[] timesOfFlight,
-      double[] launchSpeeds,
       DoubleSupplier rpmPerMeterPerSec,
       DoubleSupplier rpmIntercept) {
     usesConstantsTables = false;
     this.rpmPerMeterPerSec = rpmPerMeterPerSec;
     this.rpmIntercept = rpmIntercept;
-    populate(distances, timesOfFlight, launchSpeeds);
+    populate(distances, timesOfFlight);
   }
 
   /**
-   * Rebuilds both tables from the current tunable values.
+   * Rebuilds the time-of-flight table from the current constants.
    *
-   * <p><b>Outputs:</b> clears and repopulates the interpolation tables. Called from the
+   * <p><b>Outputs:</b> clears and repopulates the interpolation table. Called from the
    * superstructure's onEnter for scoring states, so a mid-match table edit takes effect without a
    * redeploy.
    */
@@ -141,10 +133,7 @@ public class ShootingSolver {
     if (!usesConstantsTables) {
       return;
     }
-    populate(
-        Constants.Shot.kDistanceBreakpointsMeters,
-        Constants.Shot.kTimeOfFlightSec,
-        Constants.Shot.kLaunchSpeedMetersPerSec);
+    populate(Constants.Shot.kDistanceBreakpointsMeters, Constants.Shot.kTimeOfFlightSec);
   }
 
   /**
@@ -276,17 +265,6 @@ public class ShootingSolver {
   }
 
   /**
-   * Looks up the stationary launch speed.
-   *
-   * @param distanceMeters distance to the target, in meters
-   * @return interpolated ground-frame launch speed, in meters per second
-   */
-  public double getLaunchSpeed(double distanceMeters) {
-    // IMPLEMENTATION (was TODO: "launchSpeedTable.get(distanceMeters).")
-    return launchSpeedTable.get(distanceMeters);
-  }
-
-  /**
    * How many iterations the last solve took.
    *
    * @return iteration count; log this so a replay shows whether the solver ever hits the cap
@@ -336,37 +314,29 @@ public class ShootingSolver {
   }
 
   /**
-   * Fills both interpolation tables from three parallel arrays.
+   * Fills the time-of-flight table from two parallel arrays.
    *
    * @param distances ascending distance breakpoints, in meters
    * @param timesOfFlight time of flight at each breakpoint, in seconds
-   * @param launchSpeeds required ground-frame launch speed at each breakpoint, in meters per second
-   *     <p><b>Outputs:</b> clears and repopulates {@code timeOfFlightTable} and {@code
-   *     launchSpeedTable}.
-   * @throws IllegalArgumentException if the three arrays are not the same non-zero length
+   *     <p><b>Outputs:</b> clears and repopulates {@code timeOfFlightTable}.
+   * @throws IllegalArgumentException if the two arrays are not the same non-zero length
    */
-  private void populate(double[] distances, double[] timesOfFlight, double[] launchSpeeds) {
+  private void populate(double[] distances, double[] timesOfFlight) {
     // Throwing on a mismatch is deliberate and is worth the crash. A table whose arrays have
     // drifted out of step produces plausible-looking but wrong aim at every distance, with no
     // symptom other than missing -- which costs days to trace. Failing loudly at construction turns
     // that into a stack trace on the first boot after the edit.
-    if (distances.length == 0
-        || distances.length != timesOfFlight.length
-        || distances.length != launchSpeeds.length) {
+    if (distances.length == 0 || distances.length != timesOfFlight.length) {
       throw new IllegalArgumentException(
           "Shot table arrays must be non-empty and the same length; got distances="
               + distances.length
               + " timesOfFlight="
-              + timesOfFlight.length
-              + " launchSpeeds="
-              + launchSpeeds.length);
+              + timesOfFlight.length);
     }
 
     timeOfFlightTable.clear();
-    launchSpeedTable.clear();
     for (int i = 0; i < distances.length; i++) {
       timeOfFlightTable.put(distances[i], timesOfFlight[i]);
-      launchSpeedTable.put(distances[i], launchSpeeds[i]);
     }
   }
 }

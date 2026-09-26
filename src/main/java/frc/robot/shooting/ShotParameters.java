@@ -54,7 +54,8 @@ public record ShotParameters(
     //
     // All three terms are required. converged alone is not enough -- the iteration can converge on
     // a target outside the usable range -- and the isFinite check catches the case where a
-    // time-of-flight table entry is still 0.0 and the launch-speed division produced infinity.
+    // time-of-flight table entry is still 0.0 and the distance / time-of-flight division produced
+    // infinity.
     return converged && inRange && Double.isFinite(flywheelRpm);
   }
 }

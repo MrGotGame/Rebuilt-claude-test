@@ -1033,26 +1033,19 @@ public final class Constants {
 
     /**
      * Distances, meters, at which the shot table is sampled. Must be ascending and the same length
-     * as {@link #kLaunchSpeedMetersPerSec} and {@link #kTimeOfFlightSec}.
+     * as {@link #kTimeOfFlightSec}.
      *
      * <p>TODO: MEASURE at 8-10 distances spanning your usable range.
      */
     public static final double[] kDistanceBreakpointsMeters = {1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0};
 
     /**
-     * Ground-frame launch speed, m/s, needed to reach the goal from each breakpoint distance.
-     *
-     * <p>TODO: MEASURE. Stand still at each distance, sweep flywheel RPM until you score reliably,
-     * then convert that RPM to surface speed. All zeros means the solver has no idea how to shoot.
-     */
-    public static final double[] kLaunchSpeedMetersPerSec = {0, 0, 0, 0, 0, 0, 0};
-
-    /**
      * Time of flight, seconds, at each breakpoint distance.
      *
-     * <p>TODO: MEASURE from the same test, using video at 120 fps and counting frames from release
-     * to arrival. This is what makes shooting on the move work; a wrong TOF aims at the wrong
-     * place.
+     * <p>TODO: MEASURE at each breakpoint, from the burst fired at the RPM that scores there, using
+     * video at 120 fps and counting frames from release to arrival. This is what makes shooting on
+     * the move work; a wrong TOF aims at the wrong place. It also sets the flywheel speed: a
+     * stationary shot needs a ground speed of distance / TOF, which the RPM fit turns into RPM.
      */
     public static final double[] kTimeOfFlightSec = {0, 0, 0, 0, 0, 0, 0};
 

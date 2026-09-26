@@ -32,7 +32,6 @@ public class ShootingSolverTest {
   private static final double[] DISTANCES = {2.0, 4.0, 6.0};
 
   private static final double[] TIMES_OF_FLIGHT = {0.4, 0.6, 0.8};
-  private static final double[] LAUNCH_SPEEDS = {8.0, 11.0, 14.0};
 
   private static final Translation2d GOAL = new Translation2d(4.0, 0.0);
   private static final Pose2d ORIGIN = new Pose2d(0.0, 0.0, Rotation2d.kZero);
@@ -43,7 +42,7 @@ public class ShootingSolverTest {
   @BeforeEach
   void setUp() {
     Constants.disableHal = true;
-    solver = new ShootingSolver(DISTANCES, TIMES_OF_FLIGHT, LAUNCH_SPEEDS);
+    solver = new ShootingSolver(DISTANCES, TIMES_OF_FLIGHT);
   }
 
   /** The moving solve with zero velocity must equal the stationary solve exactly. */
@@ -174,8 +173,6 @@ public class ShootingSolverTest {
     // Extrapolating a shot table produces confidently wrong flywheel speeds, so the tables clamp.
     assertEquals(TIMES_OF_FLIGHT[0], solver.getTimeOfFlight(0.0), 1e-9);
     assertEquals(TIMES_OF_FLIGHT[TIMES_OF_FLIGHT.length - 1], solver.getTimeOfFlight(100.0), 1e-9);
-    assertEquals(LAUNCH_SPEEDS[0], solver.getLaunchSpeed(-5.0), 1e-9);
-    assertEquals(LAUNCH_SPEEDS[LAUNCH_SPEEDS.length - 1], solver.getLaunchSpeed(100.0), 1e-9);
 
     // And interpolate correctly in between: 3 m is halfway between the 2 m and 4 m breakpoints.
     assertEquals(0.5, solver.getTimeOfFlight(3.0), 1e-9);
@@ -188,10 +185,9 @@ public class ShootingSolverTest {
     // plausible number that is simply wrong.
     assertThrows(
         IllegalArgumentException.class,
-        () -> new ShootingSolver(new double[] {1.0, 2.0}, new double[] {0.1}, new double[] {5.0}));
+        () -> new ShootingSolver(new double[] {1.0, 2.0}, new double[] {0.1}));
     assertThrows(
-        IllegalArgumentException.class,
-        () -> new ShootingSolver(new double[] {}, new double[] {}, new double[] {}));
+        IllegalArgumentException.class, () -> new ShootingSolver(new double[] {}, new double[] {}));
   }
 
   /**
@@ -231,10 +227,7 @@ public class ShootingSolverTest {
   @Test
   void zeroTimeOfFlightTableYieldsInvalidNotInfinity() {
     ShootingSolver unmeasured =
-        new ShootingSolver(
-            new double[] {2.0, 4.0, 6.0},
-            new double[] {0.0, 0.0, 0.0},
-            new double[] {0.0, 0.0, 0.0});
+        new ShootingSolver(new double[] {2.0, 4.0, 6.0}, new double[] {0.0, 0.0, 0.0});
 
     ShotParameters result = unmeasured.solveStationary(ORIGIN, GOAL);
 

@@ -316,13 +316,10 @@ public class SuperstructureFsmTest {
    * at all. These numbers are plausible rather than measured; nothing here asserts on the values
    * they produce, only on the fact that a solution exists.
    *
-   * @return a solver over non-zero time-of-flight and launch-speed tables
+   * @return a solver over a non-zero time-of-flight table
    */
   private static ShootingSolver usableSolver() {
-    return new ShootingSolver(
-        new double[] {1.0, 4.0, 7.0},
-        new double[] {0.50, 0.80, 1.10},
-        new double[] {8.0, 12.0, 16.0});
+    return new ShootingSolver(new double[] {1.0, 4.0, 7.0}, new double[] {0.50, 0.80, 1.10});
   }
 
   /**
@@ -338,11 +335,7 @@ public class SuperstructureFsmTest {
    */
   private static ShootingSolver firingSolver() {
     return new ShootingSolver(
-        new double[] {1.0, 4.0, 7.0},
-        new double[] {0.50, 0.80, 1.10},
-        new double[] {8.0, 12.0, 16.0},
-        () -> 250.0,
-        () -> 0.0);
+        new double[] {1.0, 4.0, 7.0}, new double[] {0.50, 0.80, 1.10}, () -> 250.0, () -> 0.0);
   }
 
   /** The simulated flywheel under the robot {@link #buildFiringRobot()} built. */
