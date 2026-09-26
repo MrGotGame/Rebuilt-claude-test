@@ -38,7 +38,8 @@ the intake-camera gate, step 5 both halves of the corrected interlock,
 step 6 the indexer's jam recovery and load reading, step 7 the superstructure switchover.
 Step 8 deleted the single-piece model and added no defects of its own -- a deletion has
 no new behaviour to break -- but it rewrote the piece-guard entry, which named the
-deleted hasPiece(). Several M10 anchors name code that later M10b steps replace (the
+deleted hasPiece(). Step 9 added the autos' one runnable hopper-era block, the wait
+for the intake to retain pieces. Several M10 anchors name code that later M10b steps replace (the
 piece guard, the isStowed turret guard), and those entries must be rewritten against
 the new code in the step that changes it, not deleted. Adding a milestone means adding its
 defects to the list and re-running the whole thing, so an old mutation cannot quietly
@@ -62,6 +63,7 @@ FR = "src/main/java/frc/robot/util/FaultReporter.java"
 IN = "src/main/java/frc/robot/subsystems/intake/Intake.java"
 SH = "src/main/java/frc/robot/subsystems/shooter/Shooter.java"
 IX = "src/main/java/frc/robot/subsystems/indexer/Indexer.java"
+AR = "src/main/java/frc/robot/autos/AutoRoutines.java"
 
 MUTATIONS = [
     # Re-anchored in M10b step 7, which removed the piece half of this guard (plan section 2.4). The
@@ -356,6 +358,24 @@ MUTATIONS = [
     ("STOW does not retract the intake", SS,
      "    if (wanted == WantedState.STOW) {\n      intakePosture = IntakePosture.STOWED;\n    }",
      "    if (wanted == WantedState.STOW) {}"),
+
+    # ---- M10b step 9: the auto routines' wait for the intake to retain pieces, the only step 9
+    # code that runs without PathPlanner. Attacked on each side: ending at once (the preload is
+    # shed), never ending early (a second lost every auto), keying on the intaking angle (a
+    # feed-assisting intake, already safe, holds the routine), and losing its bound (a dead pivot
+    # costs the whole auto).
+    ("the retain wait does not wait", AR,
+     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)",
+     "            Commands.waitUntil(() -> true)"),
+    ("the retain wait always runs to its timeout", AR,
+     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)",
+     "            Commands.waitUntil(() -> false)"),
+    ("the retain wait keys on the intaking angle", AR,
+     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)",
+     "            Commands.waitUntil(factory.getIntake()::isAtIntakingAngle)"),
+    ("the retain wait has no timeout", AR,
+     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)\n                .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()),",
+     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces),"),
 ]
 
 
