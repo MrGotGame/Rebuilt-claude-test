@@ -127,6 +127,20 @@ final class SimulatedAutoRobot {
   /** Whether the intake was retaining pieces on {@link #firstMovingLoop}. */
   boolean retainingWhenFirstMoved = false;
 
+  /** Whether the intake has retained pieces at any point since the routine began. */
+  boolean hasRetained = false;
+
+  /**
+   * Loops, before the intake first retained, in which the robot did anything: moved, or had the
+   * shooter side out of rest.
+   *
+   * <p>The checkpoint's clause is that every routine STARTS with the wait for the intake. Judged
+   * only by movement, a routine that opens with a stationary preload would pass without the wait,
+   * because the burst takes long enough for the intake to come down anyway. This is the clause
+   * itself: until the intake retains, nothing at all is asked of the robot.
+   */
+  int actedBeforeRetainingLoops = 0;
+
   private int feedingLoops = 0;
   private int intakingLoops = 0;
 
@@ -226,6 +240,8 @@ final class SimulatedAutoRobot {
     loops = 0;
     stowedWhileMovingLoops = 0;
     firstMovingLoop = -1;
+    hasRetained = false;
+    actedBeforeRetainingLoops = 0;
   }
 
   /**
@@ -305,6 +321,11 @@ final class SimulatedAutoRobot {
             > Constants.Superstructure.kMaxChassisSpeedForStationaryShotMetersPerSec.get();
     if (moving && !intake.isRetainingPieces()) {
       stowedWhileMovingLoops++;
+    }
+    hasRetained |= intake.isRetainingPieces();
+    if (!hasRetained
+        && (moving || superstructure.getSystemState() != Superstructure.SystemState.RESTING)) {
+      actedBeforeRetainingLoops++;
     }
     if (moving && firstMovingLoop < 0) {
       firstMovingLoop = loops;

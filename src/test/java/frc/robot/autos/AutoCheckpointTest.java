@@ -256,8 +256,8 @@ public class AutoCheckpointTest {
   }
 
   /**
-   * Each routine runs to its end, never moves before the intake retains, and ends where its last
-   * path does.
+   * Each routine runs to its end, starts by waiting for the intake, never moves with it up, and
+   * ends where its last path does.
    *
    * <p>The end position is what shows every leg ran: a leg that silently did nothing would leave
    * the robot somewhere else. {@code Preload Only} and every routine that opens with a preload must
@@ -286,6 +286,10 @@ public class AutoCheckpointTest {
         0,
         robot.stowedWhileMovingLoops,
         "moved with the intake above its retaining range (Superstructure/StowedWhileMoving)");
+    assertEquals(
+        0,
+        robot.actedBeforeRetainingLoops,
+        routine + " did something before the intake retained; it must start by waiting for it");
     assertTrue(robot.firstMovingLoop >= 0, routine + " never moved");
     assertTrue(robot.retainingWhenFirstMoved, routine + " moved before the intake retained");
 
