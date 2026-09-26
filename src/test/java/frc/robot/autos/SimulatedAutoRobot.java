@@ -39,7 +39,10 @@ import frc.robot.subsystems.turret.TurretIOSim;
 import frc.robot.subsystems.vision.QuestNavIO;
 import frc.robot.subsystems.vision.Vision;
 import frc.robot.subsystems.vision.VisionIO;
+import java.io.FileNotFoundException;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The whole robot over simulated IO, stepped by the real command scheduler, for the M13 suites.
@@ -132,9 +135,10 @@ final class SimulatedAutoRobot {
    * <p>The caller must already have initialised the HAL and paused the clock.
    *
    * @param start where the robot stands, blue-origin field coordinates
+   * @param paths the paths the routines may follow, in place of the deploy folder
    * @param red true for the red alliance
    */
-  SimulatedAutoRobot(Pose2d start, boolean red) {
+  SimulatedAutoRobot(Pose2d start, AutoFactory.PathSource paths, boolean red) {
     DriverStationSim.setAllianceStationId(red ? AllianceStationID.Red1 : AllianceStationID.Blue1);
     DriverStationSim.setDsAttached(true);
     DriverStationSim.setAutonomous(true);
@@ -178,7 +182,7 @@ final class SimulatedAutoRobot {
                 new double[] {0.50, 0.80, 1.10},
                 () -> FIRING_RPM_PER_MPS,
                 () -> 0.0));
-    factory = new AutoFactory(drive, superstructure, intake, shooter, turret, vision);
+    factory = new AutoFactory(drive, superstructure, intake, shooter, turret, vision, paths);
     routines = new AutoRoutines(factory);
 
     placeAt(start);
@@ -339,6 +343,35 @@ final class SimulatedAutoRobot {
       CommandScheduler.getInstance().unregisterSubsystem(subsystem);
     }
     DriverStationSim.resetData();
+  }
+
+  /**
+   * A path source over paths built in a test.
+   *
+   * @param paths the paths, each answering to its {@code name}
+   * @return a source that serves them, and fails like a missing file for any other name; an auto
+   *     name is served as the one path of that name
+   */
+  static AutoFactory.PathSource pathsOf(PathPlannerPath... paths) {
+    Map<String, PathPlannerPath> byName = new HashMap<>();
+    for (PathPlannerPath path : paths) {
+      byName.put(path.name, path);
+    }
+    return new AutoFactory.PathSource() {
+      @Override
+      public PathPlannerPath path(String name) throws Exception {
+        PathPlannerPath path = byName.get(name);
+        if (path == null) {
+          throw new FileNotFoundException(name);
+        }
+        return path;
+      }
+
+      @Override
+      public List<PathPlannerPath> autoPaths(String autoName) throws Exception {
+        return List.of(path(autoName));
+      }
+    };
   }
 
   /**

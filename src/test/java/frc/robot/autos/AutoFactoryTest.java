@@ -22,6 +22,7 @@ import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.Constants;
 import frc.robot.subsystems.drive.Drive;
 import frc.robot.util.AllianceFlipUtil;
+import frc.robot.util.FaultReporter;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -319,7 +320,9 @@ public class AutoFactoryTest {
    * @return the fastest the robot moved during the path, m/s
    */
   private double followOnRobot(Pose2d start, PathPlannerPath path, boolean red) {
-    robot = new SimulatedAutoRobot(red ? AllianceFlipUtil.apply(start) : start, red);
+    robot =
+        new SimulatedAutoRobot(
+            red ? AllianceFlipUtil.apply(start) : start, SimulatedAutoRobot.pathsOf(), red);
     Command follow = AutoBuilder.followPath(path);
     CommandScheduler.getInstance().schedule(follow);
     double fastest = 0.0;
@@ -365,5 +368,172 @@ public class AutoFactoryTest {
         0.0,
         robot.pose().getTranslation().getDistance(AllianceFlipUtil.apply(end.getTranslation())),
         0.10);
+  }
+
+  // --------------------------------------------------- step 3: loading paths, loudly ----
+
+  /** Where the step 3 cases stand, blue-origin. */
+  private static final Pose2d START = new Pose2d(-4.0, 1.0, Rotation2d.fromDegrees(30.0));
+
+  /** A path from {@link #START} to two metres further along x. */
+  private static PathPlannerPath knownPath() {
+    return SimulatedAutoRobot.straightPath(
+        "Known", START, new Pose2d(-2.0, 1.0, START.getRotation()), 2.0, 0.0);
+  }
+
+  /**
+   * Builds a robot at {@link #START} whose path source holds only {@link #knownPath()}.
+   *
+   * @param red true for the red alliance
+   *     <p><b>Outputs:</b> sets {@link #robot}.
+   */
+  private void buildRobotWithKnownPath(boolean red) {
+    robot =
+        new SimulatedAutoRobot(
+            red ? AllianceFlipUtil.apply(START) : START,
+            SimulatedAutoRobot.pathsOf(knownPath()),
+            red);
+  }
+
+  /**
+   * Whether a fault with exactly this name is active.
+   *
+   * @param name the fault's name
+   * @return true if the fault reporter lists it as active
+   */
+  private static boolean faultActive(String name) {
+    return FaultReporter.getInstance().getActiveFaultNames().contains(name);
+  }
+
+  /**
+   * A missing path gives a command that does nothing, and a warning that names it.
+   *
+   * <p>Section 8.2's warning is that PathPlanner's failures are silent. A missing path must neither
+   * crash the robot code at boot, which is when the chooser builds every routine, nor disappear
+   * without a word.
+   */
+  @Test
+  void aMissingPathDoesNothingAndIsNamed() {
+    buildRobotWithKnownPath(false);
+    Command follow = robot.factory.followPath("Step3_NoSuchPath");
+    CommandScheduler.getInstance().schedule(follow);
+    robot.step(2);
+    assertFalse(follow.isScheduled(), "a missing path must end at once");
+    assertEquals(0.0, robot.pose().getTranslation().getDistance(START.getTranslation()), 0.01);
+    assertTrue(
+        faultActive("PathPlanner path unreadable: Step3_NoSuchPath (FileNotFoundException)"),
+        "no warning named the missing path; active: "
+            + FaultReporter.getInstance().getActiveFaultNames());
+  }
+
+  /**
+   * The missing-file warning is a warning, not an error.
+   *
+   * <p>Readiness-gate term 8 refuses to score while any error is active, so an error here would
+   * stop the robot shooting in teleop because a path file was renamed.
+   */
+  @Test
+  void aMissingPathDoesNotBlockScoring() {
+    buildRobotWithKnownPath(false);
+    robot.factory.followPath("Step3_NotAnError");
+    assertTrue(
+        faultActive("PathPlanner path unreadable: Step3_NotAnError (FileNotFoundException)"));
+    assertFalse(FaultReporter.getInstance().anyCritical(), "a missing path raised an error");
+  }
+
+  /** A path from the source is followed to its end. */
+  @Test
+  void aKnownPathIsFollowed() {
+    buildRobotWithKnownPath(false);
+    Command follow = robot.factory.followPath("Known");
+    CommandScheduler.getInstance().schedule(follow);
+    robot.step(300);
+    assertFalse(follow.isScheduled(), "the path never finished");
+    assertEquals(0.0, robot.pose().getTranslation().getDistance(new Translation2d(-2.0, 1.0)), 0.1);
+  }
+
+  /** The pose reset puts the estimate on the path's start, heading included. */
+  @Test
+  void theResetAdoptsThePathStart() {
+    buildRobotWithKnownPath(false);
+    robot.placeAt(new Pose2d(1.0, -2.0, Rotation2d.kPi));
+    Command reset = robot.factory.resetPoseToPathStart("Known");
+    CommandScheduler.getInstance().schedule(reset);
+    robot.step(1);
+    assertEquals(0.0, robot.pose().getTranslation().getDistance(START.getTranslation()), 1e-3);
+    assertEquals(
+        START.getRotation().getDegrees(), robot.pose().getRotation().getDegrees(), 0.5, "heading");
+  }
+
+  /**
+   * The reset reads the alliance when it RUNS, not when the routine is built.
+   *
+   * <p>Routines are built when the chooser is populated at boot, before the driver station has said
+   * which alliance this is -- on the field it reads blue, the default, at that moment. A reset that
+   * captured the flip then would put every red robot on the blue start.
+   */
+  @Test
+  void theResetReadsTheAllianceWhenItRuns() {
+    buildRobotWithKnownPath(false);
+    Command reset = robot.factory.resetPoseToPathStart("Known");
+    setAlliance(true);
+    CommandScheduler.getInstance().schedule(reset);
+    robot.step(1);
+    Pose2d red = AllianceFlipUtil.apply(START);
+    assertEquals(0.0, robot.pose().getTranslation().getDistance(red.getTranslation()), 1e-3);
+    assertEquals(red.getRotation().getDegrees(), robot.pose().getRotation().getDegrees(), 0.5);
+  }
+
+  /** A reset to a missing path leaves the estimate alone rather than crashing the auto. */
+  @Test
+  void aResetToAMissingPathLeavesThePoseAlone() {
+    buildRobotWithKnownPath(false);
+    Command reset = robot.factory.resetPoseToPathStart("Step3_NoSuchReset");
+    CommandScheduler.getInstance().schedule(reset);
+    robot.step(1);
+    assertEquals(0.0, robot.pose().getTranslation().getDistance(START.getTranslation()), 0.01);
+  }
+
+  /** An auto starts where its first path does, flipped on red. */
+  @Test
+  void anAutoStartsWhereItsFirstPathDoes() {
+    buildRobotWithKnownPath(false);
+    assertEquals(
+        0.0,
+        robot
+            .factory
+            .getStartingPose("Known")
+            .orElseThrow()
+            .getTranslation()
+            .getDistance(START.getTranslation()),
+        1e-6);
+    assertEquals(
+        robot.factory.getStartingPose("Known"), robot.factory.getPathStartingPose("Known"));
+    setAlliance(true);
+    assertEquals(
+        0.0,
+        robot
+            .factory
+            .getStartingPose("Known")
+            .orElseThrow()
+            .getTranslation()
+            .getDistance(AllianceFlipUtil.apply(START.getTranslation())),
+        1e-6);
+    assertTrue(robot.factory.getStartingPose("Step3_NoSuchAuto").isEmpty());
+    assertTrue(robot.factory.getPathStartingPose("Step3_NoSuchAuto").isEmpty());
+  }
+
+  /** A missing auto file gives a do-nothing command and a warning, not a crash at boot. */
+  @Test
+  void aMissingAutoFileDoesNothingAndIsNamed() {
+    buildRobotWithKnownPath(false);
+    Command auto = robot.factory.buildAuto("Step3_NoSuchAutoFile");
+    CommandScheduler.getInstance().schedule(auto);
+    robot.step(2);
+    assertFalse(auto.isScheduled());
+    assertTrue(
+        FaultReporter.getInstance().getActiveFaultNames().stream()
+            .anyMatch(name -> name.startsWith("PathPlanner auto unreadable: Step3_NoSuchAutoFile")),
+        "no warning named the missing auto");
   }
 }

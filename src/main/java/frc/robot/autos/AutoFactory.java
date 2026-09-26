@@ -1,16 +1,19 @@
 package frc.robot.autos;
 
 import com.pathplanner.lib.auto.AutoBuilder;
+import com.pathplanner.lib.commands.PathPlannerAuto;
 import com.pathplanner.lib.config.PIDConstants;
 import com.pathplanner.lib.config.RobotConfig;
 import com.pathplanner.lib.controllers.PPHolonomicDriveController;
 import com.pathplanner.lib.path.PathConstraints;
+import com.pathplanner.lib.path.PathPlannerPath;
 import com.pathplanner.lib.pathfinding.Pathfinding;
 import com.pathplanner.lib.util.FlippingUtil;
 import com.pathplanner.lib.util.PathPlannerLogging;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.wpilibj.Alert.AlertType;
+import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import frc.robot.Constants;
@@ -25,8 +28,10 @@ import frc.robot.util.AllianceFlipUtil;
 import frc.robot.util.FaultReporter;
 import frc.robot.util.LocalADStarAK;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import org.littletonrobotics.junction.Logger;
 
@@ -78,6 +83,53 @@ public class AutoFactory {
   private final Shooter shooter;
   private final Turret turret;
   private final Vision vision;
+  private final PathSource paths;
+
+  /**
+   * Where paths and autos are read from.
+   *
+   * <p>Added for M13 step 3, so the routines can be tested against paths built in the test rather
+   * than against whatever files happen to be in the deploy folder. The robot uses {@link #DEPLOY}.
+   */
+  public interface PathSource {
+    /**
+     * Reads one path.
+     *
+     * @param name the path file's name, without extension
+     * @return the path, drawn for the blue alliance
+     * @throws Exception if it is missing or unreadable
+     */
+    PathPlannerPath path(String name) throws Exception;
+
+    /**
+     * Reads the paths an auto file follows, in order.
+     *
+     * @param autoName the auto file's name, without extension
+     * @return its paths, drawn for the blue alliance
+     * @throws Exception if it is missing or unreadable
+     */
+    List<PathPlannerPath> autoPaths(String autoName) throws Exception;
+  }
+
+  /** The deploy folder, {@code src/main/deploy/pathplanner}: what the robot reads. */
+  public static final PathSource DEPLOY =
+      new PathSource() {
+        @Override
+        public PathPlannerPath path(String name) throws Exception {
+          return PathPlannerPath.fromPathFile(name);
+        }
+
+        @Override
+        public List<PathPlannerPath> autoPaths(String autoName) throws Exception {
+          return PathPlannerAuto.getPathGroupFromAutoFile(autoName);
+        }
+      };
+
+  /**
+   * Every file reported missing this process, so each is reported once however often it is asked
+   * for. The fault reporter is process-wide, so this is too.
+   */
+  private static final Set<String> reportedMissing = new HashSet<>();
 
   /**
    * Builds the factory and performs all PathPlanner configuration.
@@ -99,6 +151,31 @@ public class AutoFactory {
       Shooter shooter,
       Turret turret,
       Vision vision) {
+    this(drive, superstructure, intake, shooter, turret, vision, DEPLOY);
+  }
+
+  /**
+   * Builds the factory over a given source of paths.
+   *
+   * <p>Added for M13 step 3. The robot reads the deploy folder; the tests hand in paths they built.
+   *
+   * @param drive the drivetrain
+   * @param superstructure the cross-mechanism state machine
+   * @param intake the pivoting intake
+   * @param shooter the flywheel, whose shot count is the only piece count the robot has
+   * @param turret the turret
+   * @param vision the vision subsystem
+   * @param paths where to read paths and autos from
+   */
+  public AutoFactory(
+      Drive drive,
+      Superstructure superstructure,
+      Intake intake,
+      Shooter shooter,
+      Turret turret,
+      Vision vision,
+      PathSource paths) {
+    this.paths = paths;
     this.drive = drive;
     this.superstructure = superstructure;
     this.intake = intake;
@@ -383,10 +460,23 @@ public class AutoFactory {
    * @return the routine, or a do-nothing command if the file is missing
    */
   public Command buildAuto(String autoName) {
-    // TODO: return new PathPlannerAuto(autoName), wrapped in try/catch. On failure return
-    // Commands.none() AND fire a FaultReporter alert, so a renamed file cannot crash robotInit at
-    // an event.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "return new PathPlannerAuto(autoName), wrapped in try/catch. On
+    // failure return Commands.none() AND fire a FaultReporter alert, so a renamed file cannot crash
+    // robotInit at an event.")
+    //
+    // The try/catch the TODO asked for is not enough on its own, and a test found out why: in
+    // 2026.1.2 the PathPlannerAuto constructor catches FileNotFoundException, IOException and
+    // ParseException ITSELF and quietly builds an empty auto. So the file is read first through
+    // getPathGroupFromAutoFile (the path source's autoPaths), which does throw, and the auto is
+    // built only once that has succeeded. This is the route for an auto drawn entirely in the GUI;
+    // the routines in AutoRoutines are built from paths instead.
+    try {
+      paths.autoPaths(autoName);
+      return new PathPlannerAuto(autoName);
+    } catch (Exception e) {
+      reportMissing("auto", autoName, e);
+      return Commands.none();
+    }
   }
 
   /**
@@ -396,10 +486,61 @@ public class AutoFactory {
    * @return the follow command, or a do-nothing command if the file is missing
    */
   public Command followPath(String pathName) {
-    // TODO: PathPlannerPath.fromPathFile(pathName) inside try/catch for IOException and
-    // org.json.simple.parser.ParseException, then AutoBuilder.followPath(path). Return
-    // Commands.none() plus an alert on failure.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "PathPlannerPath.fromPathFile(pathName) inside try/catch for
+    // IOException and org.json.simple.parser.ParseException, then AutoBuilder.followPath(path).
+    // Return Commands.none() plus an alert on failure.")
+    //
+    // The file is read when the routine is BUILT, which is when the chooser is populated at boot,
+    // so a missing path is on the dashboard in the queue line rather than discovered mid-auto. The
+    // alliance flip is not decided here: AutoBuilder asks shouldFlipPaths() when the command
+    // starts, by which time the driver station has reported the alliance.
+    //
+    // Catches Exception rather than the two the TODO named: fromPathFile also throws
+    // FileVersionException in 2026.1.2, and a malformed file fails however its parser happens to.
+    Optional<PathPlannerPath> path = loadPath(pathName);
+    return path.isPresent() ? AutoBuilder.followPath(path.get()) : Commands.none();
+  }
+
+  /**
+   * Reads a path through the path source, reporting it if it cannot be read.
+   *
+   * @param pathName the path file's name, without extension
+   * @return the path, drawn blue, or empty if it could not be read
+   */
+  private Optional<PathPlannerPath> loadPath(String pathName) {
+    try {
+      return Optional.of(paths.path(pathName));
+    } catch (Exception e) {
+      reportMissing("path", pathName, e);
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * Registers a warning that a path or auto file could not be read, once per file per process.
+   *
+   * <p>A WARNING rather than the error the skeleton's TODOs imply: readiness-gate term 8 refuses to
+   * score while any error is active, and a missing auto file must not stop the robot shooting in
+   * teleop. It is still on the dashboard, by name, from boot.
+   *
+   * @param kind "path" or "auto"
+   * @param name the file's name
+   * @param cause why it could not be read
+   *     <p><b>Outputs:</b> may register a fault and print a driver station warning.
+   */
+  private static void reportMissing(String kind, String name, Exception cause) {
+    String message =
+        "PathPlanner "
+            + kind
+            + " unreadable: "
+            + name
+            + " ("
+            + cause.getClass().getSimpleName()
+            + ")";
+    if (reportedMissing.add(message)) {
+      FaultReporter.getInstance().register(message, AlertType.kWarning, () -> true);
+      DriverStation.reportWarning(message, false);
+    }
   }
 
   /**
@@ -444,14 +585,31 @@ public class AutoFactory {
    * @return a command that performs the reset
    */
   public Command resetPoseToPathStart(String pathName) {
-    // TODO: Commands.runOnce(() -> { load the path, take
-    // AllianceFlipUtil.shouldFlip() ? p.flipPath().getStartingHolonomicPose().orElseThrow()
-    //                               : p.getStartingHolonomicPose().orElseThrow();
-    // then RobotState.getInstance().resetPose(start, drive.getRawGyroRotation(),
-    // drive.getModulePositions()); }).
-    // TODO: VERIFY getStartingHolonomicPose()'s Optional return type against PathplannerLib
-    // 2026.1.2.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "Commands.runOnce(() -> { load the path, take
+    // AllianceFlipUtil.shouldFlip() ? p.flipPath().getStartingHolonomicPose().orElseThrow() :
+    // p.getStartingHolonomicPose().orElseThrow(); then RobotState.getInstance().resetPose(start,
+    // drive.getRawGyroRotation(), drive.getModulePositions()); })").
+    //
+    // Verified against 2026.1.2: getStartingHolonomicPose() returns Optional<Pose2d>, empty for a
+    // path with no ideal starting state. orElseThrow() inside a command would crash the auto, so
+    // an empty start skips the reset and the robot keeps the estimate it already has.
+    //
+    // The flip is AllianceFlipUtil.apply on the blue start, not p.flipPath(). Step 2 made the two
+    // agree, and applying ours keeps this pose in the same frame as the goal by construction.
+    //
+    // The path is read when the routine is built, but the alliance is read when the reset RUNS:
+    // routines are built at boot, before the driver station has said which alliance this is.
+    Optional<Pose2d> blueStart =
+        loadPath(pathName).flatMap(PathPlannerPath::getStartingHolonomicPose);
+    return Commands.runOnce(
+        () ->
+            blueStart.ifPresent(
+                start ->
+                    RobotState.getInstance()
+                        .resetPose(
+                            AllianceFlipUtil.apply(start),
+                            drive.getRawGyroRotation(),
+                            drive.getModulePositions())));
   }
 
   /**
@@ -461,10 +619,36 @@ public class AutoFactory {
    * @return the alliance-flipped starting pose, or empty if it cannot be determined
    */
   public Optional<Pose2d> getStartingPose(String autoName) {
-    // TODO: PathPlannerAuto.getStartingPoseFromAutoFile(autoName), alliance-flipped, wrapped in
-    // Optional and try/catch. TODO: VERIFY that static helper's exact name in PathplannerLib
-    // 2026.1.2.
-    return Optional.empty();
+    // IMPLEMENTATION (was TODO: "PathPlannerAuto.getStartingPoseFromAutoFile(autoName),
+    // alliance-flipped, wrapped in Optional and try/catch. TODO: VERIFY that static helper's exact
+    // name in PathplannerLib 2026.1.2.")
+    //
+    // Verified, and it does not exist in 2026.1.2. The nearest static helper is
+    // getPathGroupFromAutoFile, and an auto starts where its first path does, so that is used.
+    try {
+      List<PathPlannerPath> group = paths.autoPaths(autoName);
+      return group.isEmpty()
+          ? Optional.empty()
+          : group.get(0).getStartingHolonomicPose().map(AllianceFlipUtil::apply);
+    } catch (Exception e) {
+      reportMissing("auto", autoName, e);
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * The alliance-flipped starting pose of a path, for the pre-match preview.
+   *
+   * <p>Added for M13 step 3. A routine built in {@code AutoRoutines} starts where its first path
+   * does, so this is its starting pose with no companion {@code .auto} file needed.
+   *
+   * @param pathName the path file's name, without extension
+   * @return where the path starts on the current alliance, or empty if it cannot be read
+   */
+  public Optional<Pose2d> getPathStartingPose(String pathName) {
+    return loadPath(pathName)
+        .flatMap(PathPlannerPath::getStartingHolonomicPose)
+        .map(AllianceFlipUtil::apply);
   }
 
   /**
