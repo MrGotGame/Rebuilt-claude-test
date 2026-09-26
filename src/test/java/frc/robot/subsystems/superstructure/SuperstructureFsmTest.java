@@ -2043,13 +2043,20 @@ public class SuperstructureFsmTest {
   /**
    * The burst latch belongs to one burst: it is clear until the gate first opens, so the first
    * piece meets the tight band; it sets when the gate opens; and it clears when the robot stops
-   * scoring, so the next burst starts tight again.
+   * scoring, so the next burst starts tight again -- including when it stops scoring into a
+   * pre-spin, which keeps every other term true.
    *
    * <p>Added by step 10's mutation pass. {@link #burstLatchKeepsFeedingThroughRecovery} proves the
    * latch holds the feed open once set and clears on a lost vision term, but no case asserted
    * either end of its life: a latch that set as soon as every other term held, or that survived a
    * return to rest, both passed every test while letting a burst's first piece leave a wheel that
    * was only inside the wide band.
+   *
+   * <p>Each burst ends in SPIN_UP, not DEFAULT, and that is the point. The first version returned
+   * to rest and the mutant survived it: RESTING stows the turret, the turret term fails, and that
+   * clears the latch whether or not the latch's own state check works. SPINNING_UP keeps the turret
+   * aimed and the wheel up, so the state check is the only thing left to clear it -- and a pre-spin
+   * between two scoring legs is exactly what an auto's spinUpWhile does.
    */
   @Test
   void theBurstLatchBelongsToOneBurst() {
@@ -2072,12 +2079,17 @@ public class SuperstructureFsmTest {
       assertTrue(
           superstructure.isBurstLatched(), "burst " + burst + ": the open gate did not latch");
 
-      superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+      superstructure.setWantedState(Superstructure.WantedState.SPIN_UP);
       stepWithVision(5);
+      assertEquals(Superstructure.SystemState.SPINNING_UP, superstructure.getSystemState());
       assertFalse(
           superstructure.isBurstLatched(),
-          "burst " + burst + ": the latch survived the robot going back to rest");
+          "burst " + burst + ": the latch survived into a pre-spin between bursts");
     }
+
+    superstructure.setWantedState(Superstructure.WantedState.DEFAULT);
+    stepWithVision(5);
+    assertFalse(superstructure.isBurstLatched(), "the latch survived the robot going back to rest");
   }
 
   /**
