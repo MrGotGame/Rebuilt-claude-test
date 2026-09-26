@@ -237,4 +237,53 @@ public class ShootingSolverTest {
     assertTrue(Double.isFinite(result.flywheelRpm()), "RPM must not be infinite");
     assertEquals(0.0, result.flywheelRpm(), 1e-12);
   }
+
+  // ------------------------------------------------------------ M11 step 2: the table-free shot
+  // ----
+
+  /**
+   * A shot-table measurement's solve works on an unmeasured robot: it aims straight at the goal
+   * from wherever the robot stands, fires at exactly the speed it was given, and is usable -- all
+   * with a time-of-flight table of zeros, which is the state it exists to get the robot out of.
+   *
+   * <p>The robot stands off the goal's axis, so an aim that ignored the pose, or read the robot's
+   * heading instead, would be caught.
+   */
+  @Test
+  void aMeasurementShotNeedsNoTable() {
+    ShootingSolver unmeasured =
+        new ShootingSolver(new double[] {2.0, 4.0, 6.0}, new double[] {0.0, 0.0, 0.0});
+    Pose2d offAxis = new Pose2d(1.0, 1.0, Rotation2d.fromDegrees(70.0));
+
+    assertFalse(
+        unmeasured.solveStationary(offAxis, GOAL).isUsable(),
+        "precondition: the unmeasured table cannot produce a normal shot");
+
+    ShotParameters result = unmeasured.solveStationaryAtRpm(offAxis, GOAL, 3210.0);
+    assertTrue(result.isUsable(), "the measurement shot must not need the table it measures");
+    assertEquals(Math.atan2(-1.0, 3.0), result.turretFieldAngle().getRadians(), 1e-12);
+    assertEquals(3210.0, result.flywheelRpm(), 1e-12);
+    assertEquals(Math.hypot(3.0, 1.0), result.effectiveDistanceMeters(), 1e-12);
+    assertEquals(
+        0.0, result.turretAngularVelocityRadPerSec(), 1e-12, "a still robot needs no lead");
+  }
+
+  /**
+   * A measurement shot refuses a speed that is not a positive finite number, and still honours the
+   * range gate, so it cannot be taken from somewhere the robot would never shoot.
+   */
+  @Test
+  void aMeasurementShotRefusesABadSpeedAndHonoursTheRange() {
+    for (double bad : new double[] {0.0, -1500.0, Double.NaN, Double.POSITIVE_INFINITY}) {
+      assertFalse(
+          solver.solveStationaryAtRpm(ORIGIN, GOAL, bad).isUsable(), "accepted a speed of " + bad);
+    }
+    Pose2d tooFar =
+        new Pose2d(
+            GOAL.getX() - Constants.Shot.kMaxDistanceMeters.get() - 1.0, 0.0, Rotation2d.kZero);
+    assertFalse(solver.solveStationaryAtRpm(tooFar, GOAL, 3000.0).isUsable(), "ignored the range");
+    assertFalse(
+        solver.solveStationaryAtRpm(new Pose2d(GOAL, Rotation2d.kZero), GOAL, 3000.0).isUsable(),
+        "a robot on the goal has no line of sight to aim along");
+  }
 }

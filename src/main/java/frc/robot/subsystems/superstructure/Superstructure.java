@@ -24,6 +24,7 @@ import frc.robot.subsystems.turret.Turret;
 import frc.robot.subsystems.vision.Vision;
 import frc.robot.util.FaultReporter;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Set;
 import org.littletonrobotics.junction.AutoLogOutput;
 import org.littletonrobotics.junction.Logger;
@@ -146,6 +147,22 @@ public class Superstructure extends SubsystemBase {
   private SystemState systemState = SystemState.HOMING;
   private ShotParameters lastShot = ShotParameters.invalid();
   private boolean ignoreShotTolerances = false;
+
+  /**
+   * The flywheel speed a shot-table measurement fires at, or empty outside one.
+   *
+   * <p>Added for M11 step 2 (the user's decision of 2026-09-25: the override lives inside
+   * SCORE_STATIONARY rather than in a state of its own). While set, a stationary shot aims straight
+   * down the line of sight at this speed, which needs no shot table -- the only way to collect the
+   * tables while they are still all zeros. Everything else about the stationary shot is unchanged:
+   * the same gate, the tight-band first piece, the burst latch, and a chassis that must be still.
+   *
+   * <p>A leaked override would fire every later stationary shot at the last test speed, so it is
+   * cleared three ways: by the measurement command when it ends, by any request other than
+   * SCORE_STATIONARY, and on disable.
+   */
+  private OptionalDouble shotTableRpm = OptionalDouble.empty();
+
   private Optional<Rotation2d> requestedDriveHeading = Optional.empty();
 
   /**
@@ -406,15 +423,24 @@ public class Superstructure extends SubsystemBase {
     // exactly one solution per loop.
     RobotState state = RobotState.getInstance();
     Translation2d goal = Constants.Field.goalTranslation();
-    lastShot =
-        wantedState == WantedState.SCORE_STATIONARY
-            ? solver.solveStationary(state.getEstimatedPose(), goal)
-            : solver.solve(
-                state.getEstimatedPose(),
-                state.getFieldRelativeSpeeds(),
-                state.getFieldRelativeAccel(),
-                goal);
+    //
+    // M11 step 2 adds the third variant: a shot-table measurement, which is a stationary shot at a
+    // hand-set speed. It is still chosen here, so there is still one solution per loop.
+    if (wantedState == WantedState.SCORE_STATIONARY && shotTableRpm.isPresent()) {
+      lastShot =
+          solver.solveStationaryAtRpm(state.getEstimatedPose(), goal, shotTableRpm.getAsDouble());
+    } else if (wantedState == WantedState.SCORE_STATIONARY) {
+      lastShot = solver.solveStationary(state.getEstimatedPose(), goal);
+    } else {
+      lastShot =
+          solver.solve(
+              state.getEstimatedPose(),
+              state.getFieldRelativeSpeeds(),
+              state.getFieldRelativeAccel(),
+              goal);
+    }
     solver.logDebug("Superstructure/Shot", lastShot);
+    Logger.recordOutput("Superstructure/ShotTableRpm", shotTableRpm.orElse(Double.NaN));
 
     // ---- 2. Transition, with entry and exit actions fired exactly once per change.
     SystemState next = handleStateTransition();
@@ -1371,6 +1397,47 @@ public class Superstructure extends SubsystemBase {
     if (wanted == WantedState.STOW) {
       intakePosture = IntakePosture.STOWED;
     }
+
+    // A shot-table override belongs to one stationary measurement (M11 step 2). Any other request
+    // ends it, so the next stationary shot -- a real one -- goes back to the tables.
+    if (wanted != WantedState.SCORE_STATIONARY) {
+      shotTableRpm = OptionalDouble.empty();
+    }
+  }
+
+  /**
+   * Fires the next stationary shots at a hand-set flywheel speed, for measuring the shot tables.
+   *
+   * <p>Added for M11 step 2. Only {@code CharacterizationCommands.measureShotTablePoint} should
+   * call this; it applies only while {@link WantedState#SCORE_STATIONARY} is requested, and any
+   * other request clears it, as do {@link #clearShotTableRpm()} and {@link #onDisable()}.
+   *
+   * @param rpm the flywheel speed to fire at, in RPM
+   *     <p><b>Outputs:</b> stores the override; the next loop's stationary solve uses it.
+   */
+  public void setShotTableRpm(double rpm) {
+    shotTableRpm = OptionalDouble.of(rpm);
+  }
+
+  /**
+   * Ends a shot-table measurement's override, so stationary shots go back to the tables.
+   *
+   * <p><b>Outputs:</b> clears the override.
+   */
+  public void clearShotTableRpm() {
+    shotTableRpm = OptionalDouble.empty();
+  }
+
+  /**
+   * Whether a shot-table measurement's speed override is set.
+   *
+   * <p>Added beyond the plan's method list, on the {@link #getForcedShotCount} precedent, so a test
+   * can assert each of the ways the override is cleared.
+   *
+   * @return true while the override is set
+   */
+  public boolean isShotTableOverrideActive() {
+    return shotTableRpm.isPresent();
   }
 
   /**
@@ -1557,6 +1624,11 @@ public class Superstructure extends SubsystemBase {
     // the robot comes back at the start of the next match with the readiness gate already bypassed
     // and nothing on the dashboard that the drive team was looking at when they last saw it.
     ignoreShotTolerances = false;
+
+    // The shot-table override (M11 step 2) must not survive a disable either: it would fire the
+    // first stationary shot of the next session at the last test speed. The IDLE request at the
+    // end of this method is what clears it, as every request other than SCORE_STATIONARY does; a
+    // second, explicit clear here could be deleted with nothing noticing.
 
     // A stale solution would otherwise be acted on for the first loop after re-enable, before
     // periodic() has re-solved against wherever the robot has been carried to in the meantime.

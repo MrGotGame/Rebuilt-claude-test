@@ -254,6 +254,54 @@ public class ShootingSolver {
   }
 
   /**
+   * Solves a stationary shot at a flywheel speed chosen by hand, needing no shot table.
+   *
+   * <p>Added for M11 step 2: the routine that MEASURES the shot tables. {@link #solveStationary}
+   * reads the time-of-flight table to find the flywheel speed, and while that table is unmeasured
+   * (it ships all zeros) it returns an invalid shot -- so nothing could aim or spin up to collect
+   * the numbers that would fill it. Standing still, the aim needs no table at all: it is straight
+   * down the line of sight. Only the speed does, and during a measurement the operator supplies it.
+   *
+   * <p>The range gate still applies, so a measurement cannot be taken from somewhere the robot
+   * would never be allowed to shoot. The time of flight is the table's value, for the log only;
+   * nothing downstream of a stationary shot reads it.
+   *
+   * @param robotPose current field pose, blue-origin, in meters and radians
+   * @param goal the goal position in field coordinates, already alliance-flipped
+   * @param flywheelRpm the flywheel speed to fire at, in RPM
+   * @return a shot aimed at the goal at {@code flywheelRpm}, or {@link ShotParameters#invalid()} if
+   *     the robot is on the goal or the speed is not a positive finite number
+   */
+  public ShotParameters solveStationaryAtRpm(
+      Pose2d robotPose, Translation2d goal, double flywheelRpm) {
+    lastIterationCount = 0;
+    lastResidualSec = 0.0;
+
+    Translation2d lineOfSight = goal.minus(robotPose.getTranslation());
+    double distance = lineOfSight.getNorm();
+
+    // A zero or negative speed is refused rather than passed through: the flywheel would treat it
+    // as a request to stop, and the gate would then wait forever for a wheel that is not coming.
+    if (distance <= 0.0 || !(flywheelRpm > 0.0) || !Double.isFinite(flywheelRpm)) {
+      return ShotParameters.invalid();
+    }
+
+    boolean inRange =
+        distance >= Constants.Shot.kMinDistanceMeters.get()
+            && distance <= Constants.Shot.kMaxDistanceMeters.get();
+
+    return new ShotParameters(
+        lineOfSight.getAngle(),
+        0.0,
+        flywheelRpm,
+        distance,
+        timeOfFlightTable.get(distance),
+        goal,
+        true,
+        inRange);
+  }
+
+  /**
    * Looks up the stationary time of flight.
    *
    * @param distanceMeters distance to the target, in meters

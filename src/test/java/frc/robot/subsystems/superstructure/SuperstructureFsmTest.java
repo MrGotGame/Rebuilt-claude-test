@@ -2131,6 +2131,132 @@ public class SuperstructureFsmTest {
     assertTrue(sawDiverted, "no request was diverted, so the WANTED-state rule was not tested");
   }
 
+  // ------------------------------------------------------- M11 step 2: the shot-table override
+  // ----
+
+  /** A measurement speed no solver fit in this suite would produce by accident. */
+  private static final double TABLE_RPM = 3210.0;
+
+  /**
+   * With the shipped, unmeasured tables, SCORE_STATIONARY cannot shoot; with the shot-table
+   * override it aims at the goal, spins to the given speed, opens the gate and feeds a burst.
+   *
+   * <p>The negative half is the reason M11 needed the override at all: until the tables are
+   * measured the solver refuses every shot, so without it nothing could collect them. The positive
+   * half runs the ordinary stationary chain end to end -- the gate, then the burst latch -- rather
+   * than asserting on the solution alone, because a measurement the gate never lets fire measures
+   * nothing.
+   */
+  @Test
+  void theShotTableOverrideLetsAnUnmeasuredRobotFireABurst() {
+    intakeGeometry = IdealPivotIO.GEOMETRY;
+    buildRobot(
+        new ShootingSolver(),
+        new IdealPivotIO(),
+        new IndexerIOSim(),
+        new TurretIOSim(),
+        new ShooterIOSim(),
+        new FloorRollerIOSim());
+    placeRobotAt(-3.0, 0.0);
+    homeAndSettle();
+
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_STATIONARY);
+    for (int i = 0; i < 100; i++) {
+      stepWithVision(1);
+      assertNotEquals(
+          Indexer.SystemState.FEEDING,
+          indexer.getSystemState(),
+          "fed with no table and no override");
+    }
+    assertFalse(superstructure.getLastShot().isUsable(), "precondition: the tables are unmeasured");
+
+    superstructure.setShotTableRpm(TABLE_RPM);
+    for (int i = 0; i < TURRET_SETTLE_LOOPS && !superstructure.isReadyToScore(); i++) {
+      stepWithVision(1);
+    }
+    assertTrue(superstructure.isReadyToScore(), "the override never let the gate open");
+    assertEquals(TABLE_RPM, superstructure.getLastShot().flywheelRpm(), 1e-9);
+    assertEquals(TABLE_RPM, shooter.getGoalRpm(), 1e-9, "the flywheel was not sent to the speed");
+    assertEquals(
+        0.0,
+        superstructure.getLastShot().turretFieldAngle().getRadians(),
+        1e-9,
+        "the goal is straight ahead, so the aim must be too");
+
+    // The gate opens on a PREDICTION, mid spin-up, and can drop again for a loop while the wheel is
+    // still accelerating hard -- Shooter.willBeAtSpeedIn's linear projection overshoots even the
+    // burst band (its own TODO, deferred to M12). So the feed is awaited for a few loops rather
+    // than
+    // asserted on a fixed one.
+    boolean fed = false;
+    for (int i = 0; i < 10 && !fed; i++) {
+      stepWithVision(1);
+      fed = indexer.getSystemState() == Indexer.SystemState.FEEDING;
+    }
+    assertTrue(fed, "the open gate never fed");
+    assertTrue(superstructure.isBurstLatched(), "a measurement burst must latch like any other");
+  }
+
+  /**
+   * The override belongs to one stationary measurement: another request clears it, a disable clears
+   * it, and while it is set it touches no shot but the stationary one.
+   *
+   * <p>A leaked override is the failure that matters. It would fire every later stationary shot at
+   * the last test speed, with nothing in a match to show why the robot was missing. Each clear is
+   * checked by going BACK to SCORE_STATIONARY afterwards and confirming the shot uses the tables
+   * again, since "the flag is false" alone would pass a clear that the solve step ignored.
+   */
+  @Test
+  void theShotTableOverrideCannotLeakIntoAnotherShot() {
+    buildFiringRobot();
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_STATIONARY);
+    stepWithVision(3);
+    double tableRpm = superstructure.getLastShot().flywheelRpm();
+    assertTrue(superstructure.getLastShot().isUsable(), "precondition: the tables can shoot");
+    assertNotEquals(TABLE_RPM, tableRpm, 1.0, "precondition: the two speeds must differ");
+
+    // While set, it applies to the stationary shot...
+    superstructure.setShotTableRpm(TABLE_RPM);
+    stepWithVision(3);
+    assertEquals(TABLE_RPM, superstructure.getLastShot().flywheelRpm(), 1e-9);
+
+    // ...and to nothing else. A shot on the move is solved from the tables, and asking for it ends
+    // the measurement.
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    stepWithVision(3);
+    assertNotEquals(TABLE_RPM, superstructure.getLastShot().flywheelRpm(), 1.0);
+    assertFalse(superstructure.isShotTableOverrideActive(), "another request did not clear it");
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_STATIONARY);
+    stepWithVision(3);
+    assertEquals(
+        tableRpm,
+        superstructure.getLastShot().flywheelRpm(),
+        1e-6,
+        "after another request, the stationary shot still fired at the test speed");
+
+    // A disable clears it too.
+    superstructure.setShotTableRpm(TABLE_RPM);
+    stepWithVision(3);
+    assertEquals(TABLE_RPM, superstructure.getLastShot().flywheelRpm(), 1e-9);
+    superstructure.onDisable();
+    assertFalse(superstructure.isShotTableOverrideActive(), "a disable did not clear it");
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_STATIONARY);
+    stepWithVision(3);
+    assertEquals(
+        tableRpm,
+        superstructure.getLastShot().flywheelRpm(),
+        1e-6,
+        "after a disable, the stationary shot still fired at the test speed");
+
+    // And the measurement's own clear.
+    superstructure.setShotTableRpm(TABLE_RPM);
+    stepWithVision(3);
+    superstructure.clearShotTableRpm();
+    stepWithVision(3);
+    assertEquals(
+        tableRpm, superstructure.getLastShot().flywheelRpm(), 1e-6, "the clear was ignored");
+  }
+
   /**
    * Steps one loop with a fresh vision fix while RobotState measures the given chassis speed.
    *
