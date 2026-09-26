@@ -271,7 +271,10 @@ whole vision and shooting stack rests on that last one.
    on `feature-superstructure`; the single-piece branches stay as the record.
 6. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
    layer, FSM shape and logging should be read and agreed before anything is built on top.
-7. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done:
+7. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done.
+   **`ROBOT_BRINGUP.md` is the ordered plan for all of them**: what to measure and test, in what
+   order it is safe, and which branch each result is committed to (checked to merge forward with
+   no conflicts). The short list:
    - M2's pose gate — drive a 3 m square, confirm `getPoseAt(now - 0.1)` lags correctly. **Blocks
      M7, M8, M10 and M12.**
    - Per mechanism: closed-loop motion on the robot, and every device raising an alert when
