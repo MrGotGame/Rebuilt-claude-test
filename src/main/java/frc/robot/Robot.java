@@ -10,6 +10,7 @@ package frc.robot;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
+import frc.robot.util.FaultReporter;
 import frc.robot.util.PhoenixUtil;
 import org.littletonrobotics.junction.LogFileUtil;
 import org.littletonrobotics.junction.LoggedRobot;
@@ -94,7 +95,7 @@ public class Robot extends LoggedRobot {
     //   PhoenixUtil.refreshAll()                  (one batched CAN read for every mechanism)
     //   CommandScheduler.getInstance().run()
     //   RobotState.getInstance().logState()
-    //   FaultReporter.getInstance().periodic()
+    //   FaultReporter.getInstance().periodic()    (done, M13 step 7; see below)
     //   PowerBudget.getInstance().periodic()
     // TODO: Log loop duration under "LoopTimeMs" from Logger.getRealTimestamp() deltas, and
     // Runtime.getRuntime().freeMemory() under "MemoryFreeMB". Loop-overrun evidence is the only way
@@ -106,6 +107,13 @@ public class Robot extends LoggedRobot {
     PhoenixUtil.refreshAll();
 
     CommandScheduler.getInstance().run();
+
+    // Implemented in M13 step 7, ahead of the rest of the list above. FaultReporter only drives
+    // its alerts from periodic(), and nothing called it, so every fault registered with it was
+    // silent on the dashboard -- including M13's warnings for a missing path, a stale
+    // settings.json, and a robot placed off its auto's start, which the M13 checkpoint needs to
+    // see fire. After the scheduler, so it reads this loop's state.
+    FaultReporter.getInstance().periodic();
   }
 
   /**
@@ -145,7 +153,10 @@ public class Robot extends LoggedRobot {
     // is nearly stationary, call robotContainer.setDriveBrakeMode(false) ONCE (guard on
     // brakeModeReleased). The stationary check matters -- dropping to coast while the robot is
     // still rolling means it keeps rolling.
-    // TODO: Also call robotContainer.updateAutoPreview() so the drive team can check placement.
+    //
+    // IMPLEMENTATION, M13 step 7 (was TODO: "Also call robotContainer.updateAutoPreview() so the
+    // drive team can check placement."). The coast release above stays M14's.
+    robotContainer.updateAutoPreview();
   }
 
   /**
@@ -155,7 +166,10 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void autonomousInit() {
-    // TODO: robotContainer.setDriveBrakeMode(true); autoStartTimeSec = Timer.getFPGATimestamp().
+    // TODO: robotContainer.setDriveBrakeMode(true) (M14).
+    //
+    // IMPLEMENTED by M13 step 7: the start time, for Auto/ElapsedSec.
+    autoStartTimeSec = Timer.getFPGATimestamp();
     //
     // IMPLEMENTED in part by M10b step 7: the shot count reset the TODO asked for (now the
     // flywheel's, not the indexer's), and the first-enable intake deploy -- both in
@@ -175,8 +189,10 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void autonomousPeriodic() {
-    // TODO: Logger.recordOutput("Auto/ElapsedSec", Timer.getFPGATimestamp() - autoStartTimeSec), so
-    // routine timing can be compared across matches in AdvantageScope.
+    // IMPLEMENTATION, M13 step 7 (was TODO: "Logger.recordOutput(\"Auto/ElapsedSec\",
+    // Timer.getFPGATimestamp() - autoStartTimeSec), so routine timing can be compared across
+    // matches in AdvantageScope.")
+    Logger.recordOutput("Auto/ElapsedSec", Timer.getFPGATimestamp() - autoStartTimeSec);
   }
 
   /**
@@ -186,8 +202,9 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void autonomousExit() {
-    // TODO: Log the final estimated pose and the shooter's shot count. (The skeleton said the
-    // indexer's; M10b moved shot counting to the flywheel, and step 8 deleted the indexer's.)
+    // IMPLEMENTATION, M13 step 7 (was TODO: "Log the final estimated pose and the shooter's shot
+    // count."). In RobotContainer, which holds the shooter.
+    robotContainer.logAutonomousExit();
   }
 
   /**

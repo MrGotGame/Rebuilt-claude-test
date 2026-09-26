@@ -39,6 +39,7 @@ import frc.robot.subsystems.turret.TurretIOSim;
 import frc.robot.subsystems.vision.QuestNavIO;
 import frc.robot.subsystems.vision.Vision;
 import frc.robot.subsystems.vision.VisionIO;
+import frc.robot.util.AllianceFlipUtil;
 import java.io.FileNotFoundException;
 import java.util.HashMap;
 import java.util.List;
@@ -149,11 +150,11 @@ final class SimulatedAutoRobot {
    *
    * <p>The caller must already have initialised the HAL and paused the clock.
    *
-   * @param start where the robot stands, blue-origin field coordinates
+   * @param blueStart where the robot stands, drawn blue: on red it stands on the flip of this
    * @param paths the paths the routines may follow, in place of the deploy folder
    * @param red true for the red alliance
    */
-  SimulatedAutoRobot(Pose2d start, AutoFactory.PathSource paths, boolean red) {
+  SimulatedAutoRobot(Pose2d blueStart, AutoFactory.PathSource paths, boolean red) {
     DriverStationSim.setAllianceStationId(red ? AllianceStationID.Red1 : AllianceStationID.Blue1);
     DriverStationSim.setDsAttached(true);
     DriverStationSim.setAutonomous(true);
@@ -201,7 +202,11 @@ final class SimulatedAutoRobot {
     factory = new AutoFactory(drive, superstructure, intake, shooter, vision, paths);
     routines = new AutoRoutines(factory);
 
-    placeAt(start);
+    // Flipped HERE, after the driver station has been told the alliance. AllianceFlipUtil reads the
+    // alliance when it is called, and the first version of this harness left the flip to its
+    // callers, who called it before the constructor had set red. Every "red" robot stood on the
+    // blue start; the routines' own pose resets hid it, and a path case started 8 m from its path.
+    placeAt(AllianceFlipUtil.apply(blueStart));
     homeAndSettle();
   }
 

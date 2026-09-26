@@ -48,6 +48,7 @@ import frc.robot.subsystems.vision.Vision;
 import frc.robot.subsystems.vision.VisionIO;
 import frc.robot.subsystems.vision.VisionIOLimelight;
 import frc.robot.subsystems.vision.VisionIOSim;
+import org.littletonrobotics.junction.Logger;
 import org.littletonrobotics.junction.networktables.LoggedNetworkBoolean;
 
 /**
@@ -355,6 +356,11 @@ public class RobotContainer {
     // TODO: if (!Constants.kTuningMode) return; then add every routine from
     // CharacterizationCommands to autoSelector as a named option, exactly as the stock template
     // does for the drivetrain. Guarding on kTuningMode is what keeps them off the field.
+    //
+    // Left for M6 by M13 step 7, deliberately. autoSelector.addOption is ready, but every routine
+    // in CharacterizationCommands is still a skeleton returning Commands.none(), so wiring them now
+    // would put eight chooser entries in front of the drive team that silently do nothing. Add each
+    // one here in the same commit that implements it.
   }
 
   /**
@@ -443,8 +449,9 @@ public class RobotContainer {
    * @return the selected autonomous command; never null
    */
   public Command getAutonomousCommand() {
-    // TODO: return autoSelector.get(). It already guarantees a non-null command.
-    return Commands.none();
+    // IMPLEMENTATION (was TODO: "return autoSelector.get(). It already guarantees a non-null
+    // command.") The selector builds a fresh instance of the selected routine on every call.
+    return autoSelector.get();
   }
 
   /**
@@ -527,7 +534,26 @@ public class RobotContainer {
    * disabledPeriodic}.
    */
   public void updateAutoPreview() {
-    // TODO: autoSelector.logStartingPose(). Catching a misplaced robot before the match starts is
-    // worth the twenty lines this costs.
+    // IMPLEMENTATION (was TODO: "autoSelector.logStartingPose(). Catching a misplaced robot before
+    // the match starts is worth the twenty lines this costs.")
+    //
+    // Every disabled loop, not only when the selection changes: the error it logs is the thing
+    // that changes while the robot is being placed on the tape.
+    autoSelector.logStartingPose();
+  }
+
+  /**
+   * Records how autonomous finished, so routines can be scored from the log afterwards.
+   *
+   * <p>Added for M13 step 7, for {@code Robot.autonomousExit}.
+   *
+   * <p><b>Outputs:</b> logs {@code Auto/FinalPose} and {@code Auto/ShotCount}.
+   */
+  public void logAutonomousExit() {
+    // The FLYWHEEL's count, which is zeroed at autonomousInit: the only piece count the robot has
+    // (M10b). Set against Auto/PreloadFired it says how many pieces the routine fired after the
+    // preload.
+    Logger.recordOutput("Auto/FinalPose", RobotState.getInstance().getEstimatedPose());
+    Logger.recordOutput("Auto/ShotCount", shooter.getShotCount());
   }
 }

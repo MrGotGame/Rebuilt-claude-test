@@ -51,7 +51,7 @@ public class AutoCheckpointTest {
   private static final double LOOP_SEC = SimulatedAutoRobot.LOOP_SEC;
 
   /** The shooting position: 3 m in front of the goal, facing it. */
-  private static final Pose2d SHOOT = new Pose2d(-3.0, 0.0, Rotation2d.kZero);
+  static final Pose2d SHOOT = new Pose2d(-3.0, 0.0, Rotation2d.kZero);
 
   /**
    * The amp-side start, facing the goal.
@@ -138,7 +138,7 @@ public class AutoCheckpointTest {
   }
 
   /** Every path the routines name, shaped like section 8.4's, drawn blue. */
-  private static AutoFactory.PathSource field() {
+  static AutoFactory.PathSource field() {
     Translation2d piece1 = new Translation2d(-4.5, 1.5);
     Translation2d piece2 = new Translation2d(-4.5, -1.5);
     Translation2d piece3 = new Translation2d(-5.0, 0.0);
@@ -242,9 +242,7 @@ public class AutoCheckpointTest {
    * @return the loops the routine took
    */
   private int run(Routine routine, boolean red, Supplier<Optional<Pose2d>> gamePieces) {
-    robot =
-        new SimulatedAutoRobot(
-            red ? AllianceFlipUtil.apply(routine.start()) : routine.start(), field(), red);
+    robot = new SimulatedAutoRobot(routine.start(), field(), red);
     robot.fieldPieces = 20;
     AutoRoutines routines = new AutoRoutines(robot.factory, straightPathfinder(), gamePieces);
     Command command = routine.build().apply(routines);

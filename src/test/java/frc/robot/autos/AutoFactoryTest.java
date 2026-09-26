@@ -332,9 +332,14 @@ public class AutoFactoryTest {
    * @return the fastest the robot moved during the path, m/s
    */
   private double followOnRobot(Pose2d start, PathPlannerPath path, boolean red) {
-    robot =
-        new SimulatedAutoRobot(
-            red ? AllianceFlipUtil.apply(start) : start, SimulatedAutoRobot.pathsOf(), red);
+    robot = new SimulatedAutoRobot(start, SimulatedAutoRobot.pathsOf(), red);
+    // Checked because it once was not: the harness's first version stood every red robot on the
+    // blue start, 8 m from a red path, and this case still passed by chasing the path down.
+    assertEquals(
+        0.0,
+        robot.pose().getTranslation().getDistance(AllianceFlipUtil.apply(start.getTranslation())),
+        1e-6,
+        "the robot is not on the path's start");
     Command follow = AutoBuilder.followPath(path);
     CommandScheduler.getInstance().schedule(follow);
     double fastest = 0.0;
@@ -400,11 +405,7 @@ public class AutoFactoryTest {
    *     <p><b>Outputs:</b> sets {@link #robot}.
    */
   private void buildRobotWithKnownPath(boolean red) {
-    robot =
-        new SimulatedAutoRobot(
-            red ? AllianceFlipUtil.apply(START) : START,
-            SimulatedAutoRobot.pathsOf(knownPath()),
-            red);
+    robot = new SimulatedAutoRobot(START, SimulatedAutoRobot.pathsOf(knownPath()), red);
   }
 
   /**
