@@ -336,9 +336,11 @@ needs to notice that the hopper went from empty to not-empty.
 * **Start of match.** The starting-configuration rules require the robot to start with the intake
   STOWED, carrying **8 preloaded pieces**. Because a stowed intake lets pieces fall out, the intake
   must be **deployed before the robot moves**:
-  * `Superstructure.onEnable()` is called from `autonomousInit` and `teleopInit`. If the posture is
-    still `STOWED` and the robot is not `HOMING` or `FAULTED`, it switches the posture to
-    `DEPLOYED`. So the first enable deploys the intake with no button press.
+  * `Superstructure.onEnable()` is called from `autonomousInit` and `teleopInit`, and switches the
+    posture to `DEPLOYED`, unconditionally. So the first enable deploys the intake with no button
+    press. (An earlier draft excluded `HOMING` and `FAULTED`. Step 7 dropped that: an enable
+    arriving during the boot home must not be lost, and the posture is simply acted on once homing
+    finishes.)
   * `Intake.isRetainingPieces()` is true once the pivot is anywhere between `kDeployedAngleRad`
     and `kFeedAssistAngleRad`, inclusive. That is the range in which pieces stay aboard.
   * **Every auto routine starts with `waitUntilIntakeRetaining()`** before its first path, bounded
@@ -5106,8 +5108,8 @@ public class Superstructure extends SubsystemBase {
   }
 
   public void onEnable() {
-    // TODO: Called from Robot.autonomousInit and teleopInit. If intakePosture == STOWED and the
-    // system state is not HOMING or FAULTED, set intakePosture = DEPLOYED. The robot must START
+    // TODO: Called from Robot.autonomousInit and teleopInit. Set intakePosture = DEPLOYED,
+    // unconditionally -- an enable during the boot home must not be lost. The robot must START
     // stowed (a rule) but pieces fall out of a stowed intake, so the first enable deploys it with
     // no button press. An intake an operator deliberately STOWed during auto is redeployed at
     // teleopInit, for the same reason.
