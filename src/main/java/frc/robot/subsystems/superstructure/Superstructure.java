@@ -1465,6 +1465,20 @@ public class Superstructure extends SubsystemBase {
   }
 
   /**
+   * Whether the feed-assist-refused alert is raised this loop.
+   *
+   * <p>Added beyond the plan's method list for M10b step 10, on the {@link #getForcedShotCount}
+   * precedent. It reads the alert itself rather than a copy of its condition, so a test sees the
+   * warning the drive team would see; a condition that was computed and logged but never raised
+   * would otherwise pass.
+   *
+   * @return true while the intake is refusing a feed-assist rock beside a turret in its arc
+   */
+  public boolean isFeedAssistBlocked() {
+    return feedAssistBlockedAlert.get();
+  }
+
+  /**
    * Command-based adapter for button bindings.
    *
    * @param wanted the behavior to request when the command runs

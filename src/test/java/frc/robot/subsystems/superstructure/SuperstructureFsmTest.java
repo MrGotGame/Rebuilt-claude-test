@@ -9,6 +9,7 @@ import edu.wpi.first.hal.HAL;
 import edu.wpi.first.math.VecBuilder;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.wpilibj.Alert.AlertType;
@@ -356,17 +357,72 @@ public class SuperstructureFsmTest {
    * <p><b>Outputs:</b> replaces every subsystem; sets {@link #firingShooter}.
    */
   private void buildFiringRobot() {
-    intakeGeometry = IdealPivotIO.GEOMETRY;
+    buildFiringRobotUnhomed(-3.0, IdealPivotIO.GEOMETRY);
+    homeAndSettle();
+  }
+
+  /** The ideal pivot under the robot {@link #buildFiringRobotUnhomed} built. */
+  private IdealPivotIO firingPivot;
+
+  /**
+   * Robot x at which the goal lies directly BEHIND it, so the shot needs the turret at 180 degrees
+   * -- squarely inside its intake-conflict arc. {@link #buildFiringRobot()}'s -3 m is the mirror
+   * image, with the shot straight ahead and clear of the arc.
+   */
+  private static final double GOAL_BEHIND_X = 3.0;
+
+  /**
+   * Builds a firing robot 3 m from the goal but does not home it, so a case can watch boot.
+   *
+   * <p>Added for M10b step 10, whose cases need the turret aiming through its conflict arc and, for
+   * the misconfiguration guard, an intake geometry other than the test default.
+   *
+   * @param xMeters where to stand on the goal's x axis: -3 faces the goal, +3 has it behind
+   * @param geometry the intake pivot geometry
+   *     <p><b>Outputs:</b> replaces every subsystem; sets {@link #firingShooter} and {@link
+   *     #firingPivot}.
+   */
+  private void buildFiringRobotUnhomed(double xMeters, Intake.PivotGeometry geometry) {
+    intakeGeometry = geometry;
     firingShooter = new ShooterIOSim();
+    firingPivot = new IdealPivotIO();
     buildRobot(
         firingSolver(),
-        new IdealPivotIO(),
+        firingPivot,
         new IndexerIOSim(),
         new TurretIOSim(),
         firingShooter,
         new FloorRollerIOSim());
-    placeRobotAt(-3.0, 0.0);
-    homeAndSettle();
+    placeRobotAt(xMeters, 0.0);
+  }
+
+  /**
+   * Whether the turret's commanded angle is inside its intake-conflict arc, on any branch.
+   *
+   * @return true when the turret is being sent into the arc
+   */
+  private boolean turretCommandedIntoArc() {
+    double commanded = turret.getCommandedPositionRad();
+    return TurretUnwrapper.passesThroughArcWrapped(
+        commanded,
+        commanded,
+        Constants.Turret.kIntakeConflictMinRad.get(),
+        Constants.Turret.kIntakeConflictMaxRad.get());
+  }
+
+  /**
+   * Loops allowed for the simulated turret to settle after a large move, about twelve seconds.
+   *
+   * <p>On its placeholder gains the simulated turret rings about a 180-degree goal for roughly
+   * eight seconds (measured while writing the step 10 checkpoint) before it holds inside tolerance.
+   * That is M6's to fix by characterization; until then a case that needs the gate open after a big
+   * turret move has to wait it out.
+   */
+  private static final int TURRET_SETTLE_LOOPS = 600;
+
+  /** Loops in one feed-assist rock period. */
+  private static int rockPeriodLoops() {
+    return (int) Math.round(Constants.Intake.kFeedAssistPeriodSec.get() / LOOP_SEC);
   }
 
   /**
@@ -1764,5 +1820,234 @@ public class SuperstructureFsmTest {
         frozen, superstructure.getUnproductiveFeedSec(), 1e-9, "the clock ran on a jammed indexer");
     assertTrue(
         superstructure.getUnproductiveFeedSec() >= clockBefore, "sanity: the clock went backwards");
+  }
+
+  // ------------------------------------------------------ M10b step 10: verify, then record ----
+
+  /**
+   * While scoring with the turret in its conflict arc, the resting intake rocks between its two
+   * angles, never enters the conflict band, and never makes the turret yield.
+   *
+   * <p>Plan section 4.14's {@code feedAssistRocksAndNeverBlocksTheTurret}, added in step 10. The
+   * intake suite proves the rock alternates on the half period, but only this case puts it beside a
+   * turret that needs the arc -- the one place a rock that strayed into the band would matter. The
+   * low-power fallback half of the plan's case cannot be reached here: {@code PowerBudget} is still
+   * the M14 stub whose scalar is always 1.0, so the fallback is tested on the pure function in
+   * {@code IntakeFsmTest} instead.
+   */
+  @Test
+  void feedAssistRocksAndNeverBlocksTheTurret() {
+    buildFiringRobotUnhomed(GOAL_BEHIND_X, IdealPivotIO.GEOMETRY);
+    homeAndSettle();
+    superstructure.onEnable();
+    step(10);
+    openTheGate();
+    assertTrue(turretCommandedIntoArc(), "the shot does not need the arc, so nothing is tested");
+
+    boolean sawDeployGoal = false;
+    boolean sawAssistGoal = false;
+    for (int i = 0; i < 3 * rockPeriodLoops(); i++) {
+      stepWithVision(1);
+      assertFalse(intake.isInTurretConflictBand(), "the rock entered the band, loop " + i);
+      assertFalse(superstructure.isFeedAssistBlocked(), "a correctly placed rock was refused");
+      assertTrue(turretCommandedIntoArc(), "the turret yielded its arc to the rock, loop " + i);
+      if (intake.getSystemState() == Intake.SystemState.FEED_ASSISTING) {
+        sawDeployGoal |= firingPivot.lastGoalRad() == IdealPivotIO.DEPLOYED;
+        sawAssistGoal |= firingPivot.lastGoalRad() == IdealPivotIO.FEED_ASSIST;
+      }
+    }
+    assertTrue(sawDeployGoal && sawAssistGoal, "the intake held still instead of rocking");
+  }
+
+  /**
+   * A feed-assist angle tuned into the conflict band is refused beside a turret in its arc: the
+   * intake stays out of the band, the turret keeps the arc, and the warning is raised.
+   *
+   * <p>Plan section 4.14's {@code misconfiguredFeedAssistYieldsToTurret}, added in step 10. On this
+   * robot the rock stays well below the band, so the guard never fires on correct constants --
+   * which is exactly why it needs a case: nothing else would notice it had stopped working. The
+   * geometry puts the raised angle halfway into the band. {@link
+   * #feedAssistRocksAndNeverBlocksTheTurret} is the negative control, on correct geometry.
+   */
+  @Test
+  void misconfiguredFeedAssistYieldsToTurret() {
+    Intake.PivotGeometry raisedIntoTheBand =
+        new Intake.PivotGeometry(
+            () -> IdealPivotIO.STOWED,
+            () -> IdealPivotIO.DEPLOYED,
+            () -> IdealPivotIO.EJECT,
+            () -> IdealPivotIO.STOWED + 0.5 * IdealPivotIO.BAND,
+            () -> IdealPivotIO.BAND);
+    buildFiringRobotUnhomed(GOAL_BEHIND_X, raisedIntoTheBand);
+    homeAndSettle();
+    superstructure.onEnable();
+    step(10);
+    openTheGate();
+    assertTrue(turretCommandedIntoArc(), "the shot does not need the arc, so nothing is tested");
+
+    boolean sawBlocked = false;
+    for (int i = 0; i < 3 * rockPeriodLoops(); i++) {
+      stepWithVision(1);
+      assertFalse(
+          intake.isInTurretConflictBand(),
+          "the mis-tuned rock swung into the band beside a turret in its arc, loop " + i);
+      assertTrue(turretCommandedIntoArc(), "the turret yielded; while scoring it wins");
+      sawBlocked |= superstructure.isFeedAssistBlocked();
+    }
+    assertTrue(sawBlocked, "the refused feed-assist raised no warning");
+  }
+
+  /**
+   * Plan section 10.2's M10b simulation checkpoint, walked as one continuous match rather than as
+   * separate cases, so the clauses are shown to hold together and in order.
+   *
+   * <p>From boot: the intake starts STOWED, and a shot that needs the arc is refused the turret
+   * while it is. The floor roller leads from the first loop of the request. The first enable
+   * deploys the intake, and the turret gets its arc only once the pivot has left the band. Then
+   * intake, score and drive together: the intake region reads INTAKING while the turret aims and
+   * the indexer feeds. Releasing the intake leaves it down and rocking, still clear of the band.
+   *
+   * <p>The plan asks for this in simulation, from the log. AdvantageScope cannot be driven from the
+   * agent's sandbox, so the checkpoint is discharged here over the same simulated IO the sim uses,
+   * and it can fail on every build instead of once. The one clause with no assertion is "M10's
+   * eight separately-logged booleans becomes seven": Logger records nothing under test, so that one
+   * is checked by reading updateReadyToScore(), which logs the seven terms, plus the
+   * stationary-only term and the override, each under its own key.
+   */
+  @Test
+  void theHopperCheckpointHoldsAcrossOneMatch() {
+    buildFiringRobotUnhomed(GOAL_BEHIND_X, IdealPivotIO.GEOMETRY);
+    assertEquals(Superstructure.SystemState.HOMING, superstructure.getSystemState());
+    homeAndSettle();
+    assertEquals(Superstructure.IntakeMode.STOWED, superstructure.getIntakeMode());
+    assertTrue(intake.isInTurretConflictBand(), "the robot must start stowed, in the band");
+
+    // ---- A shot that needs the arc, before the enable. The turret is refused; the floor roller
+    // leads anyway, with the indexer shut.
+    int loop = 0;
+    int firstRollerFeed = -1;
+    int firstIndexerFeed = -1;
+    superstructure.setWantedState(Superstructure.WantedState.SCORE_ON_MOVE);
+    for (int i = 0; i < 50; i++, loop++) {
+      stepWithVision(1);
+      assertFalse(
+          turretCommandedIntoArc(), "the turret was sent into its arc beside a stowed intake");
+      if (firstRollerFeed < 0 && floorRoller.getSystemState() == FloorRoller.SystemState.FEEDING) {
+        firstRollerFeed = loop;
+      }
+      if (firstIndexerFeed < 0 && indexer.getSystemState() == Indexer.SystemState.FEEDING) {
+        firstIndexerFeed = loop;
+      }
+    }
+    assertTrue(firstRollerFeed >= 0 && firstRollerFeed <= 2, "the floor roller did not lead");
+    assertEquals(-1, firstIndexerFeed, "the indexer fed with the turret refused its aim");
+
+    // ---- The first enable deploys the intake; the turret gets its arc only once it is out.
+    //
+    // The window is long because the simulated turret, on its placeholder gains, rings about a
+    // 180-degree goal for roughly eight seconds before it settles inside tolerance and the gate can
+    // open -- the same unmeasured-gains ringing the intake pivot shows, and M6's to fix, not this
+    // milestone's. It is the time to the gate that is long, not the time to the arc.
+    superstructure.onEnable();
+    int leftBand = -1;
+    int enteredArc = -1;
+    for (int i = 0;
+        i < TURRET_SETTLE_LOOPS && (enteredArc < 0 || firstIndexerFeed < 0);
+        i++, loop++) {
+      stepWithVision(1);
+      if (leftBand < 0 && !intake.isInTurretConflictBand()) {
+        leftBand = loop;
+      }
+      if (enteredArc < 0 && turretCommandedIntoArc()) {
+        enteredArc = loop;
+      }
+      if (firstIndexerFeed < 0 && indexer.getSystemState() == Indexer.SystemState.FEEDING) {
+        firstIndexerFeed = loop;
+      }
+    }
+    assertTrue(leftBand >= 0, "the enable never deployed the intake out of the band");
+    assertTrue(enteredArc >= leftBand, "the turret entered its arc before the pivot left the band");
+    assertTrue(
+        firstIndexerFeed >= 0,
+        "the gate never opened after the enable; superstructure "
+            + superstructure.getSystemState()
+            + ", turret "
+            + turret.getSystemState()
+            + " at "
+            + turret.getPositionRad()
+            + " commanded "
+            + turret.getCommandedPositionRad()
+            + ", turret at goal "
+            + turret.atGoal()
+            + ", flywheel "
+            + shooter.getVelocityRpm()
+            + " of "
+            + shooter.getGoalRpm());
+    assertTrue(firstIndexerFeed > firstRollerFeed, "the indexer fed before the floor roller ran");
+    assertTrue(intake.isRetainingPieces(), "the enabled robot is not holding its preload");
+
+    // ---- Intake, score and drive together. The chassis speed goes to RobotState the way the
+    // drivetrain reports it, sideways at 1 m/s, so the solver has a moving shot to compensate.
+    superstructure.setIntakeRequested(true);
+    ChassisSpeeds driving = new ChassisSpeeds(0.0, 1.0, 0.0);
+    try {
+      boolean sawAllAtOnce = false;
+      // The moving shot swings the aim point by roughly 15 degrees, so the turret rings again; the
+      // same long window applies.
+      for (int i = 0; i < TURRET_SETTLE_LOOPS && !sawAllAtOnce; i++) {
+        stepDriving(driving);
+        sawAllAtOnce =
+            superstructure.getIntakeMode() == Superstructure.IntakeMode.INTAKING
+                && intake.getSystemState() == Intake.SystemState.INTAKING
+                && turret.getSystemState() == Turret.SystemState.AIMING
+                && indexer.getSystemState() == Indexer.SystemState.FEEDING
+                && RobotState.getInstance().getFieldRelativeSpeeds().vyMetersPerSecond > 0.5;
+      }
+      assertTrue(
+          sawAllAtOnce,
+          "never intaking, aiming and feeding at once while driving; intake mode "
+              + superstructure.getIntakeMode()
+              + ", turret "
+              + turret.getSystemState()
+              + ", indexer "
+              + indexer.getSystemState());
+
+      // ---- Release the intake: it stays down, and with the feed open it rocks, clear of the band.
+      // The gate first opened while the turret was still ringing near the edge of its tolerance,
+      // and it rocks only while the gate is open, so the rock is watched for as long as the turret
+      // may take to settle; the invariants are asserted on every one of those loops.
+      superstructure.setIntakeRequested(false);
+      boolean sawDeployGoal = false;
+      boolean sawAssistGoal = false;
+      for (int i = 0; i < TURRET_SETTLE_LOOPS && !(sawDeployGoal && sawAssistGoal); i++) {
+        stepDriving(driving);
+        assertNotEquals(Intake.SystemState.STOWING, intake.getSystemState(), "releasing raised it");
+        assertFalse(intake.isInTurretConflictBand(), "the released intake entered the band");
+        assertTrue(intake.isRetainingPieces(), "the released intake stopped holding the hopper");
+        if (intake.getSystemState() == Intake.SystemState.FEED_ASSISTING) {
+          sawDeployGoal |= firingPivot.lastGoalRad() == IdealPivotIO.DEPLOYED;
+          sawAssistGoal |= firingPivot.lastGoalRad() == IdealPivotIO.FEED_ASSIST;
+        }
+      }
+      assertTrue(sawDeployGoal && sawAssistGoal, "the released intake did not rock while scoring");
+    } finally {
+      // RobotState is a process-wide singleton, and resetting the pose does not reset the speeds.
+      // Stop the chassis, and hold it stopped long enough for the acceleration filter to drain,
+      // so no later case inherits a moving robot.
+      for (int i = 0; i < 50; i++) {
+        stepDriving(new ChassisSpeeds());
+      }
+    }
+  }
+
+  /**
+   * Steps one loop with a fresh vision fix while RobotState measures the given chassis speed.
+   *
+   * @param robotRelative the chassis speed to report, robot-relative
+   *     <p><b>Outputs:</b> feeds RobotState a speed sample and a vision fix, then steps the robot.
+   */
+  private void stepDriving(ChassisSpeeds robotRelative) {
+    RobotState.getInstance().addDriveSpeedsObservation(Timer.getFPGATimestamp(), robotRelative);
+    stepWithVision(1);
   }
 }
