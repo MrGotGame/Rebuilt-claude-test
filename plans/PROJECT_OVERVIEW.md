@@ -167,7 +167,8 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M10 | `Superstructure`: fourteen states, both interlocks, the `readyToScore` gate | `feature-superstructure` | **Simulation checkpoint complete** — 122 tests, 0 skipped, mutation score 26/26; hardware checkpoint outstanding |
 | M10b | Hopper retrofit: multi-piece model, intake rests deployed, intake + shoot at once | `feature-hopper` | **Simulation checkpoint complete** — all eleven steps done; 159 tests, 0 skipped, mutation score 98/99 (the survivor is M10's documented equivalent mutant); hardware checkpoint outstanding. Replanned 2026-09-24 (plan §2.4); change order and write-up below |
 | M11 | Stationary shooting: the shot tables, measured in bursts | `feature-still-shot` | **Code complete in simulation** — all six steps done; 166 tests, 0 skipped, mutation score 109/110 (the survivor is M10's documented equivalent mutant). **The checkpoint needs the robot**: the procedure is below |
-| M12+ | Shoot-on-the-move, autos, hardening | not started | — |
+| M12 | Shoot on the move | `feature-sotm` | **In progress** — branched off `feature-still-shot` 2026-09-26 (M11 blocks M12); step 0 done (166 tests). Order below |
+| M13+ | Autos, hardening | not started | — |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
@@ -617,7 +618,7 @@ rebuild. Check `ShotTable/EstimatedDistanceMeters` against the tape on every row
 the row at the wrong distance. The checkpoint is then 8 of 10 from three distances with
 `SCORE_STATIONARY`, and `Shooter/ShotCount` within one per burst of the hand count.
 
-**Found during M11, and not changed: a burst from a spin-up stutters.** The flywheel term of the
+**Found during M11, and fixed in M12 step 1: a burst from a spin-up stutters.** The flywheel term of the
 gate opens on a prediction mid spin-up. In simulation that was at 2,893 of 3,210 RPM, which is by
 design, because the piece takes about 40 ms to reach the wheel. It then dropped for one loop, with
 the burst latch still set, which stops the indexer mid-burst.
@@ -626,6 +627,29 @@ still accelerating hard that projection overshoots even the 300 RPM burst band. 
 carries this as a TODO for M12, with its fix: saturate the projection at the goal. It is raised
 here rather than fixed, because every M11 measurement burst starts from exactly this spin-up. It
 should be decided before the practice field, in M11 or at the start of M12.
+
+### M12: shooting on the move
+
+The plan's M12 is short: enable `SCORE_ON_MOVE`, tune the gates, and raise the acceleration term
+later. Most of the machinery already exists. M3 built the solver, M10 built the superstructure,
+and the driver's right bumper already requests `SCORE_ON_MOVE`. An audit against plan §6 found
+the rest in place as well. The turret subtracts the chassis rate from its feedforward (§6.4). Its
+`atGoal()` judges velocity against the commanded rate, not against zero, so a turret tracking a
+moving aim point can still be on target. The drivetrain feeds its chassis speeds to `RobotState`
+every loop. So M12's code is one fix, one test the plan asks for that was never written, and a
+checkpoint that runs in simulation.
+
+**Where the work happens.** `feature-sotm`, cut from `feature-still-shot` because M11 blocks M12
+(the moving shot reuses the stationary model, the tables and the fit), in its own sibling
+directory.
+
+| # | Step | Files | Done when |
+|---|---|---|---|
+| 0 | Branch setup and baseline | — | Branch builds; 166 tests pass. **Done: `4b9c305`, `feature-still-shot`'s tip.** |
+| 1 | **Fix the spin-up stutter** | `Shooter`, `ShooterFsmTest`, `SuperstructureFsmTest` | `willBeAtSpeedIn` saturates its projection at the goal when the projection would cross it, which is the fix `Shooter`'s own TODO prescribes. A wheel spinning up hard no longer reads "not ready" for a loop after the gate has opened. A wheel whose projection does not reach the goal, or one moving away from it, still reads "not ready". M11's burst case goes back to asserting the feed never stops once it starts. |
+| 2 | **Pin the turret feedforward's sign** | `TurretFsmTest` | §6.4's first failure mode: a turret that tracks standing still and flies off while the chassis rotates. With the aim fixed in the field and the chassis turning, the commanded turret rate is minus the chassis rate, in both directions. |
+| 3 | **The M12 checkpoint, in simulation** | `SuperstructureFsmTest` | Strafe perpendicular to the goal at 2 m/s with `SCORE_ON_MOVE`. Every piece the gate lets go would land in the goal, judged by model-world ballistics from the turret's MEASURED angle and the flywheel's MEASURED speed at release, not from what was commanded. The virtual goal sits upstream of the motion, and the solver stays under its iteration cap. |
+| 4 | **Verify, then record** | this file, `CONTEXT_AND_CONVENTIONS.md` | A mutation pass on the projection's saturation, the feedforward sign and the moving shot, then the milestone row. **The M12 checkpoint on the robot (7 of 10 while strafing at 2 m/s or more) stays outstanding.** |
 
 ### The intake camera is not where the plan says it is
 
