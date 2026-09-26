@@ -207,6 +207,7 @@ hardware.
 | `feature-superstructure` | M10 | Branched off `integration-m1_m9`. `Superstructure` with all fourteen states, both interlocks, the `readyToScore` gate, the driver bindings, and `SuperstructureFsmTest`. **122 tests, none skipped, mutation score 26/26.** Also implements `FaultReporter`, whose `getInstance()` returned null and which M10's gate dereferences, and closes an intake home-latch hole and an angular-guard hole in `TurretUnwrapper` that only a cross-mechanism client could reach. Hardware checkpoint outstanding. |
 | `feature-hopper` | M10b | Branched off `feature-superstructure`. The hopper retrofit (plan §2.4), built in the eleven-step order in `PROJECT_OVERVIEW.md`. **Complete in simulation**, all eleven steps: the hopper constants (`76eac25`), flywheel shot counting (`f4ea778`, `c9658df`), the intake's resting and feed-assist states with its band predicates (`e98bedb`), the intake-camera gate widened to the resting `DEPLOYED` state (`f5c0ac7`), the intake/turret interlock corrected in both halves (`e7ba9cc`), indexer jam recovery with a current-only load reading (`437aa7e`, `c4f1ff8`), the superstructure switchover to the hopper model (`ba00fa9`), the deletion of the single-piece model (`dbe3de9`), the autos moved onto the hopper vocabulary (`c8464f2`), and the verification pass with the §10.2 checkpoint run as one continuous JUnit match (`5b7c80f`, `315bfc4`, `855da7f`). Builds, 159 tests pass, none skipped; mutation 98/99, the survivor being M10's documented equivalent mutant. The deploy-guard half of step 3 moved to step 5. Hardware checkpoint outstanding. **M11 builds on this branch.** |
 | `feature-still-shot` | M11 | Branched off `feature-hopper` (no integration branch was needed: it already contains every other branch's code). Stationary shooting, **code complete in simulation**: the launch-speed table deleted (`5d339e2`), a table-free stationary shot at a hand-set speed behind a `SCORE_STATIONARY` override (`7bf4e59`, `eda005b`), `measureShotTablePoint` as a burst on the `/Tuning/ShotTable/Measure` toggle (`d740dd1`, `13ca471`), and `tools/fit_shot_table.py` (`1999b36`). Builds, 166 tests pass; mutation 109/110. **The checkpoint needs the robot**; the procedure is in `PROJECT_OVERVIEW.md`. M12 builds on this branch. |
+| `feature-sotm` | M12 | Branched off `feature-still-shot` (M11 blocks M12). Shooting on the move, in the order in `PROJECT_OVERVIEW.md`: fix the M11 spin-up stutter, pin the turret feedforward sign, and run the M12 checkpoint in simulation. Step 0 done, 166 tests. |
 
 **M4's simulation checkpoint is complete**, including deliberate failures: zeroed gains drive the
 machine to `FAULTED` after `kSpinUpTimeoutSec`, a zero goal resolves to `IDLE` instead of faulting,
@@ -252,10 +253,9 @@ whole vision and shooting stack rests on that last one.
    nothing to commit — acting on the old instruction would mean regenerating it again from Tuner X,
    which is a decision rather than a chore, and whoever reverted it may have had a reason worth
    knowing first.
-3. **Run M11 on the practice field, after one decision.** The code is ready on
-   `feature-still-shot`, and `PROJECT_OVERVIEW.md` has the procedure. Decide first whether to fix
-   the burst stutter recorded there. `Shooter.willBeAtSpeedIn`'s projection overshoots the burst
-   band during a hard spin-up, and every measurement burst starts with one.
+3. **Run M11 on the practice field.** The code is ready on `feature-still-shot`, and
+   `PROJECT_OVERVIEW.md` has the procedure. The burst stutter recorded there is being fixed as M12
+   step 1 on `feature-sotm`, so run the practice field from `feature-sotm` once that step lands.
 4. **Review M10b on `feature-hopper`.** The hopper retrofit (plan §2.4) is complete in
    simulation: no piece sensors, the intake rests deployed and rocks to feed, and intake and
    scoring run at once. `PROJECT_OVERVIEW.md` has the step-by-step record and a write-up. What is
