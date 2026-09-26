@@ -1426,6 +1426,26 @@ public final class Constants {
 
     /** How many pickup attempts the vision-driven scavenge routine will make. */
     public static final int kMaxScavengeCycles = 3;
+
+    /**
+     * PathPlanner's holonomic controller: translation gain, (m/s) per meter of path error.
+     *
+     * <p>The plan's 5.0 (section 8.1), the stock template's value. Plain {@code static final}
+     * rather than tunable because {@code AutoBuilder} reads its controller once, at configuration,
+     * so a live edit would change nothing until a reboot. TODO: tune on the robot once {@code
+     * Leave} runs (section 8.6 step 1): raise it while the robot trails the logged {@code
+     * Odometry/TrajectorySetpoint}, lower it if it oscillates about the path.
+     */
+    public static final double kTranslationKp = 5.0;
+
+    /** PathPlanner's translation derivative gain. Zero, as in the plan; add only for overshoot. */
+    public static final double kTranslationKd = 0.0;
+
+    /** PathPlanner's rotation gain, (rad/s) per radian of heading error. The plan's 5.0. */
+    public static final double kRotationKp = 5.0;
+
+    /** PathPlanner's rotation derivative gain. Zero, as in the plan. */
+    public static final double kRotationKd = 0.0;
   }
 
   // --------------------------------------------------------------------------------- controls ----

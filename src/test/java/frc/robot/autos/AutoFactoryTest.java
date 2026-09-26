@@ -1,15 +1,27 @@
 package frc.robot.autos;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.pathplanner.lib.auto.AutoBuilder;
 import com.pathplanner.lib.config.ModuleConfig;
 import com.pathplanner.lib.config.RobotConfig;
+import com.pathplanner.lib.path.PathPlannerPath;
+import com.pathplanner.lib.util.FlippingUtil;
+import edu.wpi.first.hal.AllianceStationID;
 import edu.wpi.first.hal.HAL;
+import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.system.plant.DCMotor;
+import edu.wpi.first.wpilibj.simulation.DriverStationSim;
+import edu.wpi.first.wpilibj.simulation.SimHooks;
+import edu.wpi.first.wpilibj2.command.Command;
+import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.Constants;
 import frc.robot.subsystems.drive.Drive;
+import frc.robot.util.AllianceFlipUtil;
 import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -23,16 +35,25 @@ import org.junit.jupiter.api.Test;
  * rather than on the shipped file, because the shipped file is whatever the GUI last saved.
  */
 public class AutoFactoryTest {
-  /** Initialises the HAL, as every suite in this project does. */
+  /** The robot a case built, or null for the cases that need none. */
+  private SimulatedAutoRobot robot;
+
+  /** Initialises the HAL and pauses the clock, as every suite in this project does. */
   @BeforeEach
   void setUp() {
     assertTrue(HAL.initialize(500, 0), "HAL failed to initialise");
     Constants.disableHal = true;
+    SimHooks.pauseTiming();
   }
 
-  /** Releases the HAL. */
+  /** Stops whatever a case built and releases the HAL. */
   @AfterEach
   void tearDown() {
+    if (robot != null) {
+      robot.close();
+    }
+    DriverStationSim.resetData();
+    SimHooks.resumeTiming();
     Constants.disableHal = false;
     HAL.shutdown();
   }
@@ -235,5 +256,114 @@ public class AutoFactoryTest {
   void aMisplacedModuleIsNamed() {
     assertOnlyMismatch(
         config(MASS, MOI, RADIUS, SPEED, COF, CURRENT, GEARING, HALF_BASE + 0.02), "blModule");
+  }
+
+  // ------------------------------------------------ step 2: AutoBuilder and the one flip ----
+
+  /**
+   * Sets the driver station's alliance.
+   *
+   * @param red true for red, false for blue
+   *     <p><b>Outputs:</b> updates the simulated driver station.
+   */
+  private static void setAlliance(boolean red) {
+    DriverStationSim.setAllianceStationId(red ? AllianceStationID.Red1 : AllianceStationID.Blue1);
+    DriverStationSim.notifyNewData();
+  }
+
+  /**
+   * On red, PathPlanner flips a path onto exactly the pose {@code AllianceFlipUtil} would.
+   *
+   * <p>The plan's risk #4. PathPlanner's flip is set up the way it ships -- mirrored, on a 16.54 by
+   * 8.07 m field -- and the case first confirms that flip DISAGREES with ours, so it cannot pass
+   * merely because the two happen to agree. Then it asks the flip callback, which is what {@code
+   * AutoBuilder} does as a path starts, and the two must agree in position and heading. The start
+   * heading is 30 degrees because a mirrored flip and a rotational one agree on a heading of zero.
+   */
+  @Test
+  void aRedPathStartsWhereAllianceFlipUtilPutsIt() {
+    setAlliance(true);
+    Pose2d blueStart = new Pose2d(2.0, 1.5, Rotation2d.fromDegrees(30.0));
+    PathPlannerPath path =
+        SimulatedAutoRobot.straightPath(
+            "Flip", blueStart, new Pose2d(4.0, 1.5, blueStart.getRotation()), 2.0, 0.0);
+    Pose2d ours = AllianceFlipUtil.apply(blueStart);
+
+    FlippingUtil.symmetryType = FlippingUtil.FieldSymmetry.kMirrored;
+    FlippingUtil.fieldSizeX = 16.54;
+    FlippingUtil.fieldSizeY = 8.07;
+    Pose2d unsynced = path.flipPath().getStartingHolonomicPose().orElseThrow();
+    assertTrue(
+        unsynced.getTranslation().getDistance(ours.getTranslation()) > 1.0,
+        "PathPlanner's own flip already agreed with ours, so this case would test nothing");
+
+    assertTrue(AutoFactory.shouldFlipPaths(), "red must flip");
+    Pose2d theirs = path.flipPath().getStartingHolonomicPose().orElseThrow();
+    assertEquals(0.0, theirs.getTranslation().getDistance(ours.getTranslation()), 1e-9);
+    assertEquals(0.0, theirs.getRotation().minus(ours.getRotation()).getRadians(), 1e-9, "heading");
+  }
+
+  /** Blue never flips. */
+  @Test
+  void blueDoesNotFlip() {
+    setAlliance(false);
+    assertFalse(AutoFactory.shouldFlipPaths());
+  }
+
+  /**
+   * Runs a PathPlanner path-following command on a simulated robot until it ends.
+   *
+   * @param start where the robot stands, blue-origin
+   * @param path the path, drawn blue
+   * @param red true for the red alliance
+   * @return the fastest the robot moved during the path, m/s
+   */
+  private double followOnRobot(Pose2d start, PathPlannerPath path, boolean red) {
+    robot = new SimulatedAutoRobot(red ? AllianceFlipUtil.apply(start) : start, red);
+    Command follow = AutoBuilder.followPath(path);
+    CommandScheduler.getInstance().schedule(follow);
+    double fastest = 0.0;
+    for (int i = 0; i < 500 && follow.isScheduled(); i++) {
+      robot.step();
+      fastest = Math.max(fastest, robot.speedMetersPerSec());
+    }
+    assertFalse(follow.isScheduled(), "the path never finished");
+    return fastest;
+  }
+
+  /**
+   * A path drives the simulated robot to where it ends, as measured by {@code RobotState}.
+   *
+   * <p>This proves the wiring rather than the controller: the pose PathPlanner reads, the speeds it
+   * reads, and the drivetrain it commands all have to be the right ones for the robot to arrive.
+   * The fastest-speed check stops it passing for a robot that was simply placed at the end.
+   */
+  @Test
+  void aPathDrivesTheRobotToItsEnd() {
+    Pose2d start = new Pose2d(-4.0, 0.0, Rotation2d.kZero);
+    Pose2d end = new Pose2d(-2.0, 0.0, Rotation2d.kZero);
+    double fastest =
+        followOnRobot(start, SimulatedAutoRobot.straightPath("Blue", start, end, 2.0, 0.0), false);
+    assertTrue(fastest > 1.0, "the robot never really moved; fastest " + fastest + " m/s");
+    assertEquals(0.0, robot.pose().getTranslation().getDistance(end.getTranslation()), 0.10);
+  }
+
+  /**
+   * On red, the same blue-drawn path drives the robot to the flipped end.
+   *
+   * <p>Section 8.4's first drawing rule is to draw everything blue and let the flip handle red.
+   * This is that rule working end to end: the robot starts on the flipped start and must finish on
+   * {@code AllianceFlipUtil}'s flip of the blue end, which is where the goal-relative code will
+   * also think it is.
+   */
+  @Test
+  void onRedTheSamePathEndsOnTheFlippedEnd() {
+    Pose2d start = new Pose2d(-4.0, 0.0, Rotation2d.kZero);
+    Pose2d end = new Pose2d(-2.0, 0.0, Rotation2d.kZero);
+    followOnRobot(start, SimulatedAutoRobot.straightPath("Red", start, end, 2.0, 0.0), true);
+    assertEquals(
+        0.0,
+        robot.pose().getTranslation().getDistance(AllianceFlipUtil.apply(end.getTranslation())),
+        0.10);
   }
 }

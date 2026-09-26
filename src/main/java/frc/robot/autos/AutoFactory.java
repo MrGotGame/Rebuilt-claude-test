@@ -1,20 +1,29 @@
 package frc.robot.autos;
 
+import com.pathplanner.lib.auto.AutoBuilder;
+import com.pathplanner.lib.config.PIDConstants;
 import com.pathplanner.lib.config.RobotConfig;
+import com.pathplanner.lib.controllers.PPHolonomicDriveController;
 import com.pathplanner.lib.path.PathConstraints;
+import com.pathplanner.lib.pathfinding.Pathfinding;
+import com.pathplanner.lib.util.FlippingUtil;
+import com.pathplanner.lib.util.PathPlannerLogging;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.wpilibj.Alert.AlertType;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import frc.robot.Constants;
+import frc.robot.RobotState;
 import frc.robot.subsystems.drive.Drive;
 import frc.robot.subsystems.intake.Intake;
 import frc.robot.subsystems.shooter.Shooter;
 import frc.robot.subsystems.superstructure.Superstructure;
 import frc.robot.subsystems.turret.Turret;
 import frc.robot.subsystems.vision.Vision;
+import frc.robot.util.AllianceFlipUtil;
 import frc.robot.util.FaultReporter;
+import frc.robot.util.LocalADStarAK;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -97,8 +106,9 @@ public class AutoFactory {
     this.turret = turret;
     this.vision = vision;
     checkGuiSettings();
-    // TODO: Call configureAutoBuilder() and registerNamedCommands(), in that order. Building any
-    // PathPlannerAuto needs the named commands already registered.
+    configureAutoBuilder();
+    // TODO: Call registerNamedCommands() last. Building any PathPlannerAuto needs the named
+    // commands already registered.
   }
 
   /**
@@ -262,18 +272,77 @@ public class AutoFactory {
    * <p><b>Outputs:</b> configures AutoBuilder, the pathfinder, and the PathPlanner logging hooks.
    */
   private void configureAutoBuilder() {
-    // TODO: AutoBuilder.configure(
-    //     () -> RobotState.getInstance().getEstimatedPose(),
-    //     pose -> RobotState.getInstance().resetPose(pose, drive.getRawGyroRotation(),
-    //         drive.getModulePositions()),
-    //     () -> RobotState.getInstance().getRobotRelativeSpeeds(),
-    //     (speeds, feedforwards) -> drive.runVelocity(speeds, feedforwards),
-    //     new PPHolonomicDriveController(new PIDConstants(5.0, 0.0, 0.0),
-    //         new PIDConstants(5.0, 0.0, 0.0)),
-    //     Drive.PP_CONFIG, AllianceFlipUtil::shouldFlip, drive);
-    // Then Pathfinding.setPathfinder(new LocalADStarAK()) and the two PathPlannerLogging callbacks
-    // from the stock template: setLogActivePathCallback -> "Odometry/Trajectory" and
-    // setLogTargetPoseCallback -> "Odometry/TrajectorySetpoint".
+    // IMPLEMENTATION (was TODO: "AutoBuilder.configure(RobotState pose, RobotState.resetPose,
+    // RobotState robot-relative speeds, drive.runVelocity(speeds, feedforwards),
+    // PPHolonomicDriveController(5, 0, 0 / 5, 0, 0), Drive.PP_CONFIG, AllianceFlipUtil::shouldFlip,
+    // drive). Then Pathfinding.setPathfinder(new LocalADStarAK()) and the two PathPlannerLogging
+    // callbacks.")
+    //
+    // Pose, reset and speeds all go through RobotState, never Drive: RobotState holds the only,
+    // vision-fused estimate, so a path drawn to a scoring position ends there and not wherever
+    // odometry has drifted to. The reset also clears RobotState's QuestNav seeding, so the headset
+    // re-seeds in the new frame instead of pulling the estimate back to the old one.
+    //
+    // The output is an explicit two-argument lambda, not drive::runVelocity, because Drive has both
+    // runVelocity overloads and the method reference is ambiguous between configure's Consumer and
+    // BiConsumer forms. The two-argument one is wanted: it carries PathPlanner's per-module
+    // feedforwards (logged; applied once the drive motors run torque-current, see Drive).
+    //
+    // The flip callback is shouldFlipPaths(), not AllianceFlipUtil::shouldFlip -- see there.
+    AutoBuilder.configure(
+        () -> RobotState.getInstance().getEstimatedPose(),
+        pose ->
+            RobotState.getInstance()
+                .resetPose(pose, drive.getRawGyroRotation(), drive.getModulePositions()),
+        () -> RobotState.getInstance().getRobotRelativeSpeeds(),
+        (speeds, feedforwards) -> drive.runVelocity(speeds, feedforwards),
+        new PPHolonomicDriveController(
+            new PIDConstants(Constants.Auto.kTranslationKp, 0.0, Constants.Auto.kTranslationKd),
+            new PIDConstants(Constants.Auto.kRotationKp, 0.0, Constants.Auto.kRotationKd)),
+        Drive.PP_CONFIG,
+        AutoFactory::shouldFlipPaths,
+        drive);
+
+    // The pathfinder is global to PathPlanner and needs no reference to this factory, so it is
+    // installed once per process. LocalADStarAK is AdvantageKit's replay-safe wrapper: without it
+    // AD* plans on a background thread whose timing differs on replay, and the replayed robot
+    // drives a different route from the one in the log.
+    if (!pathfinderInstalled) {
+      Pathfinding.setPathfinder(new LocalADStarAK());
+      pathfinderInstalled = true;
+    }
+    PathPlannerLogging.setLogActivePathCallback(
+        path -> Logger.recordOutput("Odometry/Trajectory", path.toArray(new Pose2d[0])));
+    PathPlannerLogging.setLogTargetPoseCallback(
+        target -> Logger.recordOutput("Odometry/TrajectorySetpoint", target));
+  }
+
+  /** Whether the AD* pathfinder has been installed in this process. */
+  private static boolean pathfinderInstalled = false;
+
+  /**
+   * Whether PathPlanner should flip paths to the red alliance, with its flip made to match ours.
+   *
+   * <p>Added for M13 step 2, and it is the plan's risk #4. PathPlanner does not flip with {@code
+   * AllianceFlipUtil}. It flips with its own {@link FlippingUtil}, whose field size defaults to
+   * 16.54 by 8.07 m -- a field from an earlier season -- while the goal the robot aims at is
+   * flipped over {@code Constants.Field}. Left alone, a red auto drives to positions computed on
+   * one field and aims at a goal placed on another, and it works perfectly on blue. So before
+   * PathPlanner reads the answer, its flip is set to rotational symmetry (REBUILT's, and the only
+   * case {@code AllianceFlipUtil} implements) over {@code Constants.Field}'s size.
+   *
+   * <p>The sync happens here, on every read, because this is the moment PathPlanner is about to
+   * flip: a path command asks when it starts. The field size is a tunable, so a value set once at
+   * construction could go stale.
+   *
+   * @return true on the red alliance, exactly when {@link AllianceFlipUtil#shouldFlip()} is
+   *     <p><b>Outputs:</b> sets {@link FlippingUtil}'s symmetry and field size.
+   */
+  static boolean shouldFlipPaths() {
+    FlippingUtil.symmetryType = FlippingUtil.FieldSymmetry.kRotational;
+    FlippingUtil.fieldSizeX = Constants.Field.kFieldLengthMeters.get();
+    FlippingUtil.fieldSizeY = Constants.Field.kFieldWidthMeters.get();
+    return AllianceFlipUtil.shouldFlip();
   }
 
   /**
