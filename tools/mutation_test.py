@@ -51,7 +51,12 @@ measurement burst's end condition and the numbers it reports.
 A fourth is M12's: the flywheel projection's saturation (the stutter fix), the
 turret feedforward's chassis-rate sign, and the moving shot itself -- including
 the double-counted velocity M12's simulated checkpoint found in the solver, put
-back. Several M10 anchors name code that later M10b steps replace (the
+back.
+
+A fifth is M13's, one group per step: the settings.json check, the synced
+alliance flip, the loud handling of a missing file, the marker vocabulary, the
+leg-scoped requests of the building blocks (with the plan's own forms put back),
+the routines, and the selector's preview. Several M10 anchors name code that later M10b steps replace (the
 piece guard, the isStowed turret guard), and those entries must be rewritten against
 the new code in the step that changes it, not deleted. Adding a milestone means adding its
 defects to the list and re-running the whole thing, so an old mutation cannot quietly
@@ -73,6 +78,8 @@ SS = "src/main/java/frc/robot/subsystems/superstructure/Superstructure.java"
 TU = "src/main/java/frc/robot/shooting/TurretUnwrapper.java"
 FR = "src/main/java/frc/robot/util/FaultReporter.java"
 IN = "src/main/java/frc/robot/subsystems/intake/Intake.java"
+AF = "src/main/java/frc/robot/autos/AutoFactory.java"
+AS = "src/main/java/frc/robot/autos/AutoSelector.java"
 SH = "src/main/java/frc/robot/subsystems/shooter/Shooter.java"
 IX = "src/main/java/frc/robot/subsystems/indexer/Indexer.java"
 AR = "src/main/java/frc/robot/autos/AutoRoutines.java"
@@ -380,19 +387,20 @@ MUTATIONS = [
     # code that runs without PathPlanner. Attacked on each side: ending at once (the preload is
     # shed), never ending early (a second lost every auto), keying on the intaking angle (a
     # feed-assisting intake, already safe, holds the routine), and losing its bound (a dead pivot
-    # costs the whole auto).
+    # costs the whole auto). Re-anchored in M13 step 4, which moved the wait into
+    # AutoRoutines.waitUntilRetaining(Intake), a function of the intake alone.
     ("the retain wait does not wait", AR,
-     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)",
+     "            Commands.waitUntil(intake::isRetainingPieces)",
      "            Commands.waitUntil(() -> true)"),
     ("the retain wait always runs to its timeout", AR,
-     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)",
+     "            Commands.waitUntil(intake::isRetainingPieces)",
      "            Commands.waitUntil(() -> false)"),
     ("the retain wait keys on the intaking angle", AR,
-     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)",
-     "            Commands.waitUntil(factory.getIntake()::isAtIntakingAngle)"),
+     "            Commands.waitUntil(intake::isRetainingPieces)",
+     "            Commands.waitUntil(intake::isAtIntakingAngle)"),
     ("the retain wait has no timeout", AR,
-     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces)\n                .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()),",
-     "            Commands.waitUntil(factory.getIntake()::isRetainingPieces),"),
+     "            Commands.waitUntil(intake::isRetainingPieces)\n                .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()),",
+     "            Commands.waitUntil(intake::isRetainingPieces),"),
 
     # ---- M10b step 10: the verification pass. The retrofit order names four places where a
     # plausible bug passes every happy-path test. Each already has a blunt entry above ("burst latch
@@ -508,6 +516,147 @@ MUTATIONS = [
     ("the virtual goal leads with the motion", SV,
      "          goal.minus(velocity.times(tof))",
      "          goal.plus(velocity.times(tof))"),
+
+    # ---- M13 step 1: settings.json checked against Drive.PP_CONFIG. The catch must stay broader than
+    # the declared exceptions (the shipped file fails with a NullPointerException), rounding must
+    # not warn, and the two values RobotConfig hides -- the gearing inside the motor model, and the
+    # module positions -- must still be compared.
+    ("settings.json errors escape the check", AF,
+     "    } catch (Exception e) {\n      // Broader than the IOException",
+     "    } catch (RuntimeException e) {\n      throw e;\n    } catch (Exception e) {\n      // Broader than the IOException"),
+    ("the config comparison has no tolerance", AF,
+     "GUI_CONFIG_RELATIVE_TOLERANCE = 0.005;",
+     "GUI_CONFIG_RELATIVE_TOLERANCE = 0.0;"),
+    ("the gearing is not compared", AF,
+     "    compare(\n        mismatches,\n        \"driveGearing/driveMotorType\",\n        robot.moduleConfig.driveMotor.freeSpeedRadPerSec,\n        gui.moduleConfig.driveMotor.freeSpeedRadPerSec);\n",
+     ""),
+    ("module positions are not compared", AF,
+     "        if (robot.moduleLocations[i].getDistance(gui.moduleLocations[i])\n            > GUI_MODULE_POSITION_TOLERANCE_METERS) {",
+     "        if (false) {"),
+
+    # ---- M13 step 2: AutoBuilder and the one flip. PathPlanner's FlippingUtil left as it ships, left
+    # mirrored, never asked, and the drivetrain never commanded.
+    ("no flip sync", AF,
+     "    FlippingUtil.symmetryType = FlippingUtil.FieldSymmetry.kRotational;\n    FlippingUtil.fieldSizeX = Constants.Field.kFieldLengthMeters.get();\n    FlippingUtil.fieldSizeY = Constants.Field.kFieldWidthMeters.get();\n",
+     ""),
+    ("symmetry left mirrored", AF,
+     "FlippingUtil.symmetryType = FlippingUtil.FieldSymmetry.kRotational;",
+     "FlippingUtil.symmetryType = FlippingUtil.FieldSymmetry.kMirrored;"),
+    ("flip callback never flips", AF,
+     "        AutoFactory::shouldFlipPaths,",
+     "        () -> false,"),
+    ("output dropped", AF,
+     "(speeds, feedforwards) -> drive.runVelocity(speeds, feedforwards),",
+     "(speeds, feedforwards) -> {},"),
+
+    # ---- M13 step 3: loading paths and autos, loudly. The warning dropped, raised as an error (which
+    # would stop teleop scoring), the reset's flip dropped or fixed at build time, the auto start
+    # unflipped, and the auto file not checked before PathPlannerAuto swallows its absence.
+    ("missing file not reported", AF,
+     "      FaultReporter.getInstance().register(message, AlertType.kWarning, () -> true);\n",
+     ""),
+    ("missing file is an error", AF,
+     "register(message, AlertType.kWarning, () -> true);",
+     "register(message, AlertType.kError, () -> true);"),
+    ("reset not flipped", AF,
+     "                            AllianceFlipUtil.apply(start),",
+     "                            start,"),
+    ("reset flip read at build time", AF,
+     "    Optional<Pose2d> blueStart =\n        loadPath(pathName).flatMap(PathPlannerPath::getStartingHolonomicPose);\n    return Commands.runOnce(\n        () ->\n            blueStart.ifPresent(\n                start ->\n                    RobotState.getInstance()\n                        .resetPose(\n                            AllianceFlipUtil.apply(start),",
+     "    Optional<Pose2d> blueStart =\n        loadPath(pathName).flatMap(PathPlannerPath::getStartingHolonomicPose).map(AllianceFlipUtil::apply);\n    return Commands.runOnce(\n        () ->\n            blueStart.ifPresent(\n                start ->\n                    RobotState.getInstance()\n                        .resetPose(\n                            start,"),
+    ("auto start not flipped", AF,
+     ": group.get(0).getStartingHolonomicPose().map(AllianceFlipUtil::apply);",
+     ": group.get(0).getStartingHolonomicPose();"),
+    ("auto file not validated", AF,
+     "      paths.autoPaths(autoName);\n      return new PathPlannerAuto(autoName);",
+     "      return new PathPlannerAuto(autoName);"),
+
+    # ---- M13 step 4: the marker vocabulary. StopIntake cancelling scoring, StowTurret commanding the
+    # turret directly (which the superstructure overwrites), and a marker dropped.
+    ("StopIntake cancels scoring", AF,
+     "markers.put(\"StopIntake\", Commands.runOnce(() -> superstructure.setIntakeRequested(false)));",
+     "markers.put(\"StopIntake\", Commands.runOnce(() -> { superstructure.setIntakeRequested(false); superstructure.setWantedState(Superstructure.WantedState.DEFAULT); }));"),
+    ("StowTurret commands the turret directly", AF,
+     "\"StowTurret\", superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));",
+     "\"StowTurret\", turret.setWantedStateCommand(Turret.WantedState.STOW));"),
+    ("Home marker dropped", AF,
+     "    markers.put(\"Home\", superstructure.setWantedStateCommand(Superstructure.WantedState.HOME));\n",
+     ""),
+
+    # ---- M13 step 5: the building blocks, each holding its request for exactly its leg. The plan's own
+    # forms, put back: one-shot requests, the spin-up beside the leg, a stationary shot with a
+    # trailing DEFAULT.
+    ("driveAndShoot sets its request once (plan form)", AR,
+     "        factory.followPath(pathName),\n        factory.holdWantedState(Superstructure.WantedState.AUTO_SCORE_ON_MOVE));",
+     "        factory.followPath(pathName),\n        superstructure.setWantedStateCommand(Superstructure.WantedState.AUTO_SCORE_ON_MOVE));"),
+    ("spinUpWhile as a deadline beside the leg (plan form)", AR,
+     "    return Commands.sequence(\n            superstructure.setWantedStateCommand(Superstructure.WantedState.SPIN_UP), inner)\n        .finallyDo(() -> superstructure.setWantedState(Superstructure.WantedState.DEFAULT));",
+     "    return Commands.deadline(\n        inner, factory.holdWantedState(Superstructure.WantedState.SPIN_UP));"),
+    ("stationary shot as a sequence with a trailing DEFAULT (plan form)", AF,
+     "    return Commands.deadline(\n        Commands.defer(\n            () ->\n                Commands.waitUntil(superstructure::likelyEmpty)\n                    .withTimeout(Constants.Auto.kScoreTimeoutSec.get()),\n            Set.of()),\n        holdWantedState(Superstructure.WantedState.SCORE_STATIONARY));",
+     "    return Commands.sequence(\n        superstructure.setWantedStateCommand(Superstructure.WantedState.SCORE_STATIONARY),\n        Commands.defer(\n            () ->\n                Commands.waitUntil(superstructure::likelyEmpty)\n                    .withTimeout(Constants.Auto.kScoreTimeoutSec.get()),\n            Set.of()),\n        superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT));"),
+    ("holdWantedState never hands back", AF,
+     "        () -> superstructure.setWantedState(wanted),\n        () -> superstructure.setWantedState(Superstructure.WantedState.DEFAULT));",
+     "        () -> superstructure.setWantedState(wanted),\n        () -> {});"),
+    ("pickup has no dwell", AR,
+     "Commands.sequence(factory.followPath(pathName), intakeSettle())",
+     "factory.followPath(pathName)"),
+    ("sequence starts with a score", AR,
+     "      } else if (i % 2 == 0) {",
+     "      } else if (i % 2 == 1) {"),
+    ("sequence pickups not spun up", AR,
+     "        legs[i] = spinUpWhile(driveAndIntake(path));",
+     "        legs[i] = driveAndIntake(path);"),
+    ("spinUpWhile exactly as the plan wrote it", AR,
+     "    return Commands.sequence(\n            superstructure.setWantedStateCommand(Superstructure.WantedState.SPIN_UP), inner)\n        .finallyDo(() -> superstructure.setWantedState(Superstructure.WantedState.DEFAULT));",
+     "    return Commands.deadline(\n        inner, superstructure.setWantedStateCommand(Superstructure.WantedState.SPIN_UP));"),
+
+    # ---- M13 step 6: the routines. The intake wait skipped (the second entry needed the checkpoint's
+    # 'nothing before the intake retains' clause to die), the preload count never logged, a leg
+    # dropped, the scavenge's two sources of where to go, the stop issued once, and the end pose
+    # unflipped.
+    ("Leave skips the intake wait", AR,
+     "        factory.resetPoseToPathStart(\"Leave\"),\n        waitUntilIntakeRetaining(),\n",
+     "        factory.resetPoseToPathStart(\"Leave\"),\n"),
+    ("opening skips the intake wait", AR,
+     "        waitUntilIntakeRetaining(),\n        spinUpWhile(shootInPlace(Constants.Auto.kPreloadTimeoutSec)),",
+     "        spinUpWhile(shootInPlace(Constants.Auto.kPreloadTimeoutSec)),"),
+    ("preload count never logged", AR,
+     "        spinUpWhile(shootInPlace(Constants.Auto.kPreloadTimeoutSec)),\n        factory.logPreloadFiredCommand());",
+     "        spinUpWhile(shootInPlace(Constants.Auto.kPreloadTimeoutSec)));"),
+    ("Center 5 drops its last scoring leg", AR,
+     "                \"Center_ToPiece3\",\n                \"Center_Score3\"),",
+     "                \"Center_ToPiece3\"),"),
+    ("scavenge has no static fallback", AR,
+     "                          .or(() -> factory.getPathEndingPose(waypointPath))\n",
+     ""),
+    ("scavenge ignores the camera", AR,
+     "                      gamePieces\n                          .get()\n                          .or(() -> factory.getPathEndingPose(waypointPath))",
+     "                      factory\n                          .getPathEndingPose(waypointPath)"),
+    ("stationary shot stops the drive once (plan form)", AR,
+     "        Commands.run(factory.getDrive()::stop, factory.getDrive()));",
+     "        Commands.runOnce(factory.getDrive()::stop, factory.getDrive()));"),
+    ("path end pose not flipped", AF,
+     "                  poses.get(poses.size() - 1).getTranslation(), path.getGoalEndState().rotation());\n            })\n        .map(AllianceFlipUtil::apply);",
+     "                  poses.get(poses.size() - 1).getTranslation(), path.getGoalEndState().rotation());\n            });"),
+
+    # ---- M13 step 7: the selector. A cached routine, an unflipped preview, the warning's test inverted
+    # or never registered, and a default other than Do Nothing.
+    ("selector hands out one cached routine", AS,
+     "    builder.get();\n    builders.put(name, builder);",
+     "    Command built = builder.get();\n    builders.put(name, () -> built);"),
+    ("preview start not flipped", AF,
+     "        .flatMap(PathPlannerPath::getStartingHolonomicPose)\n        .map(AllianceFlipUtil::apply);",
+     "        .flatMap(PathPlannerPath::getStartingHolonomicPose);"),
+    ("misplacement test inverted", AS,
+     "return startPoseErrorMeters > Constants.Auto.kStartPoseWarnMeters.get();",
+     "return startPoseErrorMeters < Constants.Auto.kStartPoseWarnMeters.get();"),
+    ("misplacement never registered as a fault", AS,
+     "    FaultReporter.getInstance()\n        .register(",
+     "    if (false) FaultReporter.getInstance()\n        .register("),
+    ("default is not Do Nothing", AS,
+     "chooser.addDefaultOption(DO_NOTHING, DO_NOTHING);",
+     "chooser.addDefaultOption(DO_NOTHING, \"Leave\");"),
 ]
 
 
