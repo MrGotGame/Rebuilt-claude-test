@@ -5207,13 +5207,15 @@ import com.pathplanner.lib.path.PathPlannerPath;
 import edu.wpi.first.math.geometry.Pose2d;
 import edu.wpi.first.wpilibj2.command.Command;
 import frc.robot.subsystems.drive.Drive;
-import frc.robot.subsystems.indexer.Indexer;
 import frc.robot.subsystems.intake.Intake;
+import frc.robot.subsystems.shooter.Shooter;
 import frc.robot.subsystems.superstructure.Superstructure;
 import frc.robot.subsystems.turret.Turret;
 import frc.robot.subsystems.vision.Vision;
 import java.util.Optional;
 
+// Holds the Shooter, not the Indexer (M10b step 9): the indexer's only auto role was answering
+// hasPiece, and the flywheel's shot count is the only piece count the robot has.
 public class AutoFactory {
   /**
    * The one RobotConfig for the whole robot. Drive's SwerveSetpointGenerator and AutoBuilder must
@@ -5224,7 +5226,7 @@ public class AutoFactory {
   private final Drive drive;
   private final Superstructure superstructure;
   private final Intake intake;
-  private final Indexer indexer;
+  private final Shooter shooter;
   private final Turret turret;
   private final Vision vision;
 
@@ -5232,7 +5234,7 @@ public class AutoFactory {
       Drive drive,
       Superstructure superstructure,
       Intake intake,
-      Indexer indexer,
+      Shooter shooter,
       Turret turret,
       Vision vision) {
     // TODO: Store all references, then call loadRobotConfig(), configureAutoBuilder() and
@@ -5306,6 +5308,14 @@ public class AutoFactory {
     return null;
   }
 
+  public Command logPreloadFiredCommand() {
+    // Implemented in M10b step 9: Commands.runOnce(() -> Logger.recordOutput("Auto/PreloadFired",
+    // shooter.getShotCount())), read when it runs. The count is zeroed at autonomousInit and the
+    // rules load exactly 8 pieces, so logged after the preload burst it checks the shot detector
+    // in every match. It gates nothing.
+    return null;
+  }
+
   public Command resetPoseToPathStart(String pathName) {
     // TODO: Commands.runOnce(() -> { PathPlannerPath p = PathPlannerPath.fromPathFile(pathName);
     // Pose2d start = AllianceFlipUtil.shouldFlip() ? p.flipPath().getStartingHolonomicPose()
@@ -5338,6 +5348,11 @@ public class AutoFactory {
   public Superstructure getSuperstructure() {
     // TODO: Getter used by AutoRoutines.
     return superstructure;
+  }
+
+  public Intake getIntake() {
+    // Getter used by AutoRoutines.waitUntilIntakeRetaining().
+    return intake;
   }
 }
 ```
@@ -5452,13 +5467,14 @@ public class AutoRoutines {
     // TODO: resetPoseToPathStart("Center_Preload") -> waitUntilIntakeRetaining() ->
     // spinUpWhile(shootInPlace(...)) -> followPath("Center_Preload"). Fires the 8 preloaded pieces
     // then leaves. The fallback routine when vision is down: it depends on nothing but odometry.
-    // Log Auto/PreloadFired = shooter.getShotCount() at the end: 8 pieces in is a known ground
-    // truth, so every match's preload burst checks the shot detector for free.
+    // Then factory.logPreloadFiredCommand(), which logs Auto/PreloadFired: 8 pieces in is a known
+    // ground truth, so every match's preload burst checks the shot detector for free.
     return null;
   }
 
   public Command waitUntilIntakeRetaining() {
-    // TODO: Commands.waitUntil(intake::isRetainingPieces)
+    // Implemented in M10b step 9, with the timeout read inside Commands.defer so a retune takes
+    // effect without a reboot: Commands.waitUntil(factory.getIntake()::isRetainingPieces)
     //   .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()). EVERY routine
     // starts with this before its first path: the robot starts with the intake STOWED (a rule),
     // Superstructure.onEnable() deploys it at autonomousInit, and pieces fall out of a stowed
