@@ -6285,6 +6285,31 @@ public class SuperstructureFsmTest {
   }
 
   @Test
+  void theBurstLatchBelongsToOneBurst() {
+    // Added by M10b step 10's mutation pass. Over two bursts: the latch is clear on every loop
+    // before the gate first opens, and the gate opens on a wheel inside the TIGHT band (the first
+    // piece of a burst never gets the wide one); it latches once open; and it clears when the burst
+    // ends. End each burst in SPIN_UP, not DEFAULT: at rest the turret stows and its term clears
+    // the latch anyway, so only the pre-spin proves the latch's own state check works.
+  }
+
+  @Test
+  void everyShotRequestRunsTheFloorRollerEvenWhenDiverted() {
+    // Added by M10b step 10's mutation pass. SCORE_ON_MOVE, SCORE_STATIONARY, SCORE_FORCED,
+    // AUTO_SCORE_ON_MOVE and PASS each run the floor roller, on the shipped all-zero tables so the
+    // aimed requests are diverted to WAITING_FOR_TURRET -- "shot requested" is the WANTED state.
+    // Assert at least one really was diverted, and that rest idles the roller.
+  }
+
+  @Test
+  void theHopperCheckpointHoldsAcrossOneMatch() {
+    // The section 10.2 M10b simulation checkpoint as one continuous match: boot stowed; a shot that
+    // needs the arc is refused the turret while stowed, with the floor roller leading; the first
+    // enable deploys and the turret gets its arc no earlier than the pivot leaves the band;
+    // intake, score and drive together; release and the intake stays down and rocks.
+  }
+
+  @Test
   void homingTimesOutToFaulted() {
     // TODO: setWantedState(HOME) and never report homed. Step past
     // Constants.Intake.kHomingTimeoutSec and assert SystemState.FAULTED. This proves the state
@@ -7691,7 +7716,10 @@ turret is `AIMING`. Then release intake and confirm the intake stays deployed. F
 the intake starts STOWED, deploys on enable, and the turret is refused its arc only until the pivot
 leaves the stow band. While scoring, confirm the floor roller runs before the indexer and the
 intake rocks. M10's
-"eight separately-logged booleans" becomes seven.
+"eight separately-logged booleans" becomes seven. (M10b step 10 ran this as a JUnit case,
+`theHopperCheckpointHoldsAcrossOneMatch`, over the same simulated IO, so it fails on every build
+rather than once; the seven-booleans clause is checked by reading the code, because the logger
+records nothing under test.)
 
 ---
 
