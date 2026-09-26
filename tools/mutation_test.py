@@ -42,7 +42,11 @@ deleted hasPiece(). Step 9 added the autos' one runnable hopper-era block, the w
 for the intake to retain pieces. Step 10 is the pass the retrofit order asked for: subtler
 defects in the four places a plausible bug survives happy-path tests (the empty clock,
 the burst latch, the band's direction, the floor roller leading), plus the misconfigured
-feed-assist guard, which had none. Several M10 anchors name code that later M10b steps replace (the
+feed-assist guard, which had none.
+
+A third block is M11's: the table-free measurement shot, the override that
+selects it inside SCORE_STATIONARY and the one rule that clears it, and the
+measurement burst's end condition and the numbers it reports. Several M10 anchors name code that later M10b steps replace (the
 piece guard, the isStowed turret guard), and those entries must be rewritten against
 the new code in the step that changes it, not deleted. Adding a milestone means adding its
 defects to the list and re-running the whole thing, so an old mutation cannot quietly
@@ -67,6 +71,8 @@ IN = "src/main/java/frc/robot/subsystems/intake/Intake.java"
 SH = "src/main/java/frc/robot/subsystems/shooter/Shooter.java"
 IX = "src/main/java/frc/robot/subsystems/indexer/Indexer.java"
 AR = "src/main/java/frc/robot/autos/AutoRoutines.java"
+SV = "src/main/java/frc/robot/shooting/ShootingSolver.java"
+CC = "src/main/java/frc/robot/commands/CharacterizationCommands.java"
 
 MUTATIONS = [
     # Re-anchored in M10b step 7, which removed the piece half of this guard (plan section 2.4). The
@@ -429,6 +435,44 @@ MUTATIONS = [
     ("every feed-assist reads as refused", SS,
      "        next == IntakeMode.FEED_ASSIST\n            && intake.getSystemState() == Intake.SystemState.WAITING_FOR_TURRET;",
      "        next == IntakeMode.FEED_ASSIST;"),
+
+    # ---- M11: stationary shooting. The override is the part that can hurt a match -- a leaked
+    # one fires every later stationary shot at the last test speed -- so its scope and its clear
+    # are attacked first. Then the table-free solve, and then the burst: ending on a belief a
+    # previous burst left behind, and reporting numbers that are not its own.
+    ("the shot-table override applies to every shot", SS,
+     "    if (wantedState == WantedState.SCORE_STATIONARY && shotTableRpm.isPresent()) {",
+     "    if (shotTableRpm.isPresent()) {"),
+    ("another request does not clear the override", SS,
+     "    if (wanted != WantedState.SCORE_STATIONARY) {\n      shotTableRpm = OptionalDouble.empty();",
+     "    if (false) {\n      shotTableRpm = OptionalDouble.empty();"),
+    ("the measurement shot aims along the robot's heading", SV,
+     "        lineOfSight.getAngle(),\n        0.0,",
+     "        robotPose.getRotation(),\n        0.0,"),
+    ("the measurement shot ignores the range gate", SV,
+     "        true,\n        inRange);",
+     "        true,\n        true);"),
+    ("the measurement shot accepts a zero speed", SV,
+     "    if (distance <= 0.0 || !(flywheelRpm > 0.0) || !Double.isFinite(flywheelRpm)) {",
+     "    if (distance <= 0.0 || !Double.isFinite(flywheelRpm)) {"),
+    ("a burst ends on the last burst's empty belief", CC,
+     "      return (firedThisBurst && superstructure.likelyEmpty()) || timer.hasElapsed(holdSec);",
+     "      return superstructure.likelyEmpty() || timer.hasElapsed(holdSec);"),
+    ("a burst never ends on the belief", CC,
+     "      return (firedThisBurst && superstructure.likelyEmpty()) || timer.hasElapsed(holdSec);",
+     "      return timer.hasElapsed(holdSec);"),
+    ("a burst never sets the override", CC,
+     "      superstructure.setShotTableRpm(rpmThisBurst);",
+     "      // superstructure.setShotTableRpm(rpmThisBurst);"),
+    ("a burst does not return the robot to rest", CC,
+     "      superstructure.setWantedState(Superstructure.WantedState.DEFAULT);",
+     "      // superstructure.setWantedState(Superstructure.WantedState.DEFAULT);"),
+    ("a burst reports every shot since boot", CC,
+     "              shooter.getShotCount() - shotCountAtStart,",
+     "              shooter.getShotCount(),"),
+    ("a burst never reports a timeout", CC,
+     "              timer.hasElapsed(holdSec)));",
+     "              false));"),
 ]
 
 
