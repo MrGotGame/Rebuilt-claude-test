@@ -295,8 +295,11 @@ Three signals remain, in decreasing order of trust:
    out of wheel speed. That is the most reliable piece signal on the robot: the energy a piece
    removes is large compared with loop noise, and it happens at the one place every scored piece
    must pass. **Shot counting moves from `Indexer` to `Shooter`.**
-2. **Indexer load — `Indexer.isLoaded()`.** The existing current-and-velocity predicate, now
-   evaluated *only while feeding*. It answers "is the indexer pushing against something right now",
+2. **Indexer load — `Indexer.isLoaded()`.** Stator current above a threshold, evaluated *only
+   while feeding* and only once the spin-up settle window has passed. (The old piece detector also
+   required a velocity shortfall, to reject the spin-up current spike; the settle window does that
+   now, and a shortfall requirement would miss a stiff loop that pushes pieces at full speed, so
+   M10b step 6 dropped it.) It answers "is the indexer pushing against something right now",
    which is what jam detection needs, and it corroborates signal 3. It is logged but gates nothing.
 3. **`Superstructure.likelyEmpty()` — a belief, not a measurement.** True once the robot has spent
    `kEmptyConfirmSec` of *gate-open, unloaded* feeding with no shot detected. Autos use it to end a
@@ -957,15 +960,14 @@ public final class Constants {
     public static final LoggedTunableNumber kKv = new LoggedTunableNumber("Indexer/Kv", 0.12);
 
     /**
-     * "The indexer is pushing against something" while FEEDING: current above this AND velocity this
-     * far below goal. A diagnostic that corroborates Superstructure.likelyEmpty(); it gates nothing.
+     * "The indexer is pushing against something" while FEEDING, past the spin-up settle window:
+     * current above this. Current alone -- the settle window rejects the spin-up spike, and a
+     * velocity-shortfall term would miss a stiff loop pushing pieces at full speed. A diagnostic
+     * that corroborates Superstructure.likelyEmpty(); it gates nothing.
      * TODO: tune from Indexer/Inputs while feeding a full hopper and an empty one.
      */
     public static final LoggedTunableNumber kLoadedCurrentAmps =
         new LoggedTunableNumber("Indexer/LoadedCurrent", 25.0);
-
-    public static final LoggedTunableNumber kLoadedVelocityDropRpm =
-        new LoggedTunableNumber("Indexer/LoadedVelDrop", 400.0);
     public static final LoggedTunableNumber kLoadedDebounceSec =
         new LoggedTunableNumber("Indexer/LoadedDebounce", 0.06);
 
@@ -3154,8 +3156,8 @@ public class IndexerIOSim implements IndexerIO {
 
   @Override
   public void updateInputs(IndexerIOInputs inputs) {
-    // TODO: Standard sim update. When simulatedLoad, add a current offset above kLoadedCurrentAmps
-    // and a velocity droop above kLoadedVelocityDropRpm while the motor is driven. When
+    // TODO: Standard sim update. When simulatedLoad, report current above kLoadedCurrentAmps (and
+    // below kJamCurrentAmps) at full speed while the motor is driven forward. When
     // simulatedJam, clamp velocity near zero and report current above kJamCurrentAmps whenever
     // the motor is driven FORWARD (a reverse pulse clears nothing by itself; the test clears the
     // jam, which is what lets it prove UNJAMMING retries and then gives up).
@@ -3257,8 +3259,7 @@ public class Indexer extends SubsystemBase {
   private void updateLoadAndJam() {
     // TODO: Push kLoadedDebounceSec / kJamDetectSec into the debouncers via ifChanged. Only while
     // systemState == FEEDING (motor driven forward and past a short settle after the goal
-    // changed): loaded = loadedDebouncer.calculate(current > kLoadedCurrentAmps && goal - velocity
-    // > kLoadedVelocityDropRpm); jamDetected = jamDebouncer.calculate(current > kJamCurrentAmps &&
+    // changed): loaded = loadedDebouncer.calculate(current > kLoadedCurrentAmps); jamDetected = jamDebouncer.calculate(current > kJamCurrentAmps &&
     // velocity < kJamVelocityRpm). In every other state loaded = false - the question has no
     // meaning for a stopped or reversing wheel, and answering it anyway is what made the old
     // single-piece detector so intricate.
