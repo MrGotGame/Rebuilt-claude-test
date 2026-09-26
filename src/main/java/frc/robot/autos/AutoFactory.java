@@ -3,6 +3,8 @@ package frc.robot.autos;
 import com.pathplanner.lib.config.RobotConfig;
 import com.pathplanner.lib.path.PathConstraints;
 import edu.wpi.first.math.geometry.Pose2d;
+import edu.wpi.first.math.geometry.Translation2d;
+import edu.wpi.first.wpilibj.Alert.AlertType;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import frc.robot.Constants;
@@ -12,17 +14,22 @@ import frc.robot.subsystems.shooter.Shooter;
 import frc.robot.subsystems.superstructure.Superstructure;
 import frc.robot.subsystems.turret.Turret;
 import frc.robot.subsystems.vision.Vision;
+import frc.robot.util.FaultReporter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Callable;
 import org.littletonrobotics.junction.Logger;
 
 /**
  * Owns everything PathPlanner needs to exist, in one place, so that {@code Drive} stays a
  * drivetrain rather than becoming a path-follower.
  *
- * <p>It holds the single {@link RobotConfig} instance that both {@code AutoBuilder} and {@code
- * Drive}'s setpoint generator share. If those two ever disagree about robot mass or wheel
- * coefficient of friction, the setpoint generator silently clips the speeds PathPlanner asks for
- * and every path undershoots -- a failure that looks like a tuning problem and is not.
+ * <p>It hands {@code AutoBuilder} the single {@link RobotConfig} instance, {@link Drive#PP_CONFIG},
+ * that {@code Drive}'s setpoint generator already uses. If those two ever disagreed about robot
+ * mass or wheel coefficient of friction, the setpoint generator would silently clip the speeds
+ * PathPlanner asks for and every path would undershoot -- a failure that looks like a tuning
+ * problem and is not.
  *
  * <p>It wires {@code AutoBuilder} to {@code RobotState} for the pose supplier (not to {@code
  * Drive}, which no longer owns a pose estimator), registers the {@code NamedCommands} vocabulary
@@ -40,11 +47,21 @@ import org.littletonrobotics.junction.Logger;
  */
 public class AutoFactory {
   /**
-   * The one {@link RobotConfig} for the whole robot.
-   *
-   * <p>{@code Drive}'s setpoint generator and {@code AutoBuilder} must both use THIS instance.
+   * Relative difference above which a {@code settings.json} value is reported as disagreeing with
+   * the robot's config. Half a percent: well above rounding in a GUI text box, well below any
+   * difference that matters, and the gearing, wheel and speed mismatches this check exists for are
+   * all tens of percent.
    */
-  public static RobotConfig PP_CONFIG = null;
+  private static final double GUI_CONFIG_RELATIVE_TOLERANCE = 0.005;
+
+  /** How far a GUI module position may sit from the robot's before it is reported, meters. */
+  private static final double GUI_MODULE_POSITION_TOLERANCE_METERS = 0.005;
+
+  /**
+   * Whether {@code settings.json} has already been compared this process. The file cannot change
+   * while the code runs, and every comparison registers a fault, so it is done once.
+   */
+  private static boolean guiSettingsChecked = false;
 
   private final Drive drive;
   private final Superstructure superstructure;
@@ -79,24 +96,164 @@ public class AutoFactory {
     this.shooter = shooter;
     this.turret = turret;
     this.vision = vision;
-    // TODO: Call loadRobotConfig(), configureAutoBuilder() and registerNamedCommands(), in that
-    // order. The order matters: AutoBuilder needs PP_CONFIG, and building any PathPlannerAuto
-    // needs the named commands already registered.
+    checkGuiSettings();
+    // TODO: Call configureAutoBuilder() and registerNamedCommands(), in that order. Building any
+    // PathPlannerAuto needs the named commands already registered.
   }
 
   /**
-   * Loads the shared robot configuration, preferring the PathPlanner GUI settings.
+   * Compares PathPlanner's {@code settings.json} with the robot's own config, once per process.
    *
-   * <p><b>Outputs:</b> assigns {@link #PP_CONFIG}; raises a fault alert if it had to fall back.
+   * <p>The GUI draws and previews paths with {@code settings.json}; the robot follows them with
+   * {@link Drive#PP_CONFIG}. A difference between the two makes the preview lie about what the
+   * robot will do, so it is reported by name rather than tolerated.
+   *
+   * <p><b>Outputs:</b> registers a warning with the fault reporter, and logs {@code
+   * Auto/GuiConfigMismatches}, when the file disagrees with the robot or cannot be read.
    */
-  private void loadRobotConfig() {
-    // TODO: Try PP_CONFIG = RobotConfig.fromGUISettings(), which reads
-    // src/main/deploy/pathplanner/settings.json and throws IOException / ParseException.
-    // On failure, fall back to a hand-built RobotConfig from Constants.Drivetrain and
-    // Drive.getModuleTranslations(), AND raise a FaultReporter ERROR alert -- a stale or missing
-    // settings.json must be loud, because the symptom is merely "autos are a bit off".
-    // TODO: VERIFY the RobotConfig and ModuleConfig constructor argument order against
-    // PathplannerLib 2026.1.2 before relying on the fallback.
+  private static void checkGuiSettings() {
+    // IMPLEMENTATION (was TODO: "Try PP_CONFIG = RobotConfig.fromGUISettings(), which reads
+    // src/main/deploy/pathplanner/settings.json ... On failure, fall back to a hand-built
+    // RobotConfig from Constants.Drivetrain and Drive.getModuleTranslations(), AND raise a
+    // FaultReporter ERROR alert").
+    //
+    // Inverted on purpose (M13 step 1). The TODO made settings.json the config and a hand-built
+    // one the fallback. But Drive.PP_CONFIG already exists, built from TunerConstants -- the only
+    // authority on this drivetrain, regenerated by Tuner X whenever a ratio or offset is confirmed
+    // -- and the setpoint generator was already using it. Loading the GUI file as well would put a
+    // second RobotConfig beside the first, which is exactly the failure the plan warns about. And
+    // when M13 began, the shipped settings.json disagreed with TunerConstants on the wheel radius,
+    // the gearing, the free speed, the current limit and the module positions, so it would have
+    // been the WRONG one. The file is now read only to be checked.
+    //
+    // A warning, not the error the TODO asked for: gate term 8 refuses to score on any active
+    // error, and a GUI preview being out of date is no reason to stop the robot shooting.
+    if (guiSettingsChecked) {
+      return;
+    }
+    guiSettingsChecked = true;
+
+    List<String> mismatches = guiSettingsMismatches(RobotConfig::fromGUISettings);
+    Logger.recordOutput("Auto/GuiConfigMismatches", mismatches.toArray(new String[0]));
+    if (!mismatches.isEmpty()) {
+      FaultReporter.getInstance()
+          .register(
+              "PathPlanner settings.json disagrees with the robot: "
+                  + String.join(", ", mismatches),
+              AlertType.kWarning,
+              () -> true);
+    }
+  }
+
+  /**
+   * Reads the GUI settings through a loader and compares them with {@link Drive#PP_CONFIG}.
+   *
+   * <p>Added for M13 step 1, with the loader as a parameter so a test can hand it a file that
+   * cannot be parsed.
+   *
+   * @param loader reads {@code settings.json}; in production {@code RobotConfig::fromGUISettings}
+   * @return the mismatches, or a single entry saying the file could not be read; never throws
+   */
+  static List<String> guiSettingsMismatches(Callable<RobotConfig> loader) {
+    try {
+      return describeConfigMismatches(Drive.PP_CONFIG, loader.call());
+    } catch (Exception e) {
+      // Broader than the IOException and ParseException that fromGUISettings declares, and it has
+      // to be. The settings.json this project shipped with when M13 began is in an older format
+      // with no per-module keys, and PathplannerLib 2026 fails on it with a NullPointerException
+      // from inside its parser. Catching only the declared two would crash robot init on it.
+      return List.of("settings.json unreadable (" + e.getClass().getSimpleName() + ")");
+    }
+  }
+
+  /**
+   * Names every value on which PathPlanner's GUI settings disagree with the robot's config.
+   *
+   * <p>Added for M13 step 1. Package-private so the comparison can be tested on its own, since the
+   * file it is normally handed is whatever happens to be in the deploy folder.
+   *
+   * @param robot the config the robot actually follows paths with
+   * @param gui the config read from {@code settings.json}
+   * @return one entry per disagreeing value, named by its {@code settings.json} key and showing
+   *     both numbers; empty when the two agree
+   */
+  static List<String> describeConfigMismatches(RobotConfig robot, RobotConfig gui) {
+    List<String> mismatches = new ArrayList<>();
+    compare(mismatches, "robotMass", robot.massKG, gui.massKG);
+    compare(mismatches, "robotMOI", robot.MOI, gui.MOI);
+    compare(
+        mismatches,
+        "driveWheelRadius",
+        robot.moduleConfig.wheelRadiusMeters,
+        gui.moduleConfig.wheelRadiusMeters);
+    compare(
+        mismatches,
+        "maxDriveSpeed",
+        robot.moduleConfig.maxDriveVelocityMPS,
+        gui.moduleConfig.maxDriveVelocityMPS);
+    compare(mismatches, "wheelCOF", robot.moduleConfig.wheelCOF, gui.moduleConfig.wheelCOF);
+    compare(
+        mismatches,
+        "driveCurrentLimit",
+        robot.moduleConfig.driveCurrentLimit,
+        gui.moduleConfig.driveCurrentLimit);
+    // The gearing is folded into the drive motor model by DCMotor.withReduction, which divides
+    // the free speed by the ratio. So a free-speed difference at the wheel is a gearing difference,
+    // or a different motor type, and the entry says both.
+    compare(
+        mismatches,
+        "driveGearing/driveMotorType",
+        robot.moduleConfig.driveMotor.freeSpeedRadPerSec,
+        gui.moduleConfig.driveMotor.freeSpeedRadPerSec);
+    if (robot.moduleLocations.length != gui.moduleLocations.length) {
+      mismatches.add("module count " + gui.moduleLocations.length);
+    } else {
+      for (int i = 0; i < robot.moduleLocations.length; i++) {
+        if (robot.moduleLocations[i].getDistance(gui.moduleLocations[i])
+            > GUI_MODULE_POSITION_TOLERANCE_METERS) {
+          mismatches.add(
+              MODULE_KEYS[i]
+                  + " "
+                  + formatTranslation(gui.moduleLocations[i])
+                  + " (robot "
+                  + formatTranslation(robot.moduleLocations[i])
+                  + ")");
+        }
+      }
+    }
+    return mismatches;
+  }
+
+  /**
+   * The {@code settings.json} key prefix for each module, in PathPlanner's FL, FR, BL, BR order.
+   */
+  private static final String[] MODULE_KEYS = {"flModule", "frModule", "blModule", "brModule"};
+
+  /**
+   * Appends a mismatch entry when two values differ by more than the relative tolerance.
+   *
+   * @param mismatches the list to append to
+   * @param key the {@code settings.json} key the value lives under
+   * @param robotValue the robot's value
+   * @param guiValue the GUI's value
+   *     <p><b>Outputs:</b> may append one entry to {@code mismatches}.
+   */
+  private static void compare(
+      List<String> mismatches, String key, double robotValue, double guiValue) {
+    double scale = Math.max(Math.abs(robotValue), Math.abs(guiValue));
+    if (Math.abs(robotValue - guiValue) > GUI_CONFIG_RELATIVE_TOLERANCE * scale) {
+      mismatches.add(String.format("%s %.4g (robot %.4g)", key, guiValue, robotValue));
+    }
+  }
+
+  /**
+   * Formats a module position for a mismatch entry.
+   *
+   * @param translation the position, meters
+   * @return the position as "(x, y)" to the millimetre
+   */
+  private static String formatTranslation(Translation2d translation) {
+    return String.format("(%.3f, %.3f)", translation.getX(), translation.getY());
   }
 
   /**
@@ -113,7 +270,7 @@ public class AutoFactory {
     //     (speeds, feedforwards) -> drive.runVelocity(speeds, feedforwards),
     //     new PPHolonomicDriveController(new PIDConstants(5.0, 0.0, 0.0),
     //         new PIDConstants(5.0, 0.0, 0.0)),
-    //     PP_CONFIG, AllianceFlipUtil::shouldFlip, drive);
+    //     Drive.PP_CONFIG, AllianceFlipUtil::shouldFlip, drive);
     // Then Pathfinding.setPathfinder(new LocalADStarAK()) and the two PathPlannerLogging callbacks
     // from the stock template: setLogActivePathCallback -> "Odometry/Trajectory" and
     // setLogTargetPoseCallback -> "Odometry/TrajectorySetpoint".
