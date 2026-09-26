@@ -4181,10 +4181,12 @@ repeat k = 1 .. kMaxSolverIterations:
     stop when |t_k - t_{k-1}| < kSolverToleranceSec
 ```
 
-Then it converts the converged virtual goal into a launch: the ground-frame velocity the game piece
-must have is `vg = unit(gv - p) * (d/t)`, the robot already supplies `v`, so the muzzle velocity the
-shooter must produce relative to the robot is `vm = vg - v`. The turret aims along `vm`, and the
-flywheel RPM comes from `|vm|` through a linear fit. The turret's angular rate feedforward is the
+Then it converts the converged virtual goal into a launch. Relative to the robot the shot is a
+stationary shot at the virtual goal: the muzzle velocity is `vm = unit(gv - p) * (d/t)`. The turret
+aims along `vm`, at the virtual goal, and the flywheel RPM comes from `|vm|` through a linear fit.
+The piece also keeps the robot's `v`, which carries it from `gv` to the real goal over the flight.
+(This paragraph used to say `vm = vg - v`, which subtracted `v` a second time; M12 found and fixed
+it. See §6.2.) The turret's angular rate feedforward is the
 tangential component of the *relative* velocity divided by distance. The class is **pure** — no
 subsystem references, no `Timer`, no NetworkTables — precisely so `ShootingSolverTest` can assert
 convergence and correctness with no HAL.
@@ -4231,8 +4233,7 @@ public class ShootingSolver {
     //   Translation2d los   = virtualGoal.minus(robotPose.getTranslation());
     //   double d            = los.getNorm();
     //   double tof          = timeOfFlightTable.get(d);
-    //   Translation2d vg    = new Translation2d(d / tof, los.getAngle());
-    //   Translation2d vm    = vg.minus(GeomUtil.toTranslation(fieldRelativeSpeeds));
+    //   Translation2d vm    = new Translation2d(d / tof, los.getAngle());  // NOT minus v: M12
     //   Rotation2d aim      = vm.getAngle();
     //   double rpm          = Constants.Shot.kRpmPerMeterPerSec.get() * vm.getNorm()
     //                         + Constants.Shot.kRpmIntercept.get();
@@ -6330,6 +6331,16 @@ public class SuperstructureFsmTest {
   }
 
   @Test
+  void theMovingShotLandsWhileStrafingAtTwoMetersPerSecond() {
+    // The section 10.2 M12 checkpoint in simulation (added by M12). Orbit the goal at 3 m and
+    // 2 m/s facing it -- a strafe that stays perpendicular to the line of sight -- and SCORE_ON_MOVE.
+    // Follow every released piece with a flight model built from the turret's MEASURED angle and
+    // the flywheel's MEASURED speed: each lands inside the gate's own error budget, and the mean
+    // miss is a small fraction of the uncompensated drift. Also: the virtual goal sits upstream of
+    // the motion by v * tof, and the solver stays under its iteration cap.
+  }
+
+  @Test
   void homingTimesOutToFaulted() {
     // TODO: setWantedState(HOME) and never report homed. Step past
     // Constants.Intake.kHomingTimeoutSec and assert SystemState.FAULTED. This proves the state
@@ -6917,17 +6928,26 @@ the shot.
 
 | Quantity | Formula | Frame | Consumer |
 | --- | --- | --- | --- |
-| Required ground velocity of the piece | `vg = (d / tof) · unit(los)` | field | intermediate |
-| Required muzzle velocity | `vm = vg − v` | field | intermediate |
-| Turret aim | `turretFieldAngle = atan2(vm.y, vm.x)` | **field** | `Turret.setGoal` |
+| Required muzzle velocity, relative to the robot | `vm = (d / tof) · unit(los)` | field | intermediate |
+| The piece's ground velocity (for reference) | `vm + v = (g − p) / tof` | field | — |
+| Turret aim | `turretFieldAngle = atan2(vm.y, vm.x)`, i.e. at the virtual goal | **field** | `Turret.setGoal` |
 | Flywheel speed | `rpm = kRpmPerMeterPerSec · ‖vm‖ + kRpmIntercept` | — | `Shooter.setGoal` |
 | Turret rate feedforward | `ω_goal = tangential(−v, ∠los) / d` | **field** | `Turret.setGoal` |
 | Effective distance | `d` | — | logging, range gate |
 
-Note that `vm` — not `los` — sets the aim. The turret points along the muzzle vector, which is
-*rotated off the line of sight* by exactly the amount needed to cancel the robot's drift. When
-**v** = 0, `vm = vg` is parallel to `los` and the answer collapses to "point at the goal"; that
-identity is asserted by `stationarySolveMatchesMovingSolveAtZeroVelocity` in §4.14.
+The turret points at the virtual goal, which is *rotated off the line of sight to the real goal* by
+exactly the amount needed to cancel the robot's drift. When **v** = 0 the virtual goal is the goal
+and the answer collapses to "point at the goal"; that identity is asserted by
+`stationarySolveMatchesMovingSolveAtZeroVelocity` in §4.14.
+
+> **Corrected in M12.** This table used to derive a ground velocity `vg = (d / tof) · unit(los)`
+> and then set the muzzle velocity to `vm = vg − v`. But `los` already points at the virtual goal,
+> which already absorbs the robot's motion, so that subtracted **v** twice. At 3 m and 2 m/s of
+> strafe it aimed about 44° off the line of sight instead of about 26°, and every moving shot
+> missed by roughly the robot's drift over the flight. M3's tests checked the lead's direction,
+> which the double count also satisfied. It was found when M12's simulated checkpoint followed
+> each launch to where it lands. `ShootingSolverTest.aMovingShotLandsOnTheGoal` now does the same
+> for the solver alone.
 
 **Why the flywheel speed comes from ‖vm‖ and not from distance.** A distance-only shot map is
 correct only when standing still. Driving *toward* the goal at 3 m/s means the piece already has
@@ -7006,7 +7026,7 @@ practice field is not "is it ready" but "**which** term is false."
 | --- | --- | --- | --- |
 | 1 | `lastShot.isUsable()` | — | Solver did not converge, or the goal is outside `[kMinDistanceMeters, kMaxDistanceMeters]`. Firing a non-converged solution aims at whatever the last iteration happened to produce. |
 | 2 | `turret.atGoal()` | `kToleranceRad` = 1.5°, `kVelocityToleranceRadPerSec` = 0.5 | Turret still slewing. The *velocity* half matters as much as the position half: a turret passing through the right angle at 3 rad/s is not aimed. |
-| 3 | `shooter.willBeAtSpeedIn(2 · loopPeriod, tol)` | `kToleranceRpm` = 75; `kBurstToleranceRpm` = 300 once the burst has latched | Predictive, not instantaneous. The piece takes ~40 ms to leave the indexer, so the question is "will the wheel be at speed *when the piece arrives*", answered by extrapolating the filtered flywheel acceleration. This is what removes the one-shot-low that plagues instantaneous `atSpeed()` gates. The wider burst tolerance applies only after the feed has opened in the current scoring state, so the first piece of every burst still meets the tight band, and the indexer does not stop and restart between pieces. |
+| 3 | `shooter.willBeAtSpeedIn(2 · loopPeriod, tol)` | `kToleranceRpm` = 75; `kBurstToleranceRpm` = 300 once the burst has latched | Predictive, not instantaneous. The piece takes ~40 ms to leave the indexer, so the question is "will the wheel be at speed *when the piece arrives*", answered by extrapolating the filtered flywheel acceleration, with the projection saturated at the goal (M12: the filtered acceleration lags, so an unsaturated projection overshot the band as a spin-up arrived and dropped the gate mid-burst). This is what removes the one-shot-low that plagues instantaneous `atSpeed()` gates. The wider burst tolerance applies only after the feed has opened in the current scoring state, so the first piece of every burst still meets the tight band, and the indexer does not stop and restart between pieces. |
 | ~~4~~ | ~~`indexer.hasPiece()`~~ | — | **Removed (§2.4).** With a hopper and no piece sensor, "has a piece" cannot be answered. Feeding an empty hopper costs nothing, and shot counting no longer depends on the indexer. |
 | 5 | `RobotState.getVisionStalenessSec() < kMaxVisionStalenessSec` | 0.6 s | No tag seen recently. Odometry alone drifts; past ~0.6 s the pose is a dead-reckoning guess and the aim angle is a guess with it. |
 | 6 | `RobotState.getPoseStdDevEstimate() < kMaxPoseStdDevMeters` | 0.20 m | Pose is fresh but *uncertain* (single distant tag). At 5 m, 20 cm of lateral pose error is ~2.3° of aim error — roughly the whole error budget. |
@@ -7766,7 +7786,9 @@ model is wrong, and you will not be able to tell the two failures apart.
 **M12 — Shoot on the move (1–2 weeks, lane D).**
 Enable `SCORE_ON_MOVE`. Tune the gates. Keep `kAccelCompensationScalar` at 0 until constant-velocity
 shots are reliable, then raise it in 0.25 steps (§6.3).
-**Checkpoint:** 7 of 10 shots score while strafing perpendicular to the goal at ≥ 2 m/s.
+**Checkpoint:** 7 of 10 shots score while strafing perpendicular to the goal at ≥ 2 m/s. (M12 ran
+this in simulation as `theMovingShotLandsWhileStrafingAtTwoMetersPerSecond`, and it found a
+double-counted velocity in the solver, corrected in §6.2.)
 `Superstructure/Shot/VirtualGoal` visibly leads or lags the real goal in the correct direction on
 AdvantageScope's 2D field. `solver.getLastIterationCount()` stays below the cap.
 
