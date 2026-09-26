@@ -7,12 +7,13 @@ import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
 import frc.robot.Constants;
 import frc.robot.subsystems.drive.Drive;
-import frc.robot.subsystems.indexer.Indexer;
 import frc.robot.subsystems.intake.Intake;
+import frc.robot.subsystems.shooter.Shooter;
 import frc.robot.subsystems.superstructure.Superstructure;
 import frc.robot.subsystems.turret.Turret;
 import frc.robot.subsystems.vision.Vision;
 import java.util.Optional;
+import org.littletonrobotics.junction.Logger;
 
 /**
  * Owns everything PathPlanner needs to exist, in one place, so that {@code Drive} stays a
@@ -30,6 +31,12 @@ import java.util.Optional;
  *
  * <p>The concrete capability bought: a student can add an auto in the PathPlanner GUI, drop in a
  * marker named {@code ScoreOnMove}, and it works with no Java change at all.
+ *
+ * <p>M10b step 9 (plan section 2.4) moved the autos onto the hopper model. The robot has no piece
+ * sensor, so nothing here waits for a piece or branches on one: the intake is an independent
+ * request that a path can hold while it scores, a scoring leg ends on the superstructure's "likely
+ * empty" belief or a timeout, and the only piece count available is the flywheel's shot count. That
+ * is why this factory holds the shooter and no longer holds the indexer.
  */
 public class AutoFactory {
   /**
@@ -42,7 +49,7 @@ public class AutoFactory {
   private final Drive drive;
   private final Superstructure superstructure;
   private final Intake intake;
-  private final Indexer indexer;
+  private final Shooter shooter;
   private final Turret turret;
   private final Vision vision;
 
@@ -55,7 +62,7 @@ public class AutoFactory {
    * @param drive the drivetrain
    * @param superstructure the cross-mechanism state machine
    * @param intake the pivoting intake
-   * @param indexer the indexer
+   * @param shooter the flywheel, whose shot count is the only piece count the robot has
    * @param turret the turret
    * @param vision the vision subsystem
    */
@@ -63,13 +70,13 @@ public class AutoFactory {
       Drive drive,
       Superstructure superstructure,
       Intake intake,
-      Indexer indexer,
+      Shooter shooter,
       Turret turret,
       Vision vision) {
     this.drive = drive;
     this.superstructure = superstructure;
     this.intake = intake;
-    this.indexer = indexer;
+    this.shooter = shooter;
     this.turret = turret;
     this.vision = vision;
     // TODO: Call loadRobotConfig(), configureAutoBuilder() and registerNamedCommands(), in that
@@ -119,18 +126,28 @@ public class AutoFactory {
    */
   private void registerNamedCommands() {
     // TODO: Register each name below EXACTLY as spelled. These strings are typed by hand into the
-    // PathPlanner GUI, and a typo produces a silently-skipped marker rather than an error:
-    //   "Intake"            -> superstructure.setWantedStateCommand(WantedState.INTAKE)
-    //   "StopIntake"        -> superstructure.setWantedStateCommand(WantedState.DEFAULT)
+    // PathPlanner GUI, and a typo produces a silently-skipped marker rather than an error. The
+    // table in plan section 8.2 is the contract; change both in the same commit.
+    //   "Intake"            -> Commands.runOnce(() -> superstructure.setIntakeRequested(true))
+    //   "StopIntake"        -> Commands.runOnce(() -> superstructure.setIntakeRequested(false))
+    //                          (the roller stops; the intake stays DEPLOYED, so the hopper keeps
+    //                          its pieces)
+    //   "StowIntake"        -> superstructure.setWantedStateCommand(WantedState.STOW)
+    //                          (rarely: raising the intake can dump the hopper)
     //   "SpinUp"            -> superstructure.setWantedStateCommand(WantedState.SPIN_UP)
     //   "ScoreOnMove"       -> superstructure.scoreUntilEmptyCommand()
     //   "ScoreStationary"   -> scoreStationaryCommand()
-    //   "WaitForPiece"      -> waitForPieceCommand(2.0)
     //   "Eject"             -> superstructure.setWantedStateCommand(WantedState.EJECT)
     //   "Home"              -> superstructure.setWantedStateCommand(WantedState.HOME)
     //   "StowTurret"        -> turret.setWantedStateCommand(Turret.WantedState.STOW)
     //   "GamePiecePipeline" -> Commands.runOnce(() -> vision.setIntakePipeline(1))
     //   "TagPipeline"       -> Commands.runOnce(() -> vision.setIntakePipeline(0))
+    //
+    // "Intake" and "StopIntake" set the intake request, which is independent of the shooter-side
+    // wanted state, so one path can intake and score at once. They used to request
+    // WantedState.INTAKE, which M10b step 7 removed, and DEFAULT, which would cancel any scoring in
+    // progress. "WaitForPiece" is gone for good: with no piece sensor there is nothing to wait
+    // for, and a marker that always times out only costs the auto time.
   }
 
   /**
@@ -160,28 +177,38 @@ public class AutoFactory {
   }
 
   /**
-   * Scores from a standstill until the indexer is empty.
+   * Scores from a standstill until the hopper is probably empty, or the timeout.
    *
    * @return the scoring command
    */
   public Command scoreStationaryCommand() {
     // TODO: superstructure.setWantedStateCommand(SCORE_STATIONARY)
-    //     .andThen(Commands.waitUntil(() -> !indexer.hasPiece()))
+    //     .andThen(Commands.waitUntil(superstructure::likelyEmpty))
     //     .withTimeout(Constants.Auto.kScoreTimeoutSec.get())
     //     .andThen(superstructure.setWantedStateCommand(DEFAULT));
+    // Read the timeout inside Commands.defer, as Superstructure.scoreUntilEmptyCommand() does, so
+    // a retuned kScoreTimeoutSec takes effect without a reboot. (It used to wait for
+    // !indexer.hasPiece(); M10b deleted the piece model, and likelyEmpty() is the belief that
+    // replaced it.)
     return Commands.none();
   }
 
   /**
-   * Waits for the indexer to report a piece.
+   * Logs how many pieces the flywheel has counted since autonomous began, as {@code
+   * Auto/PreloadFired}.
    *
-   * @param timeoutSec how long to wait before giving up, in seconds
-   * @return the wait command
+   * <p>Added for M10b step 9 (plan section 2.4). The rules put exactly 8 pieces in the robot at the
+   * start of a match and the shot count is zeroed at {@code autonomousInit}, so logged at the end
+   * of the preload burst this is a free calibration of the shot detector in every match: anything
+   * other than 8 means pieces merged inside one refractory window, a shot was missed, or pieces
+   * stayed in the hopper. It gates nothing.
+   *
+   * @return an instant command that logs the shooter's current shot count
    */
-  public Command waitForPieceCommand(double timeoutSec) {
-    // TODO: Commands.waitUntil(indexer::hasPiece).withTimeout(timeoutSec). Use this after an intake
-    // marker so a routine does not drive away from a piece it never actually collected.
-    return Commands.none();
+  public Command logPreloadFiredCommand() {
+    // Read when the command RUNS, not when it is built: routines are built once, when the chooser
+    // is populated at robot init, and a count captured then would always be zero.
+    return Commands.runOnce(() -> Logger.recordOutput("Auto/PreloadFired", shooter.getShotCount()));
   }
 
   /**
@@ -247,12 +274,15 @@ public class AutoFactory {
   }
 
   /**
-   * The indexer, used by routines that branch on whether a piece was actually collected.
+   * The intake, so {@code AutoRoutines} can wait for it to reach a piece-retaining angle.
    *
-   * @return the indexer
+   * <p>Replaces {@code getIndexer()}, whose only use was branching on whether a piece had been
+   * collected -- a question the robot can no longer answer (M10b step 9).
+   *
+   * @return the intake
    */
-  public Indexer getIndexer() {
-    return indexer;
+  public Intake getIntake() {
+    return intake;
   }
 
   /**

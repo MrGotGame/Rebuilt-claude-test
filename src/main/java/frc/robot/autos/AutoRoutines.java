@@ -3,26 +3,35 @@ package frc.robot.autos;
 import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.Commands;
+import frc.robot.Constants;
 import frc.robot.subsystems.superstructure.Superstructure;
 import java.util.List;
+import java.util.Set;
 
 /**
  * The composable routine builder.
  *
  * <p>A {@code .auto} file drawn in the PathPlanner GUI is the right tool for <i>geometry</i>. It is
- * the wrong tool for <i>logic</i> such as "if the first piece was missed, skip the second pickup
- * and shoot from here." So every routine here is a small Java composition of {@link
- * AutoFactory#followPath} segments and superstructure commands, with the GUI owning only path
- * shapes.
+ * the wrong tool for <i>logic</i> such as loops, a sequence built from a list of path names, or a
+ * timeout read from a tunable when the routine starts. So every routine here is a small Java
+ * composition of {@link AutoFactory#followPath} segments and superstructure commands, with the GUI
+ * owning only path shapes.
  *
  * <p>Each routine is a {@code public Command} that returns a <b>fresh</b> instance on every call,
  * never a cached one. A {@code Command} may only belong to one composition at a time, so
  * re-selecting an auto in the chooser would otherwise throw.
  *
- * <p>Two building blocks do the heavy lifting. {@link #driveAndIntake} follows a path while the
+ * <p>Three building blocks do the heavy lifting. {@link #driveAndIntake} follows a path while the
  * superstructure intakes; {@link #driveAndShoot} follows a path while the superstructure scores on
- * the move -- which is where shoot-while-moving in autonomous actually happens. The turret and the
- * solver do not care that the chassis velocity came from PathPlanner rather than a joystick.
+ * the move -- which is where shoot-while-moving in autonomous actually happens; and {@link
+ * #driveIntakeAndShoot} does both at once. The turret and the solver do not care that the chassis
+ * velocity came from PathPlanner rather than a joystick.
+ *
+ * <p>M10b step 9 (plan section 2.4) put these on the hopper model. The robot starts with the intake
+ * stowed and 8 pieces aboard, and pieces fall out of a stowed intake, so every routine opens with
+ * {@link #waitUntilIntakeRetaining()}. There is no piece sensor, so no routine waits for a piece or
+ * branches on one: a missed pickup cannot be detected, and a moving scoring leg over an empty
+ * hopper costs no stop.
  */
 public class AutoRoutines {
   private final AutoFactory factory;
@@ -43,17 +52,40 @@ public class AutoRoutines {
   // ------------------------------------------------------------------------- building blocks ----
 
   /**
-   * Follows a path with the intake running, then gives the indexer a moment to seat the piece.
+   * Follows a path with the intake running, then keeps it running for a short fixed dwell.
    *
    * @param pathName the path file's name, without extension
    * @return the composed command
    */
   public Command driveAndIntake(String pathName) {
     // TODO: Commands.deadline(factory.followPath(pathName),
-    //     superstructure.setWantedStateCommand(Superstructure.WantedState.INTAKE))
-    //   .andThen(factory.waitForPieceCommand(Constants.Auto.kIntakeSettleSec.get()));
-    // The deadline group ends when the PATH ends; the trailing wait is what stops the next segment
-    // from driving away while the piece is still mid-indexer.
+    // superstructure.intakeWhileHeldCommand())
+    //   .andThen(Commands.deadline(Commands.waitSeconds(Constants.Auto.kIntakeSettleSec.get()),
+    //       superstructure.intakeWhileHeldCommand())).
+    // The deadline group ends when the PATH ends; the dwell gives pieces still at the mouth time to
+    // come aboard. A fixed dwell, not a wait for a piece: there is no piece sensor, so the routine
+    // cannot know whether the pickup worked and does not pretend to. When the intake request is
+    // released the roller stops and the intake stays DOWN.
+    return Commands.none();
+  }
+
+  /**
+   * Follows a path with the intake running while scoring on the move: sweep and fire at once.
+   *
+   * <p>Added for M10b step 9. This is the hopper robot's natural unit: drive through a group of
+   * pieces with the intake down and fire whatever is aboard as it goes, with no stop and no
+   * separate pickup leg. It relies on the superstructure's two orthogonal requests -- the intake
+   * and the shooter side -- so it needs no auto-specific code.
+   *
+   * @param pathName the path file's name, without extension
+   * @return the composed command
+   */
+  public Command driveIntakeAndShoot(String pathName) {
+    // TODO: Commands.deadline(factory.followPath(pathName),
+    //     superstructure.intakeWhileHeldCommand(),
+    //     superstructure.setWantedStateCommand(Superstructure.WantedState.AUTO_SCORE_ON_MOVE))
+    //   .andThen(superstructure.setWantedStateCommand(Superstructure.WantedState.DEFAULT)).
+    // Pieces are fired as they arrive; the intake stays down throughout and after.
     return Commands.none();
   }
 
@@ -80,7 +112,8 @@ public class AutoRoutines {
   public Command shootInPlace(double timeoutSec) {
     // TODO: Commands.runOnce(drive::stop) followed by
     // factory.scoreStationaryCommand().withTimeout(timeoutSec).
-    // Only worth it for the preload, where standing still for 0.6 s beats solving a moving shot.
+    // Only worth it for the 8-piece preload, where standing still for the burst beats solving a
+    // moving shot for each piece.
     return Commands.none();
   }
 
@@ -113,17 +146,31 @@ public class AutoRoutines {
   }
 
   /**
-   * Branches on whether a piece was actually collected.
+   * Waits until the intake is low enough to keep pieces aboard, or a short timeout.
    *
-   * @param ifHasPiece the command to run when the indexer holds a piece
-   * @param ifEmpty the command to run when it does not
-   * @return the composed command
+   * <p>Added for M10b step 9 (plan section 2.4). Every routine starts with this, before its first
+   * path. The rules require the robot to start with the intake STOWED and 8 pieces aboard, pieces
+   * fall out of a stowed intake, and {@code Superstructure.onEnable()} deploys it at {@code
+   * autonomousInit} -- so a routine that drove off at once would shed its preload on the way.
+   *
+   * @return a command that ends when {@code Intake.isRetainingPieces()} is true, or after {@code
+   *     Constants.Auto.kIntakeRetainTimeoutSec}, whichever is first
    */
-  public Command bailoutIfEmpty(Command ifHasPiece, Command ifEmpty) {
-    // TODO: Commands.either(ifHasPiece, ifEmpty, factory.getIndexer()::hasPiece), evaluated at
-    // schedule time. This is the "we missed the pickup, go get the next one instead of shooting
-    // air" branch, and it is the single highest-value piece of logic in this file.
-    return Commands.none();
+  public Command waitUntilIntakeRetaining() {
+    // The timeout exists so that a dead pivot costs the auto a second, not the whole period. It is
+    // read inside Commands.defer, when the routine reaches this step, rather than when the routine
+    // is built: routines are built once, when the chooser is populated at robot init, and a timeout
+    // captured then would ignore a retune between matches. The same reason, and the same shape, as
+    // Superstructure.scoreUntilEmptyCommand().
+    //
+    // isRetainingPieces() rather than "the intake is DEPLOYED": the feed-assist angle lies between
+    // stow and deploy and already retains, so the wait ends as the arm passes it on the way down
+    // instead of waiting for the rest of the travel.
+    return Commands.defer(
+        () ->
+            Commands.waitUntil(factory.getIntake()::isRetainingPieces)
+                .withTimeout(Constants.Auto.kIntakeRetainTimeoutSec.get()),
+        Set.of());
   }
 
   /**
@@ -157,20 +204,25 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command driveForward() {
-    // TODO: factory.followPath("Leave"). If this one works, AutoBuilder, RobotConfig and the pose
-    // reset are all wired correctly; if it does not, nothing else in this file will.
+    // TODO: waitUntilIntakeRetaining() -> factory.followPath("Leave"). If this one works,
+    // AutoBuilder, RobotConfig and the pose reset are all wired correctly; if it does not, nothing
+    // else in this file will.
     return Commands.none();
   }
 
   /**
-   * Scores the preload, then leaves. The fallback routine when vision is down.
+   * Fires the 8-piece preload, then leaves. The fallback routine when vision is down.
    *
    * @return the routine
    */
   public Command preloadOnly() {
-    // TODO: resetPoseToPathStart("Center_Preload") -> spinUpWhile(shootInPlace(2.0)) ->
-    // followPath("Center_Preload"). This routine depends on nothing but odometry, which is exactly
-    // why it is the one to select when the cameras are misbehaving.
+    // TODO: resetPoseToPathStart("Center_Preload") -> waitUntilIntakeRetaining() ->
+    // spinUpWhile(shootInPlace(<long enough for all 8 pieces -- the old 2.0 s was a one-piece
+    // timeout>)) ->
+    // factory.logPreloadFiredCommand() -> followPath("Center_Preload"). This routine depends on
+    // nothing but odometry, which is exactly why it is the one to select when the cameras are
+    // misbehaving. Auto/PreloadFired should read 8; see logPreloadFiredCommand() for what it means
+    // when it does not.
     return Commands.none();
   }
 
@@ -180,9 +232,13 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command centerThreePiece() {
-    // TODO: resetPose -> shootInPlace -> driveAndIntake("Center_ToPiece1") ->
+    // TODO: resetPose -> waitUntilIntakeRetaining() -> shootInPlace ->
+    // factory.logPreloadFiredCommand() -> driveAndIntake("Center_ToPiece1") ->
     // driveAndShoot("Center_Score1") -> driveAndIntake("Center_ToPiece2") ->
-    // driveAndShoot("Center_Score2"), with each pickup wrapped in bailoutIfEmpty.
+    // driveAndShoot("Center_Score2"). There is no bailout after a pickup: a missed pickup cannot be
+    // detected without a piece sensor, and a moving scoring leg over an empty hopper costs no stop.
+    // Once the field layout is known, consider driveIntakeAndShoot sweeps in place of the
+    // pickup/score pairs (plan section 8.3).
     return Commands.none();
   }
 
@@ -205,8 +261,9 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command ampSideThreePiece() {
-    // TODO: The left/amp-side mirror of centerThreePiece using the Amp_* paths. Write it BLUE-ONLY;
-    // AllianceFlipUtil and AutoBuilder's shouldFlip callback handle red automatically.
+    // TODO: The left/amp-side mirror of centerThreePiece using the Amp_* paths, opening with
+    // waitUntilIntakeRetaining() like every routine. Write it BLUE-ONLY; AllianceFlipUtil and
+    // AutoBuilder's shouldFlip callback handle red automatically.
     return Commands.none();
   }
 
@@ -216,7 +273,8 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command sourceSideThreePiece() {
-    // TODO: The right/source-side mirror using the Source_* paths.
+    // TODO: The right/source-side mirror using the Source_* paths, opening with
+    // waitUntilIntakeRetaining() like every routine.
     return Commands.none();
   }
 
@@ -226,8 +284,9 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command sourceSideSteal() {
-    // TODO: Drive across on "Source_Steal", intake two pieces, and return to shoot. Only run this
-    // when the alliance has agreed to it beforehand.
+    // TODO: waitUntilIntakeRetaining(), then drive across on "Source_Steal" with the intake
+    // requested, and return to shoot -- a natural driveIntakeAndShoot sweep on the way back. Only
+    // run this when the alliance has agreed to it beforehand.
     return Commands.none();
   }
 
@@ -237,9 +296,10 @@ public class AutoRoutines {
    * @return the routine
    */
   public Command dynamicScavenge() {
-    // TODO: Loop up to Constants.Auto.kMaxScavengeCycles: if vision.getGamePieceFieldPose() is
-    // present, AutoBuilder.pathfindToPose(that pose, AutoFactory.defaultPathfindConstraints(), 0.0)
-    // while INTAKE; otherwise drive to the next static waypoint. Then driveAndShoot back.
+    // TODO: waitUntilIntakeRetaining(), then loop up to Constants.Auto.kMaxScavengeCycles: if
+    // vision.getGamePieceFieldPose() is present, AutoBuilder.pathfindToPose(that pose,
+    // AutoFactory.defaultPathfindConstraints(), 0.0) under superstructure.intakeWhileHeldCommand();
+    // otherwise drive to the next static waypoint. Then driveAndShoot back.
     // This depends on the intake Limelight's game-piece pipeline being properly tuned, so keep it
     // behind its own chooser entry that students can simply avoid at an early event.
     return Commands.none();

@@ -182,7 +182,7 @@ public class RobotContainer {
 
     superstructure =
         new Superstructure(drive, intake, floorRoller, indexer, turret, shooter, vision);
-    autoFactory = new AutoFactory(drive, superstructure, intake, indexer, turret, vision);
+    autoFactory = new AutoFactory(drive, superstructure, intake, shooter, turret, vision);
     autoRoutines = new AutoRoutines(autoFactory);
     autoSelector = new AutoSelector(autoFactory, autoRoutines);
 
