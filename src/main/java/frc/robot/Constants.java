@@ -315,6 +315,12 @@ public final class Constants {
      */
     public static final LoggedTunableNumber kCoastDelaySec =
         new LoggedTunableNumber("Drive/CoastDelay", 5.0);
+
+    /**
+     * The drivetrain drops to coast only below this speed, m/s. Added for M14 step 4. A robot still
+     * rolling when it is released keeps rolling; a pushed robot moves well below this.
+     */
+    public static final double kCoastReleaseMaxSpeedMetersPerSec = 0.1;
   }
 
   // ------------------------------------------------------------------------------- the intake ----

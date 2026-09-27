@@ -7,9 +7,11 @@
 
 package frc.robot;
 
+import edu.wpi.first.math.kinematics.ChassisSpeeds;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
+import frc.robot.util.CoastRelease;
 import frc.robot.util.FaultReporter;
 import frc.robot.util.PhoenixUtil;
 import frc.robot.util.PowerBudget;
@@ -34,8 +36,7 @@ public class Robot extends LoggedRobot {
   private Command autonomousCommand;
   private RobotContainer robotContainer;
   private double autoStartTimeSec = 0.0;
-  private boolean brakeModeReleased = false;
-  private final Timer disabledTimer = new Timer();
+  private final CoastRelease coastRelease = new CoastRelease();
 
   /** Starts the logger, then builds the robot. The order matters and must not be changed. */
   public Robot() {
@@ -137,13 +138,9 @@ public class Robot extends LoggedRobot {
     // and releases any requested drive heading, and none of that happens unless this method calls
     // it. Leaving the call out would have made that safety contract dead code.
     //
-    // The two brake-mode statements belong to M14 and are implemented here rather than deferred
-    // because they only prepare state: the timer that measures how long the robot has been still,
-    // and the once-only latch that goes with it. What actually drops the drivetrain to coast lives
-    // in disabledPeriodic and is still M14's, so setting these up now costs nothing and means the
-    // timer is honest whenever that arrives.
-    disabledTimer.restart();
-    brakeModeReleased = false;
+    // The timer and the once-only latch moved into CoastRelease in M14 step 4, which also owns the
+    // release itself; see disabledPeriodic.
+    coastRelease.onDisabled();
     robotContainer.onDisable();
   }
 
@@ -155,10 +152,16 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void disabledPeriodic() {
-    // TODO: Once disabledTimer.hasElapsed(Constants.Drivetrain.kCoastDelaySec.get()) AND the robot
-    // is nearly stationary, call robotContainer.setDriveBrakeMode(false) ONCE (guard on
-    // brakeModeReleased). The stationary check matters -- dropping to coast while the robot is
-    // still rolling means it keeps rolling.
+    // IMPLEMENTATION, M14 step 4 (was TODO: "Once disabledTimer.hasElapsed(
+    // Constants.Drivetrain.kCoastDelaySec.get()) AND the robot is nearly stationary, call
+    // robotContainer.setDriveBrakeMode(false) ONCE (guard on brakeModeReleased).")
+    //
+    // The decision is CoastRelease's, where it can be tested; Robot cannot be.
+    ChassisSpeeds speeds = RobotState.getInstance().getFieldRelativeSpeeds();
+    if (coastRelease.shouldReleaseNow(
+        Math.hypot(speeds.vxMetersPerSecond, speeds.vyMetersPerSecond))) {
+      robotContainer.setDriveBrakeMode(false);
+    }
     //
     // IMPLEMENTATION, M13 step 7 (was TODO: "Also call robotContainer.updateAutoPreview() so the
     // drive team can check placement."). The coast release above stays M14's.
@@ -172,9 +175,9 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void autonomousInit() {
-    // TODO: robotContainer.setDriveBrakeMode(true) (M14).
-    //
+    // IMPLEMENTED by M14 step 4: brake again, since the robot may have been released to coast.
     // IMPLEMENTED by M13 step 7: the start time, for Auto/ElapsedSec.
+    robotContainer.setDriveBrakeMode(true);
     autoStartTimeSec = Timer.getFPGATimestamp();
     //
     // IMPLEMENTED in part by M10b step 7: the shot count reset the TODO asked for (now the
@@ -224,7 +227,8 @@ public class Robot extends LoggedRobot {
     if (autonomousCommand != null) {
       autonomousCommand.cancel();
     }
-    // TODO: robotContainer.setDriveBrakeMode(true).
+    // IMPLEMENTED by M14 step 4: brake again, since the robot may have been released to coast.
+    robotContainer.setDriveBrakeMode(true);
     //
     // IMPLEMENTED by M10b step 7: the superstructure reset to DEFAULT this TODO asked for, so
     // autonomous can never leak a goal into teleop -- plus releasing any intake request an auto

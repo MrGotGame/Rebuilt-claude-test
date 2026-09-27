@@ -461,8 +461,16 @@ public class RobotContainer {
    *     <p><b>Outputs:</b> reconfigures the drivetrain, and the turret and intake neutral modes.
    */
   public void setDriveBrakeMode(boolean brake) {
-    // TODO: drive.setBrakeMode(brake), plus a turret and intake neutral-mode passthrough -- a
-    // disabled robot should be pushable, but a disabled turret should not flop around.
+    // IMPLEMENTATION, M14 step 4 (was TODO: "drive.setBrakeMode(brake), plus a turret and intake
+    // neutral-mode passthrough -- a disabled robot should be pushable, but a disabled turret should
+    // not flop around.")
+    //
+    // The drivetrain only. The turret and the intake pivot are never passed through: both are
+    // configured in brake, and both stay there. A coasting pivot falls under its own weight -- at
+    // best onto the floor in the queue line, at worst onto the turret -- and a coasting turret
+    // flops. Moving either by hand in the pit is a deliberate act, through their IO's own brake
+    // setters, not something a post-match timer should do.
+    drive.setBrakeMode(brake);
   }
 
   /**
