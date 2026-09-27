@@ -487,7 +487,12 @@ public class IntakeIOTalonFX implements IntakeIO {
    * @return the pivot angle the absolute encoder reports, in radians at the gearbox output
    */
   private double absolutePositionRad() {
-    double offsetRot = pivotAbsEncoder.get() - Constants.Intake.kPivotAbsEncoderOffsetRot.get();
+    // Per robot since M14 step 5: the competition robot's offset, or the practice robot's.
+    double offsetRot =
+        pivotAbsEncoder.get()
+            - Constants.forRobot(
+                Constants.Intake.kPivotAbsEncoderOffsetRot.get(),
+                Constants.PracticeRobot.kIntakePivotAbsEncoderOffsetRot.get());
     return Units.rotationsToRadians(MathUtil.inputModulus(offsetRot, -0.5, 0.5));
   }
 

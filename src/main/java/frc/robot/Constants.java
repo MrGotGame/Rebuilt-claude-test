@@ -6,10 +6,13 @@ import edu.wpi.first.math.geometry.Rotation3d;
 import edu.wpi.first.math.geometry.Transform3d;
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.geometry.Translation3d;
+import edu.wpi.first.wpilibj.Alert.AlertType;
 import edu.wpi.first.wpilibj.RobotBase;
 import edu.wpi.first.wpilibj.RobotController;
 import frc.robot.util.AllianceFlipUtil;
+import frc.robot.util.FaultReporter;
 import frc.robot.util.LoggedTunableNumber;
+import java.util.function.Consumer;
 
 /**
  * The single entry point for every number in this codebase.
@@ -85,11 +88,101 @@ public final class Constants {
    *     serial number matches, defaulting to {@link RobotType#COMP}
    */
   public static RobotType getRobot() {
-    // TODO: In SIM/REPLAY return SIMBOT. On a real RIO, compare RobotController.getSerialNumber()
-    // against kCompRoboRioSerial and kPracticeRoboRioSerial and return the match. Default to COMP
-    // but raise a FaultReporter alert when neither matches, so an unknown RIO is loud rather than
-    // silently running the wrong encoder offsets.
+    // IMPLEMENTATION, M14 step 5 (was TODO: "In SIM/REPLAY return SIMBOT. On a real RIO, compare
+    // RobotController.getSerialNumber() against kCompRoboRioSerial and kPracticeRoboRioSerial and
+    // return the match. Default to COMP but raise a FaultReporter alert when neither matches, so an
+    // unknown RIO is loud rather than silently running the wrong encoder offsets.")
+    //
+    // Resolved once and kept: the roboRIO cannot change while the code runs, and this is read from
+    // static initializers.
+    //
+    // The unknown-serial alert is an ERROR that BLOCKS scoring. An unknown roboRIO means unknown
+    // encoder offsets, and a turret seeded with the wrong offset aims somewhere else: the exact
+    // case readiness-gate term 8 exists for. So a spare roboRIO swapped in at an event will not
+    // shoot until its serial is entered -- loud, as plan section 5.5 asks, rather than wrong.
+    if (robot == null) {
+      robot =
+          identify(
+              currentMode,
+              currentMode == Mode.REAL ? RobotController.getSerialNumber() : "",
+              kCompRoboRioSerial,
+              kPracticeRoboRioSerial,
+              serial ->
+                  FaultReporter.getInstance()
+                      .register(
+                          "Unknown roboRIO (serial "
+                              + serial
+                              + "): running the COMP robot's constants. Enter it as"
+                              + " kCompRoboRioSerial or kPracticeRoboRioSerial.",
+                          AlertType.kError,
+                          FaultReporter.Impact.BLOCKS_SCORING,
+                          () -> true));
+    }
+    return robot;
+  }
+
+  /** Which robot this is, once {@link #getRobot()} has resolved it. */
+  private static RobotType robot = null;
+
+  /**
+   * Resolves which robot a roboRIO serial belongs to.
+   *
+   * <p>Added for M14 step 5, pure so it can be tested: the test JVM is never a real roboRIO.
+   *
+   * @param mode the runtime mode; anything but REAL is the simulated robot
+   * @param serial the roboRIO's serial number
+   * @param compSerial the competition robot's serial
+   * @param practiceSerial the practice robot's serial
+   * @param onUnknown called with the serial when it matches neither robot
+   * @return the robot; COMP for an unknown serial, after calling {@code onUnknown}
+   */
+  static RobotType identify(
+      Mode mode,
+      String serial,
+      String compSerial,
+      String practiceSerial,
+      Consumer<String> onUnknown) {
+    if (mode != Mode.REAL) {
+      return RobotType.SIMBOT;
+    }
+    if (serial.equals(compSerial)) {
+      return RobotType.COMP;
+    }
+    if (serial.equals(practiceSerial)) {
+      return RobotType.PRACTICE;
+    }
+    onUnknown.accept(serial);
     return RobotType.COMP;
+  }
+
+  /**
+   * Picks the practice robot's value on the practice robot, and the competition robot's otherwise.
+   *
+   * <p>Added for M14 step 5, as the way per-robot values are read. Plan section 5.5 put a {@code
+   * switch} inside each constant's initializer instead. That would rewrite the constant's own line,
+   * and those lines are tuned on the branch where their subsystem was built and merged forward
+   * (plans/ROBOT_BRINGUP.md): a rewrite here would conflict with every tuning merge after it. So
+   * each constant keeps its line and stays the COMP value, the practice value lives in {@link
+   * PracticeRobot} at the end of this file, and the one place that reads the pair calls this.
+   *
+   * @param compValue the value for the competition robot, and for simulation
+   * @param practiceValue the value for the practice robot
+   * @return the value for the robot this code is running on
+   */
+  public static double forRobot(double compValue, double practiceValue) {
+    return forRobot(getRobot(), compValue, practiceValue);
+  }
+
+  /**
+   * The pure form of {@link #forRobot(double, double)}, for tests.
+   *
+   * @param robotType which robot
+   * @param compValue the competition robot's value, also used in simulation
+   * @param practiceValue the practice robot's value
+   * @return the value for that robot
+   */
+  static double forRobot(RobotType robotType, double compValue, double practiceValue) {
+    return robotType == RobotType.PRACTICE ? practiceValue : compValue;
   }
 
   /**
@@ -1494,5 +1587,36 @@ public final class Constants {
      */
     public static final LoggedTunableNumber kEmptyRumbleStrength =
         new LoggedTunableNumber("Controls/EmptyRumble", 0.7);
+  }
+
+  // ---------------------------------------------------------------------------- practice robot
+  // ----
+
+  /**
+   * The practice robot's values, where they differ from the competition robot's.
+   *
+   * <p>Added for M14 step 5 (plan section 5.5). Only MEASURED per-chassis values belong here --
+   * absolute encoder offsets -- and never gains: if the two robots need different gains, something
+   * mechanical differs, and that is worth finding rather than papering over. Read through {@link
+   * Constants#forRobot}. At the end of the file on purpose, far from any line tuned on another
+   * branch. The four swerve CANcoder offsets are not here: Tuner X owns {@code
+   * TunerConstants.java}.
+   */
+  public static final class PracticeRobot {
+    private PracticeRobot() {}
+
+    /**
+     * The practice robot's {@link Intake#kPivotAbsEncoderOffsetRot}, rotations. TODO: MEASURE on
+     * the practice robot, the same way.
+     */
+    public static final LoggedTunableNumber kIntakePivotAbsEncoderOffsetRot =
+        new LoggedTunableNumber("Practice/IntakePivotAbsOffset", 0.0);
+
+    /**
+     * The practice robot's {@link Turret#kAbsEncoderOffsetRot}, rotations. TODO: MEASURE on the
+     * practice robot, the same way.
+     */
+    public static final LoggedTunableNumber kTurretAbsEncoderOffsetRot =
+        new LoggedTunableNumber("Practice/TurretAbsOffset", 0.0);
   }
 }

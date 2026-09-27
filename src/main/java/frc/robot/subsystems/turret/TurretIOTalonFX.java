@@ -441,7 +441,11 @@ public class TurretIOTalonFX implements TurretIO {
     // drift between them. A boot seed computed with a different sign from the runtime reading is
     // the kind of bug that only shows up as "the turret is fine until you re-home it".
     return MathUtil.angleModulus(
-        Units.rotationsToRadians(absEncoder.get() - Constants.Turret.kAbsEncoderOffsetRot.get()));
+        Units.rotationsToRadians(
+            absEncoder.get()
+                - Constants.forRobot(
+                    Constants.Turret.kAbsEncoderOffsetRot.get(),
+                    Constants.PracticeRobot.kTurretAbsEncoderOffsetRot.get())));
   }
 
   /**
