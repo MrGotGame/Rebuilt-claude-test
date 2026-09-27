@@ -8,6 +8,10 @@
 package frc.robot;
 
 import edu.wpi.first.math.kinematics.ChassisSpeeds;
+import edu.wpi.first.wpilibj.Alert.AlertType;
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.RobotController;
+import edu.wpi.first.wpilibj.Threads;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
@@ -26,11 +30,11 @@ import org.littletonrobotics.junction.wpilog.WPILOGWriter;
  * The robot's entry point and lifecycle.
  *
  * <p>The AdvantageKit logger wiring below is the template's, kept verbatim. Four competition
- * behaviors are layered on top: real-time thread priority around the scheduler so 250 Hz odometry
- * is not starved; a per-loop call into the fault reporter and power budget; loop-overrun and memory
- * logging so a missed shot can be proven in replay to have been a timing problem or not; and a
- * brake-mode release timer that lets the drivetrain coast a few seconds after a match so the robot
- * can be pushed off the field.
+ * behaviors are layered on top, all complete as of M14: real-time thread priority around the
+ * scheduler so 250 Hz odometry is not starved; a per-loop call into the fault reporter and power
+ * budget; loop-overrun and memory logging so a missed shot can be proven in replay to have been a
+ * timing problem or not; and a brake-mode release timer that lets the drivetrain coast a few
+ * seconds after a match so the robot can be pushed off the field.
  */
 public class Robot extends LoggedRobot {
   private Command autonomousCommand;
@@ -80,6 +84,16 @@ public class Robot extends LoggedRobot {
     Logger.start();
 
     robotContainer = new RobotContainer();
+
+    // M14 step 6. Tuning mode must be off at an event: it publishes every constant as editable,
+    // and an edit made in the pit survives until the next reboot. The flag is final, so this can
+    // only fire on code built with it on; the FMS being attached is what says this is a real match.
+    FaultReporter.getInstance()
+        .register(
+            "Tuning mode is ON with the FMS attached; set Constants.kTuningMode false and redeploy",
+            AlertType.kWarning,
+            FaultReporter.Impact.REPORT_ONLY,
+            () -> Constants.kTuningMode && DriverStation.isFMSAttached());
   }
 
   /**
@@ -90,18 +104,19 @@ public class Robot extends LoggedRobot {
    */
   @Override
   public void robotPeriodic() {
-    // TODO: Wrap the scheduler run in Threads.setCurrentThreadPriority(true, 99) before and
-    // Threads.setCurrentThreadPriority(false, 10) after, so the 250 Hz odometry thread is not
-    // starved by a long command loop.
-    // TODO: Between those, also call, in this order:
-    //   PhoenixUtil.refreshAll()                  (one batched CAN read for every mechanism)
-    //   CommandScheduler.getInstance().run()
-    //   RobotState.getInstance().logState()
-    //   FaultReporter.getInstance().periodic()    (done, M13 step 7; see below)
-    //   PowerBudget.getInstance().periodic()     (done, M14 step 3)
-    // TODO: Log loop duration under "LoopTimeMs" from Logger.getRealTimestamp() deltas, and
-    // Runtime.getRuntime().freeMemory() under "MemoryFreeMB". Loop-overrun evidence is the only way
-    // to settle "did we miss that shot because the code stalled".
+    // IMPLEMENTATION, M14 step 6 (was TODO: "Wrap the scheduler run in
+    // Threads.setCurrentThreadPriority(true, 99) before and Threads.setCurrentThreadPriority(false,
+    // 10) after ... Between those, also call, in this order: PhoenixUtil.refreshAll(),
+    // CommandScheduler.getInstance().run(), RobotState.getInstance().logState(),
+    // FaultReporter.getInstance().periodic(), PowerBudget.getInstance().periodic() ... Log loop
+    // duration under \"LoopTimeMs\" from Logger.getRealTimestamp() deltas, and
+    // Runtime.getRuntime().freeMemory() under \"MemoryFreeMB\".")
+    //
+    // Real-time priority for the whole loop body, as AdvantageKit's own template does, so the
+    // 250 Hz odometry thread is not starved by a long command loop -- and dropped again before the
+    // logger's own work between loops, which must not be.
+    Threads.setCurrentThreadPriority(true, 99);
+
     // Refresh every signal registered with the shared batch BEFORE the scheduler runs, so that
     // subsystem periodics all see measurements from the same instant. Without this call the
     // signals that IO layers registered -- currently the Pigeon2's pitch, roll and accelerometer --
@@ -110,18 +125,37 @@ public class Robot extends LoggedRobot {
 
     CommandScheduler.getInstance().run();
 
-    // Implemented in M13 step 7, ahead of the rest of the list above. FaultReporter only drives
-    // its alerts from periodic(), and nothing called it, so every fault registered with it was
-    // silent on the dashboard -- including M13's warnings for a missing path, a stale
-    // settings.json, and a robot placed off its auto's start, which the M13 checkpoint needs to
-    // see fire. After the scheduler, so it reads this loop's state.
+    // Per-source staleness and standard deviations, so a replay shows which source was driving the
+    // estimate at every instant.
+    RobotState.getInstance().logState();
+
+    // Implemented in M13 step 7, ahead of the rest of this list. FaultReporter only drives its
+    // alerts from periodic(), and nothing called it, so every fault registered with it was silent
+    // on the dashboard. After the scheduler, so it reads this loop's state.
     FaultReporter.getInstance().periodic();
 
     // M14 step 3. The subsystems read their current-limit scalars during the scheduler run above,
     // so they act on the previous loop's budget: 20 ms behind a battery whose filter is five times
     // slower than that, which is why the plan's order is kept.
     PowerBudget.getInstance().periodic();
+
+    // Wall-clock time between the starts of successive loops: the evidence that settles "did we
+    // miss that shot because the code stalled". The TODO named Logger.getRealTimestamp(), which
+    // AdvantageKit 26 does not have; its Logger.getTimestamp() is the LOG's time, which in replay
+    // is
+    // the recorded loop rather than this one. The FPGA clock is this machine's.
+    long nowMicros = RobotController.getFPGATime();
+    if (lastLoopStartMicros > 0) {
+      Logger.recordOutput("LoopTimeMs", (nowMicros - lastLoopStartMicros) / 1000.0);
+    }
+    lastLoopStartMicros = nowMicros;
+    Logger.recordOutput("MemoryFreeMB", Runtime.getRuntime().freeMemory() / 1.0e6);
+
+    Threads.setCurrentThreadPriority(false, 10);
   }
+
+  /** When the previous loop started, microseconds of real time; 0 before the first loop. */
+  private long lastLoopStartMicros = 0;
 
   /**
    * Starts the coast-release timer when the robot is disabled.
