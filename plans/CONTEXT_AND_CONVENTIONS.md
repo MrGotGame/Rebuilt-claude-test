@@ -209,7 +209,7 @@ hardware.
 | `feature-still-shot` | M11 | Branched off `feature-hopper` (no integration branch was needed: it already contains every other branch's code). Stationary shooting, **code complete in simulation**: the launch-speed table deleted (`5d339e2`), a table-free stationary shot at a hand-set speed behind a `SCORE_STATIONARY` override (`7bf4e59`, `eda005b`), `measureShotTablePoint` as a burst on the `/Tuning/ShotTable/Measure` toggle (`d740dd1`, `13ca471`), and `tools/fit_shot_table.py` (`1999b36`). Builds, 166 tests pass; mutation 109/110. **The checkpoint needs the robot**; the procedure is in `PROJECT_OVERVIEW.md`. M12 builds on this branch. |
 | `feature-sotm` | M12 | Branched off `feature-still-shot` (M11 blocks M12). Shooting on the move, **simulation checkpoint complete**: the M11 spin-up stutter fixed by saturating the flywheel projection (`31dc64e`), the turret feedforward's chassis sign pinned (`b9513fb`), **a double-counted robot velocity in the solver, there since M3 and from plan §6.2's table, found and fixed** (`337091a`), and the M12 checkpoint run in simulation as an orbit at 2 m/s where every released piece lands inside the gate's error budget (`77a48fb`). Builds, 171 tests pass; mutation 116/117. Hardware checkpoint outstanding, after M11's tables. **M13 builds on this branch, and so should the M11 practice field.** |
 | `feature-autos` | M13 | Branched off `feature-sotm`. Autonomous routines, **simulation checkpoint complete**: one `RobotConfig` with `settings.json` checked against it (`c69dcd8`), `AutoBuilder` configured and PathPlanner's alliance flip made to match ours (`82bea85`), missing paths and autos reported loudly (`bb49bb0`), the marker vocabulary with a scan of every deploy file (`8dca093`), leg-scoped building blocks (`e504249`), the eight routines and the checkpoint on both alliances (`12a15bc`, `5311e8a`), and the selector with its placement preview, plus `FaultReporter.periodic()` finally called (`d17b17c`). Builds, 241 tests pass; mutation 154/155. **No path is drawn yet**: the list is in `PROJECT_OVERVIEW.md`, and the real-field runs need the robot. |
-| `feature-comp_ready` | M14 | Branched off `feature-autos`. The code half of competition hardening, in the nine-step order in `PROJECT_OVERVIEW.md`. **In progress.** |
+| `feature-comp_ready` | M14 | Branched off `feature-autos`. The code half of competition hardening, **complete in simulation**: fault impact split from severity, one registry entry per name (`1305b6d`, `d629892`); every device registered by name, CAN ID and bus, with three blocking scoring (`9dc0df9`); `PowerBudget` (`d1f3115`); the coast release (`1617b95`, `913949a`); comp/practice identity (`7c49846`); the robot loop (`6a1184e`); tuning mode off and `docs/PIT_CHECKLIST.md` (`b5a7865`). Builds, 284 tests pass; mutation 179/180. **The competition build: tuning mode is off here**, so bring-up tunes on `feature-autos` and merges forward. The checkpoint needs the robot. |
 
 **M4's simulation checkpoint is complete**, including deliberate failures: zeroed gains drive the
 machine to `FAULTED` after `kSpinUpTimeoutSec`, a zero goal resolves to `IDLE` instead of faulting,
@@ -232,6 +232,9 @@ whole vision and shooting stack rests on that last one.
   follows one warns at boot and runs only its preload until the paths exist. `settings.json` is
   in an old format PathplannerLib 2026 cannot parse, and disagrees with `TunerConstants` anyway;
   re-save it from the GUI.
+- **Device faults are registered only on `feature-comp_ready` (M14).** On every earlier branch the
+  devices raise plain alerts and `FaultReporter.anyCritical()` sees nothing, so gate term 8 cannot
+  close for a dead flywheel there. The competition build is the one to run at an event.
 - Torque-current feedforward is not plumbed through `Drive.runVelocity(speeds, feedforwards)`;
   TunerConstants generates `DriveMotorClosedLoopOutput = Voltage`, so PathPlanner's amps would be
   wrong by roughly an order of magnitude. Documented at the call site.
@@ -257,22 +260,27 @@ whole vision and shooting stack rests on that last one.
    nothing to commit — acting on the old instruction would mean regenerating it again from Tuner X,
    which is a decision rather than a chore, and whoever reverted it may have had a reason worth
    knowing first.
-3. **Draw M13's paths.** Open `feature-autos` in the PathPlanner GUI, select the REBUILT field,
+3. **Decide two things M14 left open rather than decide in code.** Whether the superstructure
+   should refuse a flywheel spin-up while `PowerBudget.isBrownoutImminent()` (the plan's risk
+   register suggests it; it changes what the robot does mid-match), and whether an unknown roboRIO
+   should block scoring, as `feature-comp_ready` now does, or only warn. Also: the intake homing
+   direction (item 8 below) is still unanswered.
+4. **Draw M13's paths.** Open `feature-autos` in the PathPlanner GUI, select the REBUILT field,
    regenerate `navgrid.json`, save the drivetrain settings from `TunerConstants`, and draw the
    seventeen paths listed in `PROJECT_OVERVIEW.md`'s M13 record. Then run `Leave`, `Preload Only`
    and `Center 3` on the field, in §8.6's order.
-4. **Run M11 on the practice field.** The code is ready on `feature-still-shot`, and
+5. **Run M11 on the practice field.** The code is ready on `feature-still-shot`, and
    `PROJECT_OVERVIEW.md` has the procedure. The burst stutter recorded there is being fixed as M12
    step 1 on `feature-sotm`, which is done, so run the practice field from `feature-sotm`.
-5. **Review M10b on `feature-hopper`.** The hopper retrofit (plan §2.4) is complete in
+6. **Review M10b on `feature-hopper`.** The hopper retrofit (plan §2.4) is complete in
    simulation: no piece sensors, the intake rests deployed and rocks to feed, and intake and
    scoring run at once. `PROJECT_OVERVIEW.md` has the step-by-step record and a write-up. What is
    left needs the robot: the exact conflict-band edge from CAD, the rocking period, and the intake
    homing direction below. M11 (shot tables, measured in bursts) builds on `feature-hopper`, not
    on `feature-superstructure`; the single-piece branches stay as the record.
-6. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
+7. **Review and accept M4 and M5.** The flywheel is the template the other four copied, so its IO
    layer, FSM shape and logging should be read and agreed before anything is built on top.
-7. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done.
+8. **Hardware checkpoints**, which are now the only thing standing between M1–M5 and done.
    **`ROBOT_BRINGUP.md` is the ordered plan for all of them**: what to measure and test, in what
    order it is safe, and which branch each result is committed to (checked to merge forward with
    no conflicts). The short list:
@@ -292,14 +300,14 @@ whole vision and shooting stack rests on that last one.
      intake motion the intake/turret interlock does not guard. `Intake.faulted()`'s "the arm falls
      towards stow" comment rests on the same assumption. Raised during M10b and not yet answered:
      settle it before the intake is powered.
-8. **M6 characterization.** Several placeholder gains are visibly wrong in simulation: the intake
+9. **M6 characterization.** Several placeholder gains are visibly wrong in simulation: the intake
    pivot rings for about eight seconds before settling because `kPivotKg` and `kPivotKd` are both
    0.0; the turret rings about a 180-degree goal for about eight seconds (found by M10b's
    checkpoint, which has to wait it out); and the flywheel's `kV` under-predicts so `kP` is
    compensating for a feedforward error rather than doing its own job. Measure before tuning any
    of them.
-9. **The constants rename** (section 2), ideally as its own mechanical branch.
-10. **Integration branches**, merging `feature-drive` → `claude-test` first, then
+10. **The constants rename** (section 2), ideally as its own mechanical branch.
+11. **Integration branches**, merging `feature-drive` → `claude-test` first, then
    `feature-robot-state` (fast-forwards, being stacked on drive), then
    `feature-shooting-parameters`, then the M5 mechanisms, with `feature-flywheel` and
    `feature-turret` last — they carry the most byte-identical copied files, which collapse to no
