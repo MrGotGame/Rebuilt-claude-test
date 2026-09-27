@@ -1493,6 +1493,8 @@ public class Robot extends LoggedRobot {
     // RobotState.getInstance().logState(), FaultReporter.getInstance().periodic() and
     // PowerBudget.getInstance().periodic(). Log Logger.getRealTimestamp()-based loop duration under
     // "LoopTimeMs" and Runtime.getRuntime().freeMemory() under "MemoryFreeMB".
+    // (M14: AdvantageKit 26 has no Logger.getRealTimestamp(), and its getTimestamp() is the log's
+    // time. The loop time uses RobotController.getFPGATime().)
   }
 
   @Override
@@ -1843,6 +1845,14 @@ public class AllianceFlipUtil {
 
 #### `src/main/java/frc/robot/util/FaultReporter.java` — `package frc.robot.util;` [NEW]
 
+> **Corrected by M14.** As specified below, a fault's `AlertType` decided both how it is shown and
+> whether gate term 8 refuses to score, and every device disconnect was an error. That made an
+> unplugged intake roller stop the robot shooting, and contradicted §7's own degradation table. A
+> fault now also carries an `Impact`, `BLOCKS_SCORING` or `REPORT_ONLY`, and `anyCritical()` reads
+> that. Every device disconnect is an error on the dashboard; only the flywheel leader, the flywheel
+> follower and the turret motor block scoring. Registering a name again replaces the old entry, so
+> the registry holds one entry per device. `getBlockingFaultNames()` is logged as `Faults/Blocking`.
+
 A central registry of WPILib `Alert` objects so device health is discoverable in one place rather
 than scattered across seven subsystems. Subsystems register a named check with a `BooleanSupplier`
 ("is this Talon connected"), and the reporter polls them once per loop, drives the `Alert`, counts
@@ -1902,6 +1912,14 @@ public class FaultReporter {
 ---
 
 #### `src/main/java/frc/robot/util/PowerBudget.java` — `package frc.robot.util;` [NEW]
+
+> **Corrected by M14.** The single linear scalar below gives every tier the same cut. It became a
+> severity, from 0 at `kBrownoutWarningVolts` to 1 at `kBrownoutCriticalVolts`, with each tier
+> starting at its own point (LOW at once, MEDIUM a third of the way, HIGH two thirds; CRITICAL
+> never), so a lower tier always gives up at least as much as a higher one. The filter is written
+> out rather than `LinearFilter.singlePoleIIR`, which starts from zero and would boot every
+> mechanism throttled. The intake applies LOW to both its motors, not MEDIUM to the pivot, so
+> rocking is the first thing given up.
 
 Six Kraken X60s and two X44s can, momentarily, ask for far more current than a battery at 40 %
 state-of-charge can supply; the result is a roboRIO brownout mid-match, which drops every closed
@@ -6781,6 +6799,13 @@ somewhere else, it is a bug.
 
 ### 5.5 Comp vs. practice identity
 
+> **Corrected by M14.** `getRobot()` is implemented as described, and its unknown-serial error blocks
+> scoring. But per-robot values do not take the `switch`-in-the-initializer shape below: that
+> rewrites the constant's own line, and `plans/ROBOT_BRINGUP.md` tunes those lines on their
+> subsystems' branches and merges them forward, so every tuning merge would conflict. Instead each
+> constant keeps its line as the COMP value, the practice values live in `Constants.PracticeRobot`
+> at the end of the file, and the reader chooses through `Constants.forRobot(comp, practice)`.
+
 Two chassis with different encoder offsets, slightly different gearing wear and different gain
 sweet spots is the normal state of a team with a practice robot, and the classic failure is
 deploying practice offsets to the comp bot on Friday morning. `Constants.getRobot()` resolves the
@@ -7058,7 +7083,7 @@ practice field is not "is it ready" but "**which** term is false."
 | 5 | `RobotState.getVisionStalenessSec() < kMaxVisionStalenessSec` | 0.6 s | No tag seen recently. Odometry alone drifts; past ~0.6 s the pose is a dead-reckoning guess and the aim angle is a guess with it. |
 | 6 | `RobotState.getPoseStdDevEstimate() < kMaxPoseStdDevMeters` | 0.20 m | Pose is fresh but *uncertain* (single distant tag). At 5 m, 20 cm of lateral pose error is ~2.3° of aim error — roughly the whole error budget. |
 | 7 | `RobotState.getFieldRelativeAccel().getNorm() < kMaxChassisAccelForShotMetersPerSec2` | 3.0 m/s² | Hard acceleration, where the α = 0 first-order model is wrong (§6.3). |
-| 8 | `!FaultReporter.getInstance().anyCritical()` | — | A dead flywheel follower or a disconnected turret encoder. Better to not shoot than to shoot into a partner's robot. |
+| 8 | `!FaultReporter.getInstance().anyCritical()` | — | A dead flywheel follower or a disconnected turret encoder. Better to not shoot than to shoot into a partner's robot. **M14:** "critical" now means a fault registered as blocking scoring, not every error: the flywheel leader and follower, the turret motor, and an unknown roboRIO. |
 
 `SCORING_STATIONARY` adds one more term — chassis speed below a tunable — and `SCORING_FORCED` sets
 `ignoreShotTolerances`, which returns `true` unconditionally. The forced path still aims: it skips
@@ -7246,7 +7271,7 @@ down:
 | **QuestNav untrusted** (any of: `!connected`, `!tracking`, `batteryPercent < kQuestMinBatteryPercent` (15 %), `trackingLostCounter` increased this loop, `!questSeeded`, sustained residual over threshold) | `RobotState.setQuestTrusted(false)`; Quest observations stop entering the estimator entirely — they are **not** down-weighted, they are dropped. A `warning` Alert fires. | MegaTag2 + odometry. Shooting still works, with a shorter tolerable gap between tag sightings. |
 | **One Limelight disconnected** | `error` Alert; the other camera carries on. `getVisionStalenessSec()` naturally rises, and gate 5 of §6.5 starts blocking shots when the remaining camera also loses sight. | Driving, intaking, auto. Shooting works whenever the surviving camera sees tags. |
 | **Both Limelights out of tags** (occluded by a defender) | Estimator coasts on odometry + QuestNav if trusted. If the Quest is trusted, accuracy holds for tens of seconds; if not, staleness crosses `kMaxVisionStalenessSec` (0.6 s) and `readyToScore` blocks. | Driving and intaking are unaffected. Shooting is blocked — correctly. The operator's force-shoot override exists for exactly this case when the drive team can see the shot is fine. |
-| **Both Limelights disconnected** (hardware/power) | Two `error` Alerts, `anyCritical()` true, `readyToScore` term 8 false. | Driving and intaking. The `preloadOnly` auto (§4.12) is the routine that still works, because it depends on odometry alone. |
+| **Both Limelights disconnected** (hardware/power) | Two `error` Alerts. **M14:** they no longer make `anyCritical()` true; with no camera, terms 5 and 6 (staleness, confidence) refuse the shot on their own. | Driving and intaking. The `preloadOnly` auto (§4.12) is the routine that still works, because it depends on odometry alone. |
 | **Quest battery critical** | Warning alert at 15 %. | Plan for it: the Quest should be on a powered USB-C feed from the robot, and the 15 % threshold is a *last* warning, not the primary defense. |
 
 **One rule above all of these:** a degraded source is dropped, never blended in weakly. A source
@@ -7861,7 +7886,10 @@ dashboard, within one second. Run a full 2:30 match in practice and confirm the 
 above `kBrownoutWarningVolts`. **Combined-mode run (§2.4):** drive a figure-eight while intaking
 and firing continuously for 20 s. Confirm from `Power/FilteredVoltage` that no brownout occurs,
 that the `LOW` scalar (intake, floor roller) is the first to drop, and that FEED_ASSIST oscillation
-is suppressed while it does.
+is suppressed while it does. (M14 wrote the code on `feature-comp_ready` and ran the simulation
+halves as tests: `DeviceFaultTest` unplugs each of 23 devices alone, and `PowerBudgetTest` sags the
+simulated battery until the intake stops rocking. The hardware checkpoint is `ROBOT_BRINGUP.md`
+Phase 8.)
 
 ---
 
