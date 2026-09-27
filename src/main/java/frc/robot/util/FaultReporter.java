@@ -19,20 +19,47 @@ import org.littletonrobotics.junction.Logger;
  *
  * <p>The concrete competitive value: a CANcoder that browns out between matches shows up on the
  * dashboard while the robot is still in the queue line, rather than at the first shot.
+ *
+ * <p>M14 step 1 separated two things the first version fused. A fault's {@link AlertType} is how
+ * LOUD it is on the dashboard; its {@link Impact} is whether it stops the robot scoring, which is
+ * what readiness-gate term 8 reads through {@link #anyCritical()}. Every disconnected device is a
+ * red error, but only a device whose failure makes a shot unsafe -- a dead flywheel follower, a
+ * turret that does not know where it points -- closes the gate. The plan had wanted both: term 8's
+ * row blocks scoring on "a dead flywheel follower or a disconnected turret encoder", while its
+ * degradation table lets the robot keep shooting with one Limelight down.
+ *
+ * <p>It also holds ONE entry per name. Registering a name that is already registered replaces the
+ * old entry and closes its alert. On the robot each device registers once and nothing changes;
+ * under test, where hundreds of robots are built in one process, some on dead hardware on purpose,
+ * it is what stops one case's dead turret from blocking scoring in every case after it.
  */
 public class FaultReporter {
+  /** Whether an active fault stops the robot scoring. */
+  public enum Impact {
+    /** Readiness-gate term 8 refuses to score while this fault is active. */
+    BLOCKS_SCORING,
+    /** Shown on the dashboard and logged, but the robot keeps scoring. */
+    REPORT_ONLY
+  }
+
   /**
    * One registered health check.
    *
    * @param name human-readable fault name, shown on the dashboard
    * @param isFaulted returns true while the fault condition holds
    * @param alert the backing WPILib alert
-   * @param type severity, used by {@link #anyCritical()}
+   * @param type how loudly it is shown
+   * @param impact whether it blocks scoring, which is what {@link #anyCritical()} reads
    * @param activeSince single-element mutable box holding the FPGA timestamp the fault began, or
    *     NaN while healthy
    */
   private record Fault(
-      String name, BooleanSupplier isFaulted, Alert alert, AlertType type, double[] activeSince) {}
+      String name,
+      BooleanSupplier isFaulted,
+      Alert alert,
+      AlertType type,
+      Impact impact,
+      double[] activeSince) {}
 
   private static FaultReporter instance = null;
   private final List<Fault> faults = new ArrayList<>();
@@ -64,18 +91,51 @@ public class FaultReporter {
    *
    * <p>Call this from a subsystem constructor, once per device.
    *
+   * <p>Kept from before M14 with its meaning: an error blocks scoring and anything quieter does
+   * not. Use {@link #register(String, AlertType, Impact, BooleanSupplier)} to say otherwise.
+   *
    * @param name human-readable fault name, for example {@code "Turret motor disconnected"}
-   * @param type severity; {@code kError} faults participate in {@link #anyCritical()}
+   * @param type severity; a {@code kError} fault also blocks scoring
    * @param isFaulted returns true while the fault condition holds
-   *     <p><b>Outputs:</b> appends a new {@link Fault} to the registry.
+   *     <p><b>Outputs:</b> registers the fault, replacing any fault of the same name.
    */
   public void register(String name, AlertType type, BooleanSupplier isFaulted) {
+    register(
+        name,
+        type,
+        type == AlertType.kError ? Impact.BLOCKS_SCORING : Impact.REPORT_ONLY,
+        isFaulted);
+  }
+
+  /**
+   * Registers a health check with an explicit effect on scoring.
+   *
+   * <p>Added for M14 step 1.
+   *
+   * @param name human-readable fault name; registering a name again replaces the old entry
+   * @param type how loudly it is shown
+   * @param impact whether it blocks scoring while active
+   * @param isFaulted returns true while the fault condition holds
+   *     <p><b>Outputs:</b> closes the alert of any fault of the same name and registers this one.
+   */
+  public void register(String name, AlertType type, Impact impact, BooleanSupplier isFaulted) {
     // IMPLEMENTATION (was TODO: "Create a new Alert(name, type) and append a Fault record with
     // a fresh new double[] {Double.NaN} as the activeSince box.")
     //
     // The supplier is stored and polled, never sampled here. A fault registered with a boolean
     // would report whatever was true at construction time for the rest of the match.
-    faults.add(new Fault(name, isFaulted, new Alert(name, type), type, new double[] {Double.NaN}));
+    //
+    // M14: replace, never duplicate. See the class comment for why.
+    faults.removeIf(
+        fault -> {
+          if (fault.name().equals(name)) {
+            fault.alert().close();
+            return true;
+          }
+          return false;
+        });
+    faults.add(
+        new Fault(name, isFaulted, new Alert(name, type), type, impact, new double[] {Double.NaN}));
   }
 
   /**
@@ -83,10 +143,27 @@ public class FaultReporter {
    *
    * @param deviceName device name; {@code " disconnected"} is appended to form the alert text
    * @param connected returns true while the device is connected
-   *     <p><b>Outputs:</b> registers a {@code kError} fault that fires when {@code connected} is
-   *     false.
+   *     <p><b>Outputs:</b> registers a {@code kError} fault, blocking scoring, that fires when
+   *     {@code connected} is false.
    */
   public void registerDeviceDisconnect(String deviceName, BooleanSupplier connected) {
+    registerDeviceDisconnect(deviceName, Impact.BLOCKS_SCORING, connected);
+  }
+
+  /**
+   * Registers a device's connection flag, as an error, with an explicit effect on scoring.
+   *
+   * <p>Added for M14 step 1. Every device disconnect is an ERROR on the dashboard -- red, because
+   * something is unplugged -- but only the ones whose loss makes a shot unsafe block scoring.
+   *
+   * @param deviceName device name, ideally with its CAN ID and bus; {@code " disconnected"} is
+   *     appended
+   * @param impact whether its loss blocks scoring
+   * @param connected returns true while the device is connected
+   *     <p><b>Outputs:</b> registers the fault, replacing any of the same name.
+   */
+  public void registerDeviceDisconnect(
+      String deviceName, Impact impact, BooleanSupplier connected) {
     // IMPLEMENTATION (was TODO: "register(deviceName + \" disconnected\", AlertType.kError,
     // () -> !connected.getAsBoolean()).")
     //
@@ -94,7 +171,8 @@ public class FaultReporter {
     // publishes, while a Fault holds a "faulted" predicate. Doing the negation here, once, is what
     // stops every caller from having to remember which polarity this class wants -- and a polarity
     // mistake is silent, because an alert that never fires looks exactly like healthy hardware.
-    register(deviceName + " disconnected", AlertType.kError, () -> !connected.getAsBoolean());
+    register(
+        deviceName + " disconnected", AlertType.kError, impact, () -> !connected.getAsBoolean());
   }
 
   /**
@@ -132,20 +210,25 @@ public class FaultReporter {
       Logger.recordOutput("Faults/" + fault.name(), active);
       if (active) {
         activeCount++;
-        anyCriticalActive |= fault.type() == AlertType.kError;
+        anyCriticalActive |= fault.impact() == Impact.BLOCKS_SCORING;
       }
     }
     Logger.recordOutput("Faults/AnyCritical", anyCriticalActive);
+    Logger.recordOutput("Faults/Blocking", getBlockingFaultNames().toArray(new String[0]));
     Logger.recordOutput("Faults/Count", activeCount);
   }
 
   /**
-   * Reports whether any error-severity fault is currently active.
+   * Reports whether any fault that blocks scoring is currently active.
    *
    * <p>The superstructure uses this to refuse to enter scoring states when a shooter motor is dead,
    * rather than spinning up against a mechanism that cannot respond.
    *
-   * @return true if at least one registered {@code kError} fault is active right now
+   * <p>Since M14 step 1 this reads each fault's {@link Impact}, not its alert type. A fault
+   * registered through {@link #register(String, AlertType, BooleanSupplier)} as an error still
+   * blocks, so the meaning is unchanged for every caller that existed before.
+   *
+   * @return true if at least one registered fault that blocks scoring is active right now
    */
   public boolean anyCritical() {
     // IMPLEMENTATION (was TODO: "Stream the registry for type == AlertType.kError &&
@@ -160,7 +243,8 @@ public class FaultReporter {
     // subsystem raises its device alerts as plain WPILib Alerts and says at the field declaration
     // that it will move to registerDeviceDisconnect once this class exists. It now does.
     return faults.stream()
-        .anyMatch(fault -> fault.type() == AlertType.kError && fault.isFaulted().getAsBoolean());
+        .anyMatch(
+            fault -> fault.impact() == Impact.BLOCKS_SCORING && fault.isFaulted().getAsBoolean());
   }
 
   /**
@@ -169,8 +253,30 @@ public class FaultReporter {
    * @return names of all active faults; empty when everything is healthy
    */
   public List<String> getActiveFaultNames() {
+    return activeNames(false);
+  }
+
+  /**
+   * Lists the active faults that block scoring: the answer to "why won't it shoot".
+   *
+   * <p>Added for M14 step 1, and logged as {@code Faults/Blocking} every loop.
+   *
+   * @return names of the active faults whose impact is {@link Impact#BLOCKS_SCORING}
+   */
+  public List<String> getBlockingFaultNames() {
+    return activeNames(true);
+  }
+
+  /**
+   * The active faults' names.
+   *
+   * @param blockingOnly true to list only faults that block scoring
+   * @return the names, in registration order
+   */
+  private List<String> activeNames(boolean blockingOnly) {
     // IMPLEMENTATION (was TODO: "Filter the registry on isFaulted and map to name.")
     return faults.stream()
+        .filter(fault -> !blockingOnly || fault.impact() == Impact.BLOCKS_SCORING)
         .filter(fault -> fault.isFaulted().getAsBoolean())
         .map(Fault::name)
         .toList();
