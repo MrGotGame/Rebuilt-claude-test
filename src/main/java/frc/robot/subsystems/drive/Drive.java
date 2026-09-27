@@ -26,8 +26,6 @@ import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.math.kinematics.SwerveModuleState;
 import edu.wpi.first.math.system.plant.DCMotor;
-import edu.wpi.first.wpilibj.Alert;
-import edu.wpi.first.wpilibj.Alert.AlertType;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
@@ -37,6 +35,7 @@ import frc.robot.Constants;
 import frc.robot.Constants.Mode;
 import frc.robot.RobotState;
 import frc.robot.generated.TunerConstants;
+import frc.robot.util.FaultReporter;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import org.littletonrobotics.junction.AutoLogOutput;
@@ -94,8 +93,6 @@ public class Drive extends SubsystemBase {
   private final GyroIOInputsAutoLogged gyroInputs = new GyroIOInputsAutoLogged();
   private final Module[] modules = new Module[4]; // FL, FR, BL, BR
   private final SysIdRoutine sysId;
-  private final Alert gyroDisconnectedAlert =
-      new Alert("Disconnected gyro, using kinematics as fallback.", AlertType.kError);
 
   private SwerveDriveKinematics kinematics = new SwerveDriveKinematics(getModuleTranslations());
   private Rotation2d rawGyroRotation = Rotation2d.kZero;
@@ -141,6 +138,18 @@ public class Drive extends SubsystemBase {
 
     // Start odometry thread
     PhoenixOdometryThread.getInstance().start();
+
+    // M14 step 2: the template's plain gyro alert, registered with FaultReporter instead. Not in
+    // simulation, where there is no gyro and odometry integrates the modules. An error that does
+    // not block scoring: the drivetrain falls back to kinematic heading and keeps driving.
+    FaultReporter.getInstance()
+        .registerDeviceDisconnect(
+            FaultReporter.canDevice(
+                "Pigeon2 gyro",
+                TunerConstants.DrivetrainConstants.Pigeon2Id,
+                TunerConstants.kCANBus.getName()),
+            FaultReporter.Impact.REPORT_ONLY,
+            () -> gyroInputs.connected || Constants.currentMode == Mode.SIM);
 
     // [TIER-3 MIGRATION DONE] The AutoBuilder.configure block that the template had here has been
     // moved to frc.robot.autos.AutoFactory, which wires the pose supplier to RobotState rather than
@@ -249,7 +258,7 @@ public class Drive extends SubsystemBase {
         .addDriveSpeedsObservation(Timer.getFPGATimestamp(), getChassisSpeeds());
 
     // Update gyro alert
-    gyroDisconnectedAlert.set(!gyroInputs.connected && Constants.currentMode != Mode.SIM);
+
   }
 
   /**

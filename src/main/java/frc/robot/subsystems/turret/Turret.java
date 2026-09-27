@@ -11,6 +11,7 @@ import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.Constants;
 import frc.robot.RobotState;
 import frc.robot.shooting.TurretUnwrapper;
+import frc.robot.util.FaultReporter;
 import frc.robot.util.LoggedTunableNumber;
 import frc.robot.util.PowerBudget;
 import java.util.function.BooleanSupplier;
@@ -77,30 +78,7 @@ public class Turret extends SubsystemBase {
   private final TurretIOInputsAutoLogged inputs = new TurretIOInputsAutoLogged();
   private final Timer stateTimer = new Timer();
 
-  /**
-   * Disconnect and fault alerts.
-   *
-   * <p>These are plain WPILib {@link Alert}s rather than {@code FaultReporter} registrations,
-   * following the precedent already set in {@code PhoenixUtil.tryUntilOk}, {@code Shooter} and
-   * {@code FloorRoller}: {@code FaultReporter} is still a skeleton whose {@code getInstance()}
-   * returns null, so registering with it in this constructor would throw. Swap all four for {@code
-   * FaultReporter.getInstance().registerDeviceDisconnect(...)} once that class exists; the alert
-   * text is already written to match what it would produce.
-   */
-  private final Alert motorDisconnectedAlert =
-      new Alert("Turret motor disconnected", AlertType.kError);
-
-  /**
-   * A warning rather than an error, because the turret survives losing this encoder.
-   *
-   * <p>Homing falls back to driving into a hard stop, which works but is slow and puts a load on
-   * the mechanism, and the position is only as good as that one stop. Worth knowing about before a
-   * match; not worth telling the drive team the robot is broken.
-   */
-  private final Alert absEncoderDisconnectedAlert =
-      new Alert(
-          "Turret absolute encoder disconnected -- homing will fall back to finding a hard stop",
-          AlertType.kWarning);
+  /** Fires when homing gave up. The device faults are registered: see registerDeviceFaults(). */
 
   /** Fires when homing gave up. See {@link SystemState#FAULTED}. */
   private final Alert homingFailedAlert =
@@ -195,8 +173,9 @@ public class Turret extends SubsystemBase {
     // and absEncoderConnected, and push the initial soft limits with io.setSoftLimits(
     // kMinAngleRad.get() + kLimitMarginRad.get(), kMaxAngleRad.get() - kLimitMarginRad.get()).")
     //
-    // The four checks exist, as the Alert fields above; they are driven from periodic() rather than
-    // registered, because FaultReporter is not implemented yet. See the field documentation.
+    // The two device checks are registered with FaultReporter since M14 step 2; see
+    // registerDeviceFaults(). The two state alerts below stay plain alerts.
+    registerDeviceFaults();
     //
     // The timer is started, not restarted, and here rather than on the first loop, so that
     // Turret/StateTime is a real number from the very first log frame.
@@ -231,6 +210,34 @@ public class Turret extends SubsystemBase {
     // instead of a snapshot taken whenever somebody last remembered to push one. An interlock built
     // on a pushed value fails silently the first time a code path forgets to push.
     this.intakeArcBlocked = blocked;
+  }
+
+  /**
+   * Registers the turret's two devices with the fault reporter.
+   *
+   * <p>Added for M14 step 2, replacing plain alerts that waited on the reporter to exist.
+   *
+   * <p>The motor BLOCKS scoring. It carries the position the turret aims by, so without it every
+   * shot goes where the turret happens to point: readiness-gate term 8's own example is "a
+   * disconnected turret encoder -- better to not shoot than to shoot into a partner's robot".
+   *
+   * <p>The absolute encoder is a WARNING that does not. The turret survives losing it: homing falls
+   * back to driving into a hard stop, which is slow and loads the mechanism, and after that the
+   * motor's own encoder carries the position. Worth knowing before a match; not a broken robot.
+   *
+   * <p><b>Outputs:</b> two fault registrations, replacing any of the same names.
+   */
+  private void registerDeviceFaults() {
+    FaultReporter reporter = FaultReporter.getInstance();
+    reporter.registerDeviceDisconnect(
+        FaultReporter.canDevice("Turret motor", Constants.Can.kTurretId, Constants.Can.kRioBus),
+        FaultReporter.Impact.BLOCKS_SCORING,
+        () -> inputs.motorConnected);
+    reporter.register(
+        "Turret absolute encoder disconnected -- homing will fall back to finding a hard stop",
+        AlertType.kWarning,
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> !inputs.absEncoderConnected);
   }
 
   /**
@@ -358,8 +365,6 @@ public class Turret extends SubsystemBase {
     Logger.recordOutput("Turret/OutOfRangeReason", outOfRangeReason.toString());
     Logger.recordOutput("Turret/OutOfRangeEvents", outOfRangeEventCount);
 
-    motorDisconnectedAlert.set(!inputs.motorConnected);
-    absEncoderDisconnectedAlert.set(!inputs.absEncoderConnected);
     homingFailedAlert.set(systemState == SystemState.FAULTED);
   }
 

@@ -10,7 +10,6 @@ package frc.robot.util;
 import com.ctre.phoenix6.BaseStatusSignal;
 import com.ctre.phoenix6.StatusCode;
 import com.ctre.phoenix6.hardware.ParentDevice;
-import edu.wpi.first.wpilibj.Alert;
 import edu.wpi.first.wpilibj.Alert.AlertType;
 import java.util.ArrayList;
 import java.util.List;
@@ -32,15 +31,24 @@ public class PhoenixUtil {
   private static BaseStatusSignal[] signalArray = new BaseStatusSignal[0];
 
   /**
-   * Fires when a Phoenix configuration never applied after every retry.
+   * Whether any Phoenix configuration never applied after every retry.
    *
    * <p>A configuration that silently failed is how a robot ends up running with default PID gains
-   * and nobody knowing why it behaves oddly, so this is surfaced as a driver-station error rather
-   * than only a log line.
+   * and nobody knowing why it behaves oddly. Registered with {@code FaultReporter} since M14 step 2
+   * (it was a plain alert, waiting on the reporter to exist), as an error that does not block
+   * scoring: the call carries no device, so it cannot say which mechanism is affected, and a device
+   * that is actually dead blocks through its own disconnect check.
    */
-  private static final Alert configFailedAlert =
-      new Alert(
-          "A Phoenix device configuration failed to apply. Check CAN wiring.", AlertType.kError);
+  private static boolean configFailed = false;
+
+  static {
+    FaultReporter.getInstance()
+        .register(
+            "A Phoenix device configuration failed to apply; see Phoenix/LastConfigFailure",
+            AlertType.kError,
+            FaultReporter.Impact.REPORT_ONLY,
+            () -> configFailed);
+  }
 
   private PhoenixUtil() {}
 
@@ -71,7 +79,7 @@ public class PhoenixUtil {
     }
 
     // Every attempt failed. Make it loud.
-    configFailedAlert.set(true);
+    configFailed = true;
     Logger.recordOutput("Phoenix/LastConfigFailure", lastError.toString());
   }
 

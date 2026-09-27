@@ -8,6 +8,7 @@ import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.Constants;
+import frc.robot.util.FaultReporter;
 import frc.robot.util.LoggedTunableNumber;
 import frc.robot.util.PowerBudget;
 import org.littletonrobotics.junction.AutoLogOutput;
@@ -59,18 +60,6 @@ public class Indexer extends SubsystemBase {
    */
   private final Alert jammedAlert =
       new Alert("Indexer jammed and could not clear it; EJECT to clear", AlertType.kWarning);
-
-  /**
-   * Disconnect alert for the indexer motor.
-   *
-   * <p>A plain WPILib {@link Alert} rather than a {@code FaultReporter} registration, following the
-   * precedent set in {@code PhoenixUtil.tryUntilOk}, {@code Shooter} and {@code FloorRoller}:
-   * {@code FaultReporter} is still a skeleton whose {@code getInstance()} returns null, so
-   * registering with it here would throw in this constructor. Swap it for {@code
-   * FaultReporter.getInstance().registerDeviceDisconnect(...)} once that class is implemented; the
-   * alert text is already written to match what it would produce.
-   */
-  private final Alert disconnectedAlert = new Alert("Indexer motor disconnected", AlertType.kError);
 
   private WantedState wantedState = WantedState.IDLE;
   private SystemState systemState = SystemState.IDLE;
@@ -126,10 +115,16 @@ public class Indexer extends SubsystemBase {
     // IMPLEMENTATION (was TODO: "Start stateTimer, and register FaultReporter checks for the motor
     // and -- only when Constants.Indexer.kHasBeamBreak -- the beam break.")
     //
-    // The motor check exists, as the Alert field above; it is driven from periodic() rather than
-    // registered, because FaultReporter is not implemented yet. See the field documentation. The
+    // The motor check is registered with FaultReporter since M14 step 2: an error on the dashboard
+    // that does not block scoring, because a dead indexer cannot feed a piece to shoot anyway. The
     // beam-break check went with the beam break itself in M10b step 8: the robot has no piece
     // sensor (plan section 2.4).
+    FaultReporter.getInstance()
+        .registerDeviceDisconnect(
+            FaultReporter.canDevice(
+                "Indexer motor", Constants.Can.kIndexerId, Constants.Can.kRioBus),
+            FaultReporter.Impact.REPORT_ONLY,
+            () -> inputs.connected);
     //
     // The timer is started, not restarted, and it is started here rather than on the first loop so
     // that Indexer/StateTime is a real number from the very first log frame instead of reading zero
@@ -220,7 +215,6 @@ public class Indexer extends SubsystemBase {
     Logger.recordOutput("Indexer/UnjamAttempts", unjamAttempts);
     Logger.recordOutput("Indexer/JamDetected", jamDetected);
 
-    disconnectedAlert.set(!inputs.connected);
     jammedAlert.set(systemState == SystemState.JAMMED);
   }
 

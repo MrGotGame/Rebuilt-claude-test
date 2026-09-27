@@ -160,6 +160,21 @@ public class FaultReporter {
   }
 
   /**
+   * The name a CAN device is registered under: what it is, its ID, and its bus.
+   *
+   * <p>Added for M14 step 2. The M14 checkpoint is "unplug any single CAN device and the robot
+   * tells you which one, by name". A description alone does not find the plug; the ID and bus do.
+   *
+   * @param description what the device is, for example {@code "Turret motor"}
+   * @param canId its CAN ID
+   * @param bus the CAN bus it is on
+   * @return for example {@code "Turret motor (CAN 24, rio)"}
+   */
+  public static String canDevice(String description, int canId, String bus) {
+    return description + " (CAN " + canId + ", " + bus + ")";
+  }
+
+  /**
    * Registers a device's connection flag, as an error, with an explicit effect on scoring.
    *
    * <p>Added for M14 step 1. Every device disconnect is an ERROR on the dashboard -- red, because

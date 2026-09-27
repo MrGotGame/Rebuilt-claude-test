@@ -1,12 +1,11 @@
 package frc.robot.subsystems.floorroller;
 
 import com.ctre.phoenix6.configs.Slot0Configs;
-import edu.wpi.first.wpilibj.Alert;
-import edu.wpi.first.wpilibj.Alert.AlertType;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.Constants;
+import frc.robot.util.FaultReporter;
 import frc.robot.util.LoggedTunableNumber;
 import frc.robot.util.PowerBudget;
 import org.littletonrobotics.junction.AutoLogOutput;
@@ -39,24 +38,6 @@ public class FloorRoller extends SubsystemBase {
   private final FloorRollerIOInputsAutoLogged inputs = new FloorRollerIOInputsAutoLogged();
   private final Timer stateTimer = new Timer();
 
-  /**
-   * Disconnect alert for the single roller motor.
-   *
-   * <p>A plain WPILib {@link Alert} rather than a {@code FaultReporter} registration, following the
-   * precedent set in {@code PhoenixUtil.tryUntilOk} and {@code Shooter}: {@code FaultReporter} is
-   * still a skeleton whose {@code getInstance()} returns null, so registering with it here would
-   * throw in this constructor. Swap it for {@code
-   * FaultReporter.getInstance().registerDeviceDisconnect(...)} once that class is implemented; the
-   * alert text is already written to match what it would produce.
-   *
-   * <p>It is worth having even though a dead floor roller is fairly obvious from the driver's seat:
-   * the failure it actually catches is the roller that was unplugged in the pit and never plugged
-   * back in, which otherwise presents at the start of a match as "the intake stopped working" and
-   * sends people looking at the wrong mechanism.
-   */
-  private final Alert disconnectedAlert =
-      new Alert("Floor roller motor disconnected", AlertType.kError);
-
   private WantedState wantedState = WantedState.IDLE;
   private SystemState systemState = SystemState.IDLE;
   private double characterizationVolts = 0.0;
@@ -81,8 +62,16 @@ public class FloorRoller extends SubsystemBase {
     // IMPLEMENTATION (was TODO: "Start stateTimer and register a FaultReporter disconnect check on
     // inputs.connected.")
     //
-    // The disconnect check exists, as the Alert field above; it is driven from periodic() rather
-    // than registered, because FaultReporter is not implemented yet. See the field documentation.
+    // Registered with FaultReporter since M14 step 2. Worth having even though a dead floor roller
+    // is fairly obvious from the driver's seat: what it catches is the roller unplugged in the pit
+    // and never plugged back in, which otherwise presents as "the intake stopped working" and sends
+    // people to the wrong mechanism. An error that does not block scoring.
+    FaultReporter.getInstance()
+        .registerDeviceDisconnect(
+            FaultReporter.canDevice(
+                "Floor roller motor", Constants.Can.kFloorRollerId, Constants.Can.kRioBus),
+            FaultReporter.Impact.REPORT_ONLY,
+            () -> inputs.connected);
     //
     // The timer is started, not restarted, and it is started here rather than on the first loop so
     // that FloorRoller/StateTime is a real number from the very first log frame instead of reading
@@ -164,8 +153,6 @@ public class FloorRoller extends SubsystemBase {
     // in a post-match review is a roller that never reaches its goal while carrying a piece -- and
     // that shows up as a persistent offset here long before anybody notices pickups getting slower.
     Logger.recordOutput("FloorRoller/ErrorRpm", goalRpm - inputs.velocityRpm);
-
-    disconnectedAlert.set(!inputs.connected);
   }
 
   /**

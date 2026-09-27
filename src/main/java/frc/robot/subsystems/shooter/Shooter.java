@@ -9,6 +9,7 @@ import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.Constants;
+import frc.robot.util.FaultReporter;
 import frc.robot.util.LoggedTunableNumber;
 import frc.robot.util.PowerBudget;
 import org.littletonrobotics.junction.AutoLogOutput;
@@ -57,27 +58,6 @@ public class Shooter extends SubsystemBase {
   private final Timer stateTimer = new Timer();
   private final LinearFilter accelFilter = LinearFilter.movingAverage(5);
 
-  /**
-   * Disconnect alerts, one per motor.
-   *
-   * <p>These are plain WPILib {@link Alert}s rather than {@code FaultReporter} registrations,
-   * following the precedent already set in {@code PhoenixUtil.tryUntilOk}: {@code FaultReporter} is
-   * still a skeleton whose {@code getInstance()} returns null, so registering with it here would
-   * throw in the {@code Shooter} constructor. Swap both of these for {@code
-   * FaultReporter.getInstance().registerDeviceDisconnect(...)} once that class is implemented; the
-   * alert text is already written to match what it would produce.
-   *
-   * <p>They are separate on purpose, for the reason {@link ShooterIO} logs both motors separately:
-   * a lost follower and a lost leader are different failures. A dead leader stops the robot
-   * shooting, which is obvious. A dead follower leaves the robot shooting weakly at half the torque
-   * while the leader quietly draws double current, which is not.
-   */
-  private final Alert leaderDisconnectedAlert =
-      new Alert("Shooter leader motor disconnected", AlertType.kError);
-
-  private final Alert followerDisconnectedAlert =
-      new Alert("Shooter follower motor disconnected", AlertType.kError);
-
   /** Fires when the flywheel gave up trying to reach its goal. See {@link SystemState#FAULTED}. */
   private final Alert spinUpFailedAlert =
       new Alert(
@@ -115,10 +95,38 @@ public class Shooter extends SubsystemBase {
     // motors separately -- leaderConnected and followerConnected are independent failures with very
     // different symptoms.")
     //
-    // The two checks exist, as the Alert fields above; they are driven from periodic() rather than
-    // registered, because FaultReporter is not implemented yet. See the field documentation.
+    // Registered with FaultReporter since M14 step 2; see registerDeviceFaults().
     this.io = io;
+    registerDeviceFaults();
     stateTimer.start();
+  }
+
+  /**
+   * Registers both flywheel motors with the fault reporter, separately.
+   *
+   * <p>Added for M14 step 2, replacing plain alerts that waited on the reporter to exist. Separate,
+   * for the reason {@link ShooterIO} logs both motors separately: a dead leader stops the robot
+   * shooting, which is obvious, while a dead follower leaves it shooting weakly at half the torque
+   * while the leader quietly draws double current, which is not.
+   *
+   * <p>Both BLOCK scoring. Readiness-gate term 8's own example is "a dead flywheel follower": a
+   * wheel short of torque sags under every piece, and the shots fall short into whatever is in
+   * front of the goal.
+   *
+   * <p><b>Outputs:</b> two fault registrations, replacing any of the same names.
+   */
+  private void registerDeviceFaults() {
+    FaultReporter reporter = FaultReporter.getInstance();
+    reporter.registerDeviceDisconnect(
+        FaultReporter.canDevice(
+            "Flywheel leader motor", Constants.Can.kFlywheelLeaderId, Constants.Can.kRioBus),
+        FaultReporter.Impact.BLOCKS_SCORING,
+        () -> inputs.leaderConnected);
+    reporter.registerDeviceDisconnect(
+        FaultReporter.canDevice(
+            "Flywheel follower motor", Constants.Can.kFlywheelFollowerId, Constants.Can.kRioBus),
+        FaultReporter.Impact.BLOCKS_SCORING,
+        () -> inputs.followerConnected);
   }
 
   /**
@@ -212,8 +220,6 @@ public class Shooter extends SubsystemBase {
         "Shooter/TotalStatorCurrentAmps",
         inputs.leaderStatorCurrentAmps + inputs.followerStatorCurrentAmps);
 
-    leaderDisconnectedAlert.set(!inputs.leaderConnected);
-    followerDisconnectedAlert.set(!inputs.followerConnected);
     spinUpFailedAlert.set(systemState == SystemState.FAULTED);
   }
 

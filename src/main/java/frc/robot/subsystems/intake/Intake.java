@@ -7,6 +7,7 @@ import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.Constants;
+import frc.robot.util.FaultReporter;
 import frc.robot.util.LoggedTunableNumber;
 import frc.robot.util.PowerBudget;
 import java.util.function.BooleanSupplier;
@@ -119,30 +120,6 @@ public class Intake extends SubsystemBase {
   private final Timer stateTimer = new Timer();
   private final Timer homingSettleTimer = new Timer();
 
-  /**
-   * Device health alerts, one per device.
-   *
-   * <p>These are plain WPILib {@link Alert}s rather than {@code FaultReporter} registrations,
-   * following the precedent set in {@code PhoenixUtil.tryUntilOk} and {@code Shooter}: {@code
-   * FaultReporter} is still a skeleton whose {@code getInstance()} returns null, so registering
-   * here would throw in this constructor. Swap all three for {@code
-   * FaultReporter.getInstance().registerDeviceDisconnect(...)} once that class is implemented; the
-   * alert text is already written to match what it would produce.
-   *
-   * <p>They are separate on purpose. A dead pivot motor stops the intake moving, which is obvious.
-   * A dead absolute encoder is not obvious at all: the mechanism still works, because homing falls
-   * back to the hard stop, and the only symptom is that the pivot re-homes on every boot instead of
-   * knowing where it already is.
-   */
-  private final Alert pivotDisconnectedAlert =
-      new Alert("Intake pivot motor disconnected", AlertType.kError);
-
-  private final Alert rollerDisconnectedAlert =
-      new Alert("Intake roller motor disconnected", AlertType.kError);
-
-  private final Alert absEncoderDisconnectedAlert =
-      new Alert("Intake pivot absolute encoder disconnected", AlertType.kError);
-
   /** Fires while the machine has given up on the pivot. See {@link SystemState#FAULTED}. */
   private final Alert faultedAlert =
       new Alert(
@@ -234,9 +211,9 @@ public class Intake extends SubsystemBase {
     // pivotConnected, rollerConnected and absEncoderConnected so a dead device is visible on the
     // dashboard rather than presenting as 'the intake just does not work'.")
     //
-    // All three checks exist, as the Alert fields above, driven from periodic() rather than
-    // registered, because FaultReporter is not implemented yet. See the field documentation.
+    // Registered with FaultReporter since M14 step 2; see registerDeviceFaults().
     this.io = io;
+    registerDeviceFaults();
     stateTimer.start();
 
     // Entry actions for the state the machine BOOTS into. periodic() only fires onEnter on a
@@ -341,9 +318,6 @@ public class Intake extends SubsystemBase {
     // things during a match.
     Logger.recordOutput("Intake/DeployAllowed", deployAllowed.getAsBoolean());
 
-    pivotDisconnectedAlert.set(!inputs.pivotConnected);
-    rollerDisconnectedAlert.set(!inputs.rollerConnected);
-    absEncoderDisconnectedAlert.set(!inputs.absEncoderConnected);
     faultedAlert.set(systemState == SystemState.FAULTED);
     noDeployGuardAlert.set(!deployGuardInstalled);
   }
@@ -667,6 +641,37 @@ public class Intake extends SubsystemBase {
     pivotGoalRad = waitHoldRad;
     io.setPivotPosition(pivotGoalRad);
     io.setRollerVelocity(0.0);
+  }
+
+  /**
+   * Registers the intake's three devices with the fault reporter, one entry each.
+   *
+   * <p>Added for M14 step 2, replacing three plain alerts that waited on the reporter to exist.
+   * They are separate on purpose. A dead pivot motor stops the intake moving, which is obvious. A
+   * dead absolute encoder is not obvious at all: the mechanism still works, because homing falls
+   * back to the hard stop, and the only symptom is that the pivot re-homes on every boot.
+   *
+   * <p>All three are errors and none blocks scoring. The robot can shoot what the hopper holds with
+   * the intake dead, and readiness-gate term 8 exists for faults that make a shot unsafe.
+   *
+   * <p><b>Outputs:</b> three fault registrations, replacing any of the same names.
+   */
+  private void registerDeviceFaults() {
+    FaultReporter reporter = FaultReporter.getInstance();
+    reporter.registerDeviceDisconnect(
+        FaultReporter.canDevice(
+            "Intake pivot motor", Constants.Can.kIntakePivotId, Constants.Can.kRioBus),
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> inputs.pivotConnected);
+    reporter.registerDeviceDisconnect(
+        FaultReporter.canDevice(
+            "Intake roller motor", Constants.Can.kIntakeRollerId, Constants.Can.kRioBus),
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> inputs.rollerConnected);
+    reporter.registerDeviceDisconnect(
+        "Intake pivot absolute encoder",
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> inputs.absEncoderConnected);
   }
 
   /**

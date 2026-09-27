@@ -14,11 +14,14 @@ import edu.wpi.first.math.geometry.Rotation2d;
 import edu.wpi.first.math.kinematics.SwerveModulePosition;
 import edu.wpi.first.math.kinematics.SwerveModuleState;
 import edu.wpi.first.math.util.Units;
-import edu.wpi.first.wpilibj.Alert;
-import edu.wpi.first.wpilibj.Alert.AlertType;
+import frc.robot.generated.TunerConstants;
+import frc.robot.util.FaultReporter;
 import org.littletonrobotics.junction.Logger;
 
 public class Module {
+  /** Each module's corner, in the drivetrain's FL, FR, BL, BR index order. */
+  private static final String[] CORNERS = {"Front-left", "Front-right", "Back-left", "Back-right"};
+
   private final ModuleIO io;
   private final ModuleIOInputsAutoLogged inputs = new ModuleIOInputsAutoLogged();
   private final int index;
@@ -26,9 +29,6 @@ public class Module {
           TalonFXConfiguration, TalonFXConfiguration, CANcoderConfiguration>
       constants;
 
-  private final Alert driveDisconnectedAlert;
-  private final Alert turnDisconnectedAlert;
-  private final Alert turnEncoderDisconnectedAlert;
   private SwerveModulePosition[] odometryPositions = new SwerveModulePosition[] {};
 
   public Module(
@@ -39,17 +39,25 @@ public class Module {
     this.io = io;
     this.index = index;
     this.constants = constants;
-    driveDisconnectedAlert =
-        new Alert(
-            "Disconnected drive motor on module " + Integer.toString(index) + ".",
-            AlertType.kError);
-    turnDisconnectedAlert =
-        new Alert(
-            "Disconnected turn motor on module " + Integer.toString(index) + ".", AlertType.kError);
-    turnEncoderDisconnectedAlert =
-        new Alert(
-            "Disconnected turn encoder on module " + Integer.toString(index) + ".",
-            AlertType.kError);
+    // M14 step 2: the template's three plain alerts, registered with FaultReporter instead, and
+    // named by corner, CAN ID and bus rather than by module index, since "module 2" does not say
+    // which corner to open. Errors that do not block scoring: a robot on three modules still
+    // drives, and odometry's trouble shows up in gate terms 5 and 6 rather than here.
+    String corner = CORNERS[index];
+    String bus = TunerConstants.kCANBus.getName();
+    FaultReporter reporter = FaultReporter.getInstance();
+    reporter.registerDeviceDisconnect(
+        FaultReporter.canDevice(corner + " drive motor", constants.DriveMotorId, bus),
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> inputs.driveConnected);
+    reporter.registerDeviceDisconnect(
+        FaultReporter.canDevice(corner + " steer motor", constants.SteerMotorId, bus),
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> inputs.turnConnected);
+    reporter.registerDeviceDisconnect(
+        FaultReporter.canDevice(corner + " CANcoder", constants.EncoderId, bus),
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> inputs.turnEncoderConnected);
   }
 
   public void periodic() {
@@ -66,9 +74,6 @@ public class Module {
     }
 
     // Update alerts
-    driveDisconnectedAlert.set(!inputs.driveConnected);
-    turnDisconnectedAlert.set(!inputs.turnConnected);
-    turnEncoderDisconnectedAlert.set(!inputs.turnEncoderConnected);
   }
 
   /** Runs the module with the specified setpoint state. Mutates the state to optimize it. */

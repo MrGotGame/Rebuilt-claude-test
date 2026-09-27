@@ -15,6 +15,7 @@ import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
 import frc.robot.Constants;
 import frc.robot.RobotState;
+import frc.robot.util.FaultReporter;
 import frc.robot.util.GeomUtil;
 import java.util.Arrays;
 import java.util.EnumMap;
@@ -214,12 +215,6 @@ public class Vision extends SubsystemBase {
   private final Map<RobotState.PoseSource, Map<RejectionReason, Integer>> rejectionsBySource =
       new EnumMap<>(RobotState.PoseSource.class);
 
-  private final Alert intakeCameraDisconnectedAlert =
-      new Alert("Intake Limelight disconnected", AlertType.kError);
-
-  private final Alert turretCameraDisconnectedAlert =
-      new Alert("Turret Limelight disconnected", AlertType.kError);
-
   /**
    * Fires while the turret camera's mounting is still unmeasured.
    *
@@ -362,9 +357,20 @@ public class Vision extends SubsystemBase {
     this.robotToQuest = robotToQuest;
     // IMPLEMENTATION (was TODO: "Register FaultReporter checks ... QuestNav ones as WARNINGS.")
     //
-    // The checks are Alerts driven from periodic(), for the reason recorded in
-    // PhoenixUtil.tryUntilOk and Shooter: FaultReporter is a skeleton whose getInstance() returns
-    // null and would throw here.
+    // The two Limelight disconnects are registered with FaultReporter since M14 step 2, as errors
+    // that do NOT block scoring. The plan's degradation table (section 7) is explicit that with one
+    // camera down "the other camera carries on" and shooting works whenever it sees tags; with both
+    // down, gate terms 5 and 6 (staleness, confidence) already refuse the shot on their own. The
+    // headset's checks, and the "unmeasured" warnings, stay plain alerts driven from periodic().
+    FaultReporter reporter = FaultReporter.getInstance();
+    reporter.registerDeviceDisconnect(
+        "Intake Limelight (" + Constants.Vision.kIntakeCameraName + ")",
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> intakeInputs.connected);
+    reporter.registerDeviceDisconnect(
+        "Turret Limelight (" + Constants.Vision.kTurretCameraName + ")",
+        FaultReporter.Impact.REPORT_ONLY,
+        () -> turretInputs.connected);
     //
     // All five are now registered. Each was deliberately withheld until the milestone that
     // actually reads its device -- the turret camera at M8, the headset at M9 -- because an alert
@@ -441,8 +447,6 @@ public class Vision extends SubsystemBase {
     logRejections(RobotState.PoseSource.LIMELIGHT_TURRET, Constants.Vision.kTurretCameraName);
     logRejections(RobotState.PoseSource.LIMELIGHT_INTAKE, Constants.Vision.kIntakeCameraName);
 
-    intakeCameraDisconnectedAlert.set(!intakeInputs.connected);
-    turretCameraDisconnectedAlert.set(!turretInputs.connected);
     fieldBoundsUnmeasuredAlert.set(!fieldBoundsAreMeasured());
     turretTransformUnmeasuredAlert.set(!turretMountingIsMeasured());
 
