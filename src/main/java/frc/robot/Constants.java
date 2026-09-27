@@ -358,6 +358,15 @@ public final class Constants {
   public static final class Drivetrain {
     private Drivetrain() {}
 
+    /**
+     * The drivetrain drops to coast after a match only below this speed, m/s. Added for M14 step 4:
+     * a robot still rolling when it is released keeps rolling, and a pushed robot moves well below
+     * this. It sits at the top of this block, not beside {@link #kCoastDelaySec}, because that line
+     * is tuned on feature-drive and merged forward, and a line added next to a tuned one conflicts
+     * with every merge of it (plans/ROBOT_BRINGUP.md section 2).
+     */
+    public static final double kCoastReleaseMaxSpeedMetersPerSec = 0.1;
+
     /** Robot mass, kg. Feeds PathPlanner's RobotConfig. TODO: MEASURE by weighing the robot. */
     public static final double kRobotMassKg = 74.088;
 
@@ -408,12 +417,6 @@ public final class Constants {
      */
     public static final LoggedTunableNumber kCoastDelaySec =
         new LoggedTunableNumber("Drive/CoastDelay", 5.0);
-
-    /**
-     * The drivetrain drops to coast only below this speed, m/s. Added for M14 step 4. A robot still
-     * rolling when it is released keeps rolling; a pushed robot moves well below this.
-     */
-    public static final double kCoastReleaseMaxSpeedMetersPerSec = 0.1;
   }
 
   // ------------------------------------------------------------------------------- the intake ----
