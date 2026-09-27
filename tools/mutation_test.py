@@ -53,6 +53,10 @@ turret feedforward's chassis-rate sign, and the moving shot itself -- including
 the double-counted velocity M12's simulated checkpoint found in the solver, put
 back.
 
+A sixth is M14's: the fault registry's loud-versus-blocking split and its
+one-entry-per-name rule, the blocking set of devices, PowerBudget's tier
+ordering, the coast release, and the comp/practice identity.
+
 A fifth is M13's, one group per step: the settings.json check, the synced
 alliance flip, the loud handling of a missing file, the marker vocabulary, the
 leg-scoped requests of the building blocks (with the plan's own forms put back),
@@ -86,6 +90,11 @@ AR = "src/main/java/frc/robot/autos/AutoRoutines.java"
 SV = "src/main/java/frc/robot/shooting/ShootingSolver.java"
 CC = "src/main/java/frc/robot/commands/CharacterizationCommands.java"
 TR = "src/main/java/frc/robot/subsystems/turret/Turret.java"
+VI = "src/main/java/frc/robot/subsystems/vision/Vision.java"
+MO = "src/main/java/frc/robot/subsystems/drive/Module.java"
+PB = "src/main/java/frc/robot/util/PowerBudget.java"
+CR = "src/main/java/frc/robot/util/CoastRelease.java"
+CO = "src/main/java/frc/robot/Constants.java"
 
 MUTATIONS = [
     # Re-anchored in M10b step 7, which removed the piece half of this guard (plan section 2.4). The
@@ -169,12 +178,14 @@ MUTATIONS = [
     ("wrapped arc check fails OPEN on nonsense input", TU,
      "        || !Double.isFinite(arcMax)) {\n      return true;",
      "        || !Double.isFinite(arcMax)) {\n      return false;"),
+    # Both re-anchored in M14 step 1, which made anyCritical() read a fault's Impact rather than its
+    # alert type. The second now means "any fault blocks", which is what it always tested.
     ("anyCritical() always reports healthy", FR,
-     "    return faults.stream()\n        .anyMatch(fault -> fault.type() == AlertType.kError && fault.isFaulted().getAsBoolean());",
+     "    return faults.stream()\n        .anyMatch(\n            fault -> fault.impact() == Impact.BLOCKS_SCORING && fault.isFaulted().getAsBoolean());",
      "    return false;"),
     ("severity ignored, any fault counts as critical", FR,
-     "        .anyMatch(fault -> fault.type() == AlertType.kError && fault.isFaulted().getAsBoolean());",
-     "        .anyMatch(fault -> fault.isFaulted().getAsBoolean());"),
+     "            fault -> fault.impact() == Impact.BLOCKS_SCORING && fault.isFaulted().getAsBoolean());",
+     "            fault -> fault.isFaulted().getAsBoolean());"),
     ("intake home-latch fix reverted", IN,
      "      homeRequested = false;\n\n      if (homingSucceeded) {",
      "      if (homingSucceeded) {"),
@@ -657,6 +668,99 @@ MUTATIONS = [
     ("default is not Do Nothing", AS,
      "chooser.addDefaultOption(DO_NOTHING, DO_NOTHING);",
      "chooser.addDefaultOption(DO_NOTHING, \"Leave\");"),
+
+    # ---- M14 step 1: how loud a fault is versus whether it blocks. The registry never replacing,
+    # anyCritical() reading the alert type again, the blocking list listing everything, the old
+    # register() never blocking, and a device disconnect report-only by default.
+    ("registry never replaces", FR,
+     "    faults.removeIf(\n",
+     "    if (false) faults.removeIf(\n"),
+    ("anyCritical reads the alert type again", FR,
+     "            fault -> fault.impact() == Impact.BLOCKS_SCORING && fault.isFaulted().getAsBoolean());",
+     "            fault -> fault.type() == AlertType.kError && fault.isFaulted().getAsBoolean());"),
+    ("blocking list is every active fault", FR,
+     "        .filter(fault -> !blockingOnly || fault.impact() == Impact.BLOCKS_SCORING)\n",
+     ""),
+    ("plain register never blocks", FR,
+     "        type == AlertType.kError ? Impact.BLOCKS_SCORING : Impact.REPORT_ONLY,",
+     "        Impact.REPORT_ONLY,"),
+    ("device disconnect is report-only by default", FR,
+     "    registerDeviceDisconnect(deviceName, Impact.BLOCKS_SCORING, connected);",
+     "    registerDeviceDisconnect(deviceName, Impact.REPORT_ONLY, connected);"),
+
+    # ---- M14 step 2: every device registered by name. The blocking set changed in both directions (the
+    # follower and the turret motor not blocking, the intake roller and a Limelight blocking), a
+    # module device named by the wrong ID, and a connection check inverted.
+    ("flywheel follower does not block", SH,
+     "            \"Flywheel follower motor\", Constants.Can.kFlywheelFollowerId, Constants.Can.kRioBus),\n        FaultReporter.Impact.BLOCKS_SCORING,",
+     "            \"Flywheel follower motor\", Constants.Can.kFlywheelFollowerId, Constants.Can.kRioBus),\n        FaultReporter.Impact.REPORT_ONLY,"),
+    ("turret motor does not block", TR,
+     "        FaultReporter.canDevice(\"Turret motor\", Constants.Can.kTurretId, Constants.Can.kRioBus),\n        FaultReporter.Impact.BLOCKS_SCORING,",
+     "        FaultReporter.canDevice(\"Turret motor\", Constants.Can.kTurretId, Constants.Can.kRioBus),\n        FaultReporter.Impact.REPORT_ONLY,"),
+    ("intake roller blocks scoring", IN,
+     "            \"Intake roller motor\", Constants.Can.kIntakeRollerId, Constants.Can.kRioBus),\n        FaultReporter.Impact.REPORT_ONLY,",
+     "            \"Intake roller motor\", Constants.Can.kIntakeRollerId, Constants.Can.kRioBus),\n        FaultReporter.Impact.BLOCKS_SCORING,"),
+    ("a Limelight blocks scoring", VI,
+     "        \"Turret Limelight (\" + Constants.Vision.kTurretCameraName + \")\",\n        FaultReporter.Impact.REPORT_ONLY,",
+     "        \"Turret Limelight (\" + Constants.Vision.kTurretCameraName + \")\",\n        FaultReporter.Impact.BLOCKS_SCORING,"),
+    ("steer motor named by the drive motor's ID", MO,
+     "FaultReporter.canDevice(corner + \" steer motor\", constants.SteerMotorId, bus),",
+     "FaultReporter.canDevice(corner + \" steer motor\", constants.DriveMotorId, bus),"),
+    ("indexer check inverted", IX,
+     "            () -> inputs.connected);",
+     "            () -> !inputs.connected);"),
+
+    # ---- M14 step 3: PowerBudget. The tiers starting together, the drivetrain throttled, the filter
+    # starting from zero, imminent ignoring the slope, the severity never computed, and the intake
+    # never giving up its rock.
+    ("tiers all start together", PB,
+     "  private static final double MEDIUM_STARTS_AT = 1.0 / 3.0;",
+     "  private static final double MEDIUM_STARTS_AT = 0.0;"),
+    ("the drivetrain is throttled too", PB,
+     "          case CRITICAL -> 1.0;",
+     "          case CRITICAL -> HIGH_STARTS_AT;"),
+    ("the filter starts from zero", PB,
+     "    if (Double.isNaN(filteredVoltage)) {\n      filteredVoltage = raw;",
+     "    if (Double.isNaN(filteredVoltage)) {\n      filteredVoltage = 0.0;"),
+    ("imminent ignores the slope", PB,
+     "    return filteredVoltage < Constants.Power.kBrownoutWarningVolts.get()\n        && voltageSlopeVoltsPerSec < 0.0;",
+     "    return filteredVoltage < Constants.Power.kBrownoutWarningVolts.get();"),
+    ("severity never computed", PB,
+     "    severity = MathUtil.clamp((warn - filteredVoltage) / (warn - critical), 0.0, 1.0);",
+     "    severity = 0.0;"),
+    ("the intake never gives up rocking", IN,
+     "            lowPriorityCurrentScalar >= 1.0,",
+     "            true,"),
+
+    # ---- M14 step 4: the coast release. No delay, no speed check, firing every loop, and the latch
+    # surviving a new disabled period.
+    ("no delay", CR,
+     "        || !disabledTimer.hasElapsed(Constants.Drivetrain.kCoastDelaySec.get())\n",
+     ""),
+    ("no speed check", CR,
+     "        || speedMetersPerSec > Constants.Drivetrain.kCoastReleaseMaxSpeedMetersPerSec) {",
+     "        || false) {"),
+    ("fires every loop after the delay", CR,
+     "    released = true;\n    return true;",
+     "    return true;"),
+    ("the latch survives a new disabled period", CR,
+     "    disabledTimer.restart();\n    released = false;",
+     "    disabledTimer.restart();"),
+
+    # ---- M14 step 5: comp and practice identity. Simulation as the comp robot, an unknown serial silent
+    # or running the practice constants, and the practice value read everywhere.
+    ("simulation resolves to the comp robot", CO,
+     "    if (mode != Mode.REAL) {\n      return RobotType.SIMBOT;",
+     "    if (mode != Mode.REAL) {\n      return RobotType.COMP;"),
+    ("an unknown serial is silent", CO,
+     "    onUnknown.accept(serial);\n    return RobotType.COMP;",
+     "    return RobotType.COMP;"),
+    ("an unknown serial runs the practice constants", CO,
+     "    onUnknown.accept(serial);\n    return RobotType.COMP;",
+     "    onUnknown.accept(serial);\n    return RobotType.PRACTICE;"),
+    ("forRobot reads the practice value everywhere", CO,
+     "    return robotType == RobotType.PRACTICE ? practiceValue : compValue;",
+     "    return robotType != RobotType.COMP ? practiceValue : compValue;"),
 ]
 
 
