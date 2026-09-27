@@ -169,7 +169,7 @@ Milestones are defined in section 10 of `PLAN_3_MAXIMUM.md`.
 | M11 | Stationary shooting: the shot tables, measured in bursts | `feature-still-shot` | **Code complete in simulation** — all six steps done; 166 tests, 0 skipped, mutation score 109/110 (the survivor is M10's documented equivalent mutant). **The checkpoint needs the robot**: the procedure is below |
 | M12 | Shoot on the move | `feature-sotm` | **Simulation checkpoint complete** — 171 tests, 0 skipped, mutation score 116/117 (the survivor is M10's documented equivalent mutant). **Found and fixed a double-counted velocity in the solver that dated from M3.** Hardware checkpoint outstanding |
 | M13 | Autos: `AutoFactory`, `AutoRoutines`, `AutoSelector` | `feature-autos` | **Simulation checkpoint complete** — all eight routines run to their ends on both alliances; 241 tests, 0 skipped, mutation score 154/155. **The paths are not drawn yet** (list below), and the three real-field runs need the robot |
-| M14 | Competition hardening | `feature-comp_ready` | **In progress** — the code half; step order below. The checkpoint needs the robot |
+| M14 | Competition hardening | `feature-comp_ready` | **Code complete in simulation** — every device named when unplugged, `PowerBudget`, the coast release, comp/practice identity, tuning mode off; 284 tests, 0 skipped, mutation score 179/180. **The checkpoint needs the robot** (`ROBOT_BRINGUP.md` Phase 8) |
 
 M2's checkpoint is a hard gate in the plan: drive a 3 m square by hand and confirm the estimated
 pose closes within ~10 cm, that field-relative speeds match a stopwatch, and critically that
@@ -759,6 +759,9 @@ directory.
   The floor roller, indexer and drivetrain ask for their scalar. `Intake` asks, but its IO never
   applies it. The turret's IO would apply one, but `Turret` never sends it. The flywheel has
   neither half.
+  **Correction (step 3): every consumer was already wired end to end.** The stub was the only gap.
+  The search this note rested on was cut off at 40 lines of output, and the truncation was read as
+  absence. Kept here rather than rewritten, as M13's `preloadOnly` note was.
 - **The drivetrain's coast release must stay the drivetrain's.** A coasting intake pivot falls
   under its own weight, possibly onto the turret, and the turret must not flop about either. The
   timed release after a match is for pushing the robot off the field, so it releases the drive
@@ -766,15 +769,60 @@ directory.
 
 | # | Step | Files | Done when |
 |---|---|---|---|
-| 0 | Branch setup and baseline | — | Branch builds; 241 tests pass. |
-| 1 | **Loud versus blocking, and one entry per device** | `FaultReporter`, new `FaultReporterTest` | A fault's alert type is how it is shown; whether it blocks scoring is a separate `Impact`. `anyCritical()` reads only blocking faults. Re-registering a name replaces the old entry and closes its alert. The existing `register(name, kError, …)` keeps blocking, so M10's gate tests stand as written. |
-| 2 | **Every device registered, by name** | `Intake`, `Indexer`, `FloorRoller`, `Turret`, `Shooter`, `Vision`, `Drive`, `Module`, `PhoenixUtil`, new `DeviceFaultTest` | The subsystems' plain disconnect alerts become registrations naming the device, its CAN ID and its bus. Blocking: the flywheel leader and follower, the turret motor and its encoder. The rest report only. In simulation, unplugging any single device names exactly that device and nothing else, and only the blocking set closes the gate. |
-| 3 | **`PowerBudget`** | `PowerBudget`, `IntakeIOTalonFX`, `Turret`, `Shooter`, `ShooterIO*`, `Robot`, new `PowerBudgetTest` | A filtered voltage, its slope, and a severity from `kBrownoutWarningVolts` to `kBrownoutCriticalVolts`. Each tier starts giving up current at a later point: LOW first, then MEDIUM, then HIGH, and CRITICAL never. All eight consumers apply their scalar. The combined-mode clause runs in simulation: under a sagging voltage the LOW scalar drops first, and feed-assist stops rocking while it does. |
-| 4 | **The coast release** | new `CoastRelease` (`util`), `RobotContainer`, `Robot`, `Constants` | Once the robot has been disabled for `kCoastDelaySec` and is nearly still, the drivetrain goes to coast, once. Every enable restores brake. The intake pivot and turret stay in brake throughout. |
-| 5 | **Comp and practice identity (§5.5)** | `Constants`, test | `getRobot()` resolves the roboRIO serial. An unknown serial answers COMP and raises a blocking error: it means unknown encoder offsets, and so an unknown aim. The turret and intake-pivot absolute offsets become per-robot. |
-| 6 | **The robot loop** | `Robot` | Real-time priority around the scheduler, `RobotState.logState()`, `PowerBudget.periodic()`, `LoopTimeMs` and `MemoryFreeMB`. A warning if tuning mode is on while the FMS is attached. |
-| 7 | **Competition mode, and the pit checklist** | `Constants`, `docs/PIT_CHECKLIST.md` | `kTuningMode = false`, and the whole suite and a simulation boot pass with it false. A pit checklist that starts with "check the Alerts widget". |
-| 8 | **Verify, then record** | harness, this file, `CONTEXT_AND_CONVENTIONS.md`, `ROBOT_BRINGUP.md` | A mutation pass on the blocking set, the registry's replacement rule, the tier ordering and the coast release. **The M14 checkpoint itself stays outstanding: it needs the robot.** |
+| 0 | Branch setup and baseline | — | Branch builds; 241 tests pass. **Done: `548d940`, `feature-autos`'s tip plus this plan.** |
+| 1 | **Loud versus blocking, and one entry per device** | `FaultReporter`, new `FaultReporterTest` | A fault's alert type is how it is shown; whether it blocks scoring is a separate `Impact`. `anyCritical()` reads only blocking faults. Re-registering a name replaces the old entry and closes its alert. The existing `register(name, kError, …)` keeps blocking, so M10's gate tests stand as written. **Done: `1305b6d`, `d629892`. The first mutation run killed "anyCritical reads the alert type" only in `SuperstructureFsmTest`, through a fault `FaultReporterTest` had left in the shared registry. The suite now builds reporters of its own, and asserts `anyCritical()` both ways.** |
+| 2 | **Every device registered, by name** | `Intake`, `Indexer`, `FloorRoller`, `Turret`, `Shooter`, `Vision`, `Drive`, `Module`, `PhoenixUtil`, new `DeviceFaultTest` | The subsystems' plain disconnect alerts become registrations naming the device, its CAN ID and its bus. Blocking: the flywheel leader and follower, the turret motor and its encoder. The rest report only. In simulation, unplugging any single device names exactly that device and nothing else, and only the blocking set closes the gate. **Done: `9dc0df9`; 23 devices plus a healthy robot. The blocking set is the flywheel leader, the follower and the turret MOTOR. The turret's absolute encoder keeps its warning, because homing falls back to a hard stop. The Pigeon2 cannot be unplugged in simulation. The headset keeps M9's decision, with no disconnect alert.** |
+| 3 | **`PowerBudget`** | `PowerBudget`, `IntakeIOTalonFX`, `Turret`, `Shooter`, `ShooterIO*`, `Robot`, new `PowerBudgetTest` | A filtered voltage, its slope, and a severity from `kBrownoutWarningVolts` to `kBrownoutCriticalVolts`. Each tier starts giving up current at a later point: LOW first, then MEDIUM, then HIGH, and CRITICAL never. All eight consumers apply their scalar. The combined-mode clause runs in simulation: under a sagging voltage the LOW scalar drops first, and feed-assist stops rocking while it does. **Done: `d1f3115`. The consumers needed nothing (see the correction above). The filter is written out, because `LinearFilter.singlePoleIIR` starts from zero and would boot every mechanism throttled. `isBrownoutImminent()` is implemented, and nothing reads it yet: refusing a spin-up mid-match is left as a decision.** |
+| 4 | **The coast release** | new `CoastRelease` (`util`), `RobotContainer`, `Robot`, `Constants` | Once the robot has been disabled for `kCoastDelaySec` and is nearly still, the drivetrain goes to coast, once. Every enable restores brake. The intake pivot and turret stay in brake throughout. **Done: `1617b95`, `913949a`. The second commit moved the new speed constant off the line after `kCoastDelaySec`, which is tuned on `feature-drive`: re-running the bring-up trial merge showed nine conflicts cascading from it.** |
+| 5 | **Comp and practice identity (§5.5)** | `Constants`, test | `getRobot()` resolves the roboRIO serial. An unknown serial answers COMP and raises a blocking error: it means unknown encoder offsets, and so an unknown aim. The turret and intake-pivot absolute offsets become per-robot. **Done: `7c49846`. Not as §5.5's switch in each initializer, which would rewrite lines tuned on other branches: each constant keeps its line as the COMP value, the practice values live in `Constants.PracticeRobot` at the end of the file, and the two readers choose through `Constants.forRobot`.** |
+| 6 | **The robot loop** | `Robot` | Real-time priority around the scheduler, `RobotState.logState()`, `PowerBudget.periodic()`, `LoopTimeMs` and `MemoryFreeMB`. A warning if tuning mode is on while the FMS is attached. **Done: `6a1184e`. `Logger.getRealTimestamp()`, which the TODO named, does not exist in AdvantageKit 26; the loop time uses the FPGA clock. `Robot` cannot be unit-tested, so it was verified by an 80 s simulation boot with no exception and no overrun.** |
+| 7 | **Competition mode, and the pit checklist** | `Constants`, `docs/PIT_CHECKLIST.md` | `kTuningMode = false`, and the whole suite and a simulation boot pass with it false. A pit checklist that starts with "check the Alerts widget". **Done: `b5a7865`. The suite (284) and a simulation boot both pass with it false.** |
+| 8 | **Verify, then record** | harness, this file, `CONTEXT_AND_CONVENTIONS.md`, `ROBOT_BRINGUP.md` | A mutation pass on the blocking set, the registry's replacement rule, the tier ordering and the coast release. **The M14 checkpoint itself stays outstanding: it needs the robot.** **Done: harness `2d0bd59`; 179/180, the survivor being M10's known equivalent. 25 M14 entries, each killed by hand in its step first; M10's two `anyCritical` entries re-anchored. The docs, this file, `CONTEXT_AND_CONVENTIONS.md`, `ROBOT_BRINGUP.md` and the plan, record it.** |
+
+### M14, and a registry that everything shares
+
+M14's code half is done, and the parts of its checkpoint that simulation can reach run as tests:
+every device unplugged alone and named alone, a sagging battery cutting the intake first until
+it stops rocking, the coast release, and the comp/practice identity. The branch is the competition
+build, with tuning mode off. The suite went from 241 tests to 284, and the harness from 155
+entries to 180.
+
+**The design turned on one distinction the plan had fused: how loud a fault is, and whether it
+stops the robot shooting.** Readiness-gate term 8 refused to score on any error, and the plan
+specified every device disconnect as an error. So an unplugged intake roller would have stopped the
+robot shooting, and the plan's own degradation table, which keeps shooting with one Limelight down,
+could not have been built. A fault now carries an `Impact`. Every disconnected device is red on
+the dashboard; three devices block scoring, the flywheel leader, the follower and the turret motor,
+because without them a shot is unsafe. `Faults/Blocking` answers "why won't it shoot" in one key.
+
+**A shared registry needs rules that a per-subsystem alert never did.** `FaultReporter` is
+process-wide and, under test, hundreds of robots register with it, some on dead hardware on
+purpose. Without a rule, one case's dead turret would have blocked scoring in every case after it,
+and the suite would have failed in an order-dependent way that looked like flakiness. Registering a
+name again now replaces the old entry. The same sharing bit the tests themselves: `FaultReporterTest`
+left an active error in the shared registry, and a mutation of `anyCritical()` was killed by an
+unrelated suite that tripped over it. **A test that writes to a singleton is a test of every suite
+that runs after it.** Tests of the registry's own rules now build a registry of their own.
+
+**The bring-up plan paid for itself inside a week.** `ROBOT_BRINGUP.md` warns that a line added
+next to a tuned one conflicts with every merge of the tuned value, and M14 made exactly that mistake
+in step 4. The warning did not prevent it; re-running the plan's trial merge caught it, with nine
+conflicts traced to one line. Step 5 was designed around the same rule from the start: section
+5.5's per-robot `switch` would have rewritten two tuned lines, so the practice values went to the
+end of the file instead.
+
+**Two notes written before the code were wrong, and the code is what showed it.** `PowerBudget`
+was not "wired to three of eight consumers"; all eight were wired, and a search truncated at 40
+lines had been read as absence. And AdvantageKit 26 has no `Logger.getRealTimestamp()`, which the
+plan's `robotPeriodic` TODO named. Both are corrected where they were written.
+
+**What M14 has not established is anything about hardware.** No device has been unplugged, no
+battery has sagged, the Pigeon2's check has never run (it is off in simulation), and the blocking
+set has never been argued with by a real failure. Two decisions are left open rather than made in
+code: whether the superstructure should refuse a spin-up when `isBrownoutImminent()`, and whether
+an unknown roboRIO should block scoring (it does, as §5.5's "loud" reads). Phase 8 of
+`ROBOT_BRINGUP.md` is the checkpoint, and `docs/PIT_CHECKLIST.md` on the branch is the routine it
+proves out.
 
 ### M13, and the tests that could not have failed
 
@@ -917,6 +965,9 @@ These affect everything downstream and are not bugs in any one branch:
   drawings or the AprilTag layout JSON.
 - **The shot tables are all zeros.** `ShootingSolver` correctly returns an invalid shot rather than
   an infinite flywheel command, but cannot aim until the tables are measured on a real field.
+- **The competition build exists but has never run on a robot.** `feature-comp_ready` (M14) has
+  every device registered, `PowerBudget`, the coast release and tuning mode off. Bring-up tunes on
+  `feature-autos` and merges forward (`ROBOT_BRINGUP.md`).
 - **No path is drawn.** PathPlanner is configured and every routine is implemented on
   `feature-autos` (M13), but the paths are drawn in the GUI on the REBUILT field, and until they
   are, every routine that follows one warns at boot and does nothing but its preload. The M13
@@ -1026,6 +1077,9 @@ These are the shapes to look for, because each one was live in committed code:
 - **A slow step can hide a missing one.** A stationary preload that takes seconds made deleting the
   intake wait invisible to "nothing moves before the intake retains". Assert the structure the
   claim is about, not only one of its consequences. (M13)
+- **A test that writes to a shared singleton tests every suite that runs after it.** A fault left
+  active in `FaultReporter` let a mutation be killed by an unrelated suite. Give such tests an
+  instance of their own, or make the singleton replace rather than accumulate. (M14)
 - **A test of a correction's DIRECTION passes a correction applied twice.** The moving-shot solver
   had "lead against the motion" tests from M3 on, and it compensated the robot's velocity twice
   until M12. Test the OUTCOME the correction exists for, which here is where the piece lands.
