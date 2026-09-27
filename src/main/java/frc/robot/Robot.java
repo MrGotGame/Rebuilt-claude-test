@@ -12,6 +12,7 @@ import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.CommandScheduler;
 import frc.robot.util.FaultReporter;
 import frc.robot.util.PhoenixUtil;
+import frc.robot.util.PowerBudget;
 import org.littletonrobotics.junction.LogFileUtil;
 import org.littletonrobotics.junction.LoggedRobot;
 import org.littletonrobotics.junction.Logger;
@@ -96,7 +97,7 @@ public class Robot extends LoggedRobot {
     //   CommandScheduler.getInstance().run()
     //   RobotState.getInstance().logState()
     //   FaultReporter.getInstance().periodic()    (done, M13 step 7; see below)
-    //   PowerBudget.getInstance().periodic()
+    //   PowerBudget.getInstance().periodic()     (done, M14 step 3)
     // TODO: Log loop duration under "LoopTimeMs" from Logger.getRealTimestamp() deltas, and
     // Runtime.getRuntime().freeMemory() under "MemoryFreeMB". Loop-overrun evidence is the only way
     // to settle "did we miss that shot because the code stalled".
@@ -114,6 +115,11 @@ public class Robot extends LoggedRobot {
     // settings.json, and a robot placed off its auto's start, which the M13 checkpoint needs to
     // see fire. After the scheduler, so it reads this loop's state.
     FaultReporter.getInstance().periodic();
+
+    // M14 step 3. The subsystems read their current-limit scalars during the scheduler run above,
+    // so they act on the previous loop's budget: 20 ms behind a battery whose filter is five times
+    // slower than that, which is why the plan's order is kept.
+    PowerBudget.getInstance().periodic();
   }
 
   /**
