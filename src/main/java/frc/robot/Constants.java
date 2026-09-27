@@ -74,8 +74,15 @@ public final class Constants {
   /** roboRIO serial number of the practice robot. TODO: MEASURE, same method as above. */
   public static final String kPracticeRoboRioSerial = "TODO-PRACTICE-SERIAL";
 
-  /** Master switch for tunable numbers and SysId bindings. MUST be false at competition. */
-  public static final boolean kTuningMode = true;
+  /**
+   * Master switch for tunable numbers and SysId bindings. MUST be false at competition.
+   *
+   * <p>False on this branch since M14 step 7: {@code feature-comp_ready} is the competition build.
+   * Bring-up tuning runs on {@code feature-autos}, where it is on (plans/ROBOT_BRINGUP.md), and the
+   * tuned values arrive here by merge. With it off, every tunable reads its compiled-in value, the
+   * bench, measurement and diagnostic entries are not built, and nothing is editable from the pit.
+   */
+  public static final boolean kTuningMode = false;
 
   /** Set true only by unit tests, so {@link LoggedTunableNumber} does not touch NetworkTables. */
   public static boolean disableHal = false;
