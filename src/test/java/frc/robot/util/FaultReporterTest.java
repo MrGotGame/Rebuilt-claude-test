@@ -16,12 +16,13 @@ import org.junit.jupiter.api.Test;
  * Tests for {@link FaultReporter}: how loud a fault is versus whether it blocks scoring, and one
  * entry per name.
  *
- * <p>Added for M14 step 1. The reporter is a process-wide singleton that every suite registers
- * with, so each case uses names of its own and asserts only about those, never about the registry
- * as a whole.
+ * <p>Added for M14 step 1. Each case builds its own reporter. The robot's is a process-wide
+ * singleton every suite registers with, and a first version of this suite, written against it, left
+ * an active report-only error behind that a mutation of {@code anyCritical()} then tripped in an
+ * unrelated suite: a kill for the wrong reason, and a pollution hazard for everyone else.
  */
 public class FaultReporterTest {
-  private final FaultReporter reporter = FaultReporter.getInstance();
+  private final FaultReporter reporter = new FaultReporter();
 
   /** Initialises the HAL, which the dashboard alerts need. */
   @BeforeEach
@@ -72,7 +73,6 @@ public class FaultReporterTest {
     assertTrue(reporter.getBlockingFaultNames().contains("FaultReporterTest error"));
     assertFalse(reporter.getBlockingFaultNames().contains("FaultReporterTest warning"));
     assertTrue(reporter.anyCritical());
-    reporter.register("FaultReporterTest error", AlertType.kError, () -> false);
   }
 
   /**
@@ -87,6 +87,7 @@ public class FaultReporterTest {
     reporter.register(name, AlertType.kError, Impact.REPORT_ONLY, () -> true);
     assertEquals(1, activeCount(name), "a report-only fault must still be shown");
     assertFalse(reporter.getBlockingFaultNames().contains(name), "a report-only fault blocked");
+    assertFalse(reporter.anyCritical(), "a report-only error closed the gate");
   }
 
   /** A device disconnect blocks by default, and names the device. */
@@ -99,7 +100,7 @@ public class FaultReporterTest {
     connected[0] = false;
     assertEquals(1, activeCount(alert));
     assertTrue(reporter.getBlockingFaultNames().contains(alert));
-    connected[0] = true;
+    assertTrue(reporter.anyCritical());
   }
 
   /** A device disconnect can be registered as report-only. */
@@ -110,5 +111,6 @@ public class FaultReporterTest {
     String alert = "FaultReporterTest roller (CAN 98, rio) disconnected";
     assertEquals(1, activeCount(alert));
     assertFalse(reporter.getBlockingFaultNames().contains(alert));
+    assertFalse(reporter.anyCritical(), "a report-only disconnect closed the gate");
   }
 }

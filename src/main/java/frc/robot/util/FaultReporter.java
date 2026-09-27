@@ -65,6 +65,15 @@ public class FaultReporter {
   private final List<Fault> faults = new ArrayList<>();
 
   /**
+   * Builds an empty reporter.
+   *
+   * <p>Package-private for tests, added in M14 step 1: the robot uses {@link #getInstance()}, but a
+   * test of the registry's own rules needs one that nothing else has registered with, or it can
+   * neither assert that nothing blocks nor avoid leaving faults behind for other suites.
+   */
+  FaultReporter() {}
+
+  /**
    * Returns the process-wide reporter, creating it on first use.
    *
    * @return the singleton instance
