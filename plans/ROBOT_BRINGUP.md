@@ -14,12 +14,12 @@ criteria used below).
 
 **M14 needs the robot for its checkpoint, not for most of its code.** The checkpoint — unplug each
 CAN device and see it named on the dashboard, run a full match and finish above
-`kBrownoutWarningVolts` — is hardware. But the `FaultReporter` registrations for every device,
-wiring `PowerBudget` into each subsystem's current limit, the brake-mode release timer,
-`Constants.getRobot()` (still a skeleton that always answers `COMP`), and a full re-test with
-`kTuningMode = false` are code, and can be written and simulated now.
+`kBrownoutWarningVolts` — is hardware. **Its code half is done** on `feature-comp_ready`: every device
+registered by name, `PowerBudget`, the coast release, `Constants.getRobot()`, the robot loop, and
+`kTuningMode = false` with the suite and a simulation boot re-run. The simulation halves of its
+checkpoint run as tests. `PROJECT_OVERVIEW.md`'s M14 record has the detail.
 
-Three other things block robot days and need **no** robot. Do them first, or the robot sits idle:
+Three things still block robot days and need **no** robot. Do them first, or the robot sits idle:
 
 | Before the robot | Why it blocks | Branch |
 |---|---|---|
@@ -56,7 +56,7 @@ claude-test (skeleton; reserved for the final full-system integration)
  │                                                                         integration-m1_m9
  │                                                                                   │
  │   feature-superstructure (M10) ── feature-hopper (M10b) ── feature-still-shot (M11)
- │                                        ── feature-sotm (M12) ── feature-autos (M13)  ◄ newest
+ │     ── feature-sotm (M12) ── feature-autos (M13)  ◄ tune here ── feature-comp_ready (M14)
  │
  └─ (full-system integration lands back on claude-test, later)
 ```
@@ -82,8 +82,8 @@ claude-test (skeleton; reserved for the final full-system integration)
 | `feature-hopper` | `feature-superstructure` | M10b | The hopper model: every constant it added (feed-assist, conflict band, load and jam, shot detection, empty belief) **and all the intake angles**. |
 | `feature-still-shot` | `feature-hopper` | M11 | The measurement burst (`Shot.kMeasureRpm`). |
 | `feature-sotm` | `feature-still-shot` | M12 | Shooting on the move; no constants of its own. |
-| `feature-autos` | `feature-sotm` | M13 | Autos: `Constants.Auto`, the paths, `settings.json`. **The newest code: deploy this one.** |
-| *(M14, not yet created)* | `feature-autos` | M14 | Suggested name `feature-hardening` — your call. `Constants.Power`, the roboRIO serials, the `FaultReporter` registrations, the brake timer. |
+| `feature-autos` | `feature-sotm` | M13 | Autos: `Constants.Auto`, the paths, `settings.json`. **Deploy this one for Phases 1–7**: it has tuning mode on. |
+| `feature-comp_ready` | `feature-autos` | M14 | The competition build, with `kTuningMode` **false**. `Constants.Power`, the roboRIO serials, `Constants.PracticeRobot` (the practice robot's encoder offsets), and the fault registrations. Newest of all, so every fan-out ends here. |
 
 ---
 
@@ -91,9 +91,10 @@ claude-test (skeleton; reserved for the final full-system integration)
 
 **Where you RUN is not where you COMMIT.**
 
-- **Run** almost everything on `feature-autos` (the newest line), with `Constants.kTuningMode`
-  true, so every value is live-editable from AdvantageScope's `/Tuning` table. Exceptions are named
-  in the steps: M1 and M2 run on their own branches, M4 on `feature-flywheel`.
+- **Run** almost everything on `feature-autos`, with `Constants.kTuningMode` true, so every value is
+  live-editable from AdvantageScope's `/Tuning` table. Exceptions are named in the steps: M1 and M2
+  run on their own branches, M4 on `feature-flywheel`, and Phase 8 on `feature-comp_ready`, the
+  competition build, which has tuning mode off and so cannot be tuned live.
 - **Commit** each measured value on the branch listed for its constant in §3 — the branch where the
   subsystem was implemented, adjusted where the history requires — and then **merge that branch
   forward** into every branch descended from it, exactly as the plan documents are fanned out from
@@ -108,16 +109,22 @@ This was tested before this file was written, in a scratch repository holding ev
 
 - All 198 tunable constants in `Constants.java` were edited on the branch §3 assigns them to. So
   was one line of `TunerConstants.java`, on `feature-drive`, standing in for a regeneration.
-- Each edited branch was merged into every branch descended from it: 98 merges.
+- Each edited branch was merged into every branch descended from it: 98 merges, and 112 once
+  `feature-comp_ready` existed and was added as the newest descendant.
 - **Result: no conflicts, and all 198 edits plus the `TunerConstants` change reached
-  `feature-autos`.**
+  `feature-autos`, and `feature-comp_ready`.**
 - A negative control proved the check could fail. A camera transform tuned on its original vision
   branch *does* conflict with `feature-cad-constants`, which rewrote that line.
 
-The first run of the check found one real conflict, and it is why §3 has one exception. Tuning
-`Intake.kEjectAngleRad` on `feature-intake` conflicts at `feature-hopper`, because M10b inserted its
-feed-assist constants on the very next line. So **all intake angles are tuned on `feature-hopper`**,
-the branch that gave the intake its final set of positions.
+The check has caught the same trap twice: a line added next to a tuned one.
+
+- **The first run** found `Intake.kEjectAngleRad`. Tuned on `feature-intake`, it conflicts at
+  `feature-hopper`, because M10b inserted its feed-assist constants on the very next line. That is
+  §3's one exception: **all intake angles are tuned on `feature-hopper`**, the branch that gave the
+  intake its final set of positions.
+- **M14 made it again.** Its step 4 added a constant on the line after `Drivetrain.kCoastDelaySec`,
+  which is tuned on `feature-drive`. Re-running the check with `feature-comp_ready` added showed
+  nine conflicts, all cascading from that one line. The constant was moved, and the check is clean.
 
 **What the check does not cover**, and what will break it:
 
@@ -142,7 +149,8 @@ you committed on, and `DESCENDANTS` lists its descendants from the map in §1:
 ```bash
 SRC=feature-turret
 DESCENDANTS="integration-m5_m7 feature-limelight-complete feature-questnav feature-cad-constants \
-  integration-m1_m9 feature-superstructure feature-hopper feature-still-shot feature-sotm feature-autos"
+  integration-m1_m9 feature-superstructure feature-hopper feature-still-shot feature-sotm feature-autos \
+  feature-comp_ready"
 for d in $DESCENDANTS; do
   [ -n "$(git -C $d status --porcelain)" ] && { echo "DIRTY $d"; continue; }
   git -C $d fetch -q ../$SRC $SRC
@@ -178,7 +186,7 @@ inputs, now with the inputs' tuned values. Nothing is ever *committed* on them d
 | `Superstructure.*` (M10's), `Field.kPassTarget*`, `Vision.k*PipelineIndex` | `feature-superstructure` |
 | `Superstructure.kEmptyConfirmSec`; `Auto.kIntakeRetainTimeoutSec` | `feature-hopper` |
 | `Auto.*` (the rest), the paths, `settings.json`, `navgrid.json` | `feature-autos` |
-| `Power.*`, the roboRIO serial numbers, `FaultReporter` registrations | the M14 branch |
+| `Power.*`, the roboRIO serial numbers, `Constants.PracticeRobot.*` (the practice robot's encoder offsets) | `feature-comp_ready` |
 | SysId screenshots for `docs/` (M6's checkpoint) | the same branch as the gains they produced |
 
 Both candidate branches for the shot tables were tested. `feature-shooting-parameters` (where the
@@ -226,7 +234,7 @@ safe. Deploy `feature-autos` and leave the robot **disabled** throughout this ph
 | 1.6 | **Turret hard stops, by hand**: read the position at each stop, then back off by `kLimitMarginRad`. | `Turret.kMinAngleRad`, `kMaxAngleRad` | `feature-turret` |
 | 1.7 | **Intake angles, by hand**: stow, deploy, eject, and the feed-assist height (raised over a full hopper until the pile just starts moving). | `Intake.kStowedAngleRad`, `kDeployedAngleRad`, `kEjectAngleRad`, `kFeedAssistAngleRad` | `feature-hopper` |
 | 1.8 | **The turret's intake-conflict arc**, by hand, with the intake stowed. | `Turret.kIntakeConflictMinRad`, `kIntakeConflictMaxRad`; confirm `Intake.kTurretConflictBandRad` from 0.5 | `feature-turret`; the band on `feature-hopper` |
-| 1.9 | **roboRIO serial numbers** for the comp and practice robots. | `kCompRoboRioSerial`, `kPracticeRoboRioSerial` | the M14 branch |
+| 1.9 | **roboRIO serial numbers** for the comp and practice robots. Until they are entered, `feature-comp_ready` refuses to shoot (see 8.4); `feature-autos` does not check. | `kCompRoboRioSerial`, `kPracticeRoboRioSerial` | `feature-comp_ready` |
 
 ### Phase 2 — The drivetrain (M1, M2), and every direction seen before code drives it
 
@@ -305,14 +313,21 @@ Needs §0's paths. In §8.6's order, never skipping step 3.
 
 ### Phase 8 — Competition hardening (M14)
 
-On the M14 branch, cut from `feature-autos` once Phase 7 passes, with §0's M14 code in it.
+On `feature-comp_ready`, the competition build, after every tuned value from Phases 1–7 has been
+merged forward into it. Tuning mode is off there, so this phase measures and verifies; it does not
+tune. `docs/PIT_CHECKLIST.md` on that branch is the pre-match routine these steps prove out.
+
+The simulation halves already pass as tests, which is what each hardware step now has to confirm:
+`DeviceFaultTest` unplugs each of 23 devices alone, `PowerBudgetTest` sags the battery until the
+intake stops rocking, `CoastReleaseTest`, and `RobotIdentityTest`.
 
 | # | Step | Pass when (§10.2 M14) |
 |---|---|---|
-| 8.1 | Unplug each CAN device in turn. | The dashboard names it within a second. |
-| 8.2 | A full 2:30 match in practice; then the combined-mode run: a figure-eight while intaking and firing for 20 s. Set `Constants.Power` from the logs. | The battery ends above `kBrownoutWarningVolts`; no brownout in `Power/FilteredVoltage`. |
-| 8.3 | `kTuningMode = false`, and a full re-test. | Everything above still passes with nothing live-editable. |
-| 8.4 | Practice-bot identity (§5.5). **Enter both serials (step 1.9) before `getRobot()` is implemented**: §5.5 has it raise an *error* for an unknown roboRIO, and gate term 8 refuses to score while any error is active. | Each robot loads its own constants from its serial. |
+| 8.1 | Unplug each CAN device in turn, including the Pigeon2, the one device the simulation could not unplug. | The dashboard names it, with its CAN ID and bus, within a second. `Faults/Blocking` lists it only for the flywheel leader, the flywheel follower and the turret motor. |
+| 8.2 | A full 2:30 match in practice; then the combined-mode run: a figure-eight while intaking and firing for 20 s. Set `Constants.Power` from the logs. | The battery ends above `kBrownoutWarningVolts`; no brownout in `Power/FilteredVoltage`; `Power/Scalar/LOW` is the first to drop, and the intake stops rocking while it is below 1. |
+| 8.3 | A full re-test with `kTuningMode` false, already so on this branch. | Everything above still passes with nothing live-editable. |
+| 8.4a | **The coast release.** Disable after a drive; wait. | About 5 s after disable, with the robot still, `Drive/BrakeMode` goes false and the robot pushes freely; the intake and turret stay in brake. Every enable restores brake. |
+| 8.4 | Practice-bot identity (§5.5). **Enter both serials first (step 1.9)**: `getRobot()` raises a *blocking* error for an unknown roboRIO, so an unentered serial means the robot will not shoot. | Each robot resolves to itself, with no "Unknown roboRIO" alert, and the practice robot reads `Constants.PracticeRobot`'s offsets. |
 
 ---
 
